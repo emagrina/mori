@@ -58,21 +58,31 @@ It has no account, no cloud, no telemetry and no network functionality.
 
 Every feature is described in [docs/features.md](docs/features.md).
 
-## Install (macOS)
+## Install
 
-1. Download `Mori_<version>_aarch64.dmg` from the [Releases](../../releases) page. Optionally, check that its SHA-256 matches the release's `SHA256SUMS.txt`: `shasum -a 256 Mori_*.dmg`.
-2. Open the DMG and drag **Mori** into **Applications**.
-3. Open Mori from Applications.
+Download the file for your system from the [Releases](../../releases) page, plus `SHA256SUMS.txt` if you want to check the download (`shasum -a 256 -c SHA256SUMS.txt --ignore-missing` on macOS and Linux).
 
-**Mori is not yet signed with an Apple Developer ID or notarized by Apple.** The first time you open it, macOS shows *"Apple could not verify “Mori” is free of malware…"* and doesn't open it. To allow this one app:
+| System | File |
+|---|---|
+| macOS, Apple Silicon | `Mori_<version>_macOS_arm64.dmg` |
+| macOS, Intel | `Mori_<version>_macOS_x64.dmg` |
+| Windows 10/11 (x64) | `Mori_<version>_Windows_x64-setup.exe` or `.msi` |
+| Linux (x64) | `Mori_<version>_Linux_x64.AppImage` or `.deb` |
 
-- **macOS 15 (Sequoia) and later:**
-  1. Click **Done**.
-  2. Open **System Settings → Privacy & Security**.
-  3. Next to *"Mori" was blocked…*, click **Open Anyway**, then confirm with your password.
-- **macOS 14 and earlier:** Control-click Mori in Applications, choose **Open**, then **Open** again.
+**Mori isn't signed with a publisher certificate yet**, so each system warns once. Never disable Gatekeeper, SmartScreen or any other protection to run it.
 
-macOS remembers the choice for that copy of Mori. There is no need to disable Gatekeeper or change any system-wide setting.
+- **macOS:**
+  1. Open the DMG and drag **Mori** into **Applications**.
+  2. The first launch shows *"Apple could not verify “Mori” is free of malware…"*.
+  3. On macOS 15 and later, click **Done**, then **System Settings → Privacy & Security → Open Anyway**, and confirm. On macOS 14 and earlier, Control-click Mori → **Open** → **Open**.
+- **Windows:**
+  1. Run the installer.
+  2. SmartScreen shows *"Windows protected your PC"* (Unknown publisher): click **More info → Run anyway**.
+  3. If Microsoft Edge WebView2 is missing (Windows 11 includes it), the installer downloads it from Microsoft.
+- **Linux:**
+  - **AppImage:** `chmod +x` it and run it. It needs FUSE 2: `libfuse2` on Ubuntu 22.04, `libfuse2t64` on 24.04.
+  - **Debian/Ubuntu:** `sudo apt install ./Mori_<version>_Linux_x64.deb`.
+  - **Video and audio** need the system's GStreamer plugins.
 
 **Portable use:** Mori can also run from an external drive (for example `Drive/Mori/Mori.app`). It then opens that drive automatically.
 
@@ -134,10 +144,12 @@ Alternatively, delete the app and the folders above.
 
 | Platform | Status |
 |---|---|
-| **macOS on Apple Silicon** | Supported. Tested on macOS 26. The declared minimum is macOS 11, but older versions haven't been tested. |
-| macOS on Intel | Not built for 1.0. |
-| Windows | The code compiles for Windows, but it hasn't been built or tested there. Its worker has resource limits but no file-denying sandbox. |
-| Linux | Structurally supported but untested. |
+| **macOS, Apple Silicon** | Supported. Tested by hand on macOS 26, plus the automated tests. The declared minimum is macOS 11; older versions haven't been tested. |
+| **macOS, Intel** | Built and tested natively in CI. Launched under Rosetta, not yet on Intel hardware. |
+| **Windows x64** | Built and unit-tested in CI; not yet tested by hand. Decoder workers have resource limits but no OS sandbox denying them file access. |
+| **Linux x64** | Built and tested in CI (unit and worker tests); not yet tested by hand. Workers use resource limits and `no_new_privs`, without seccomp. |
+
+HEIC previews, PDF previews, new-drive detection and Undo for Trash are macOS-only.
 
 ## Building from source
 
