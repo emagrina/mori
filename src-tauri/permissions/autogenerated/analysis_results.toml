@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-analysis-results"
+description = "Enables the analysis_results command without any pre-configured scope."
+commands.allow = ["analysis_results"]
+
+[[permission]]
+identifier = "deny-analysis-results"
+description = "Denies the analysis_results command without any pre-configured scope."
+commands.deny = ["analysis_results"]

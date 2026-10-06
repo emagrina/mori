@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-analysis-cleanup"
+description = "Enables the analysis_cleanup command without any pre-configured scope."
+commands.allow = ["analysis_cleanup"]
+
+[[permission]]
+identifier = "deny-analysis-cleanup"
+description = "Denies the analysis_cleanup command without any pre-configured scope."
+commands.deny = ["analysis_cleanup"]

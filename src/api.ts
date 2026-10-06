@@ -100,6 +100,114 @@ export interface Settings {
   searchGlobal: boolean;
 }
 
+export interface Failure {
+  /** Display-only path (sanitised). */
+  path: string;
+  reason: string;
+}
+
+export interface TrashSummary {
+  files: number;
+  folders: number;
+  bytes: number;
+}
+
+export interface TrashResult {
+  trashed: string[];
+  bytes: number;
+  failed: Failure[];
+}
+
+// ------------------------------------------------------ duplicate analyzer
+
+export type AnalysisKind = "images" | "videos" | "documents" | "audio" | "other";
+
+export interface LocationInfo {
+  /** Opaque key ("library", "pictures", "custom-0"…); the UI never sends paths. */
+  key: string;
+  label: string;
+  path: string;
+  /** Storage device the folder is on. */
+  drive: string;
+}
+
+export type AnalysisStage = "collecting" | "comparingSizes" | "fingerprinting" | "verifying" | "done";
+
+export interface AnalysisProgress {
+  stage: AnalysisStage;
+  filesTotal: number;
+  filesDone: number;
+  bytesTotal: number;
+  bytesDone: number;
+  groups: number;
+  recoverable: number;
+}
+
+export interface AnalysisDone {
+  status: "done" | "cancelled" | "failed";
+  message: string | null;
+}
+
+export interface DupFile {
+  id: string;
+  name: string;
+  path: string;
+  location: string;
+  drive: string;
+  size: number;
+  modified: number;
+  created: number | null;
+  kind: Exclude<Kind, "folder">;
+  ext: string;
+}
+
+/** One copy of the content: a file, or both halves of a Live Photo. */
+export interface DupMember {
+  files: DupFile[];
+  /** Half of a Live Photo whose other half isn't duplicated: never trashed alone. */
+  locked: boolean;
+}
+
+export interface DupGroup {
+  index: number;
+  live: boolean;
+  unitSize: number;
+  recoverable: number;
+  suggested: number;
+  members: DupMember[];
+}
+
+export interface AnalysisStats {
+  scanned: number;
+  emptyIgnored: number;
+  unreadable: number;
+  changed: number;
+  hardlinksSkipped: number;
+  livePairs: number;
+}
+
+export interface AnalysisView {
+  locations: LocationInfo[];
+  stats: AnalysisStats;
+  groups: DupGroup[];
+}
+
+export interface PlanItem {
+  group: number;
+  /** Member indexes to move to Trash. */
+  trash: number[];
+}
+
+export interface CleanupOutcome {
+  trashedFiles: number;
+  trashedBytes: number;
+  keptFiles: number;
+  groupsCleaned: number;
+  groupsSkipped: number;
+  failures: Failure[];
+  cancelled: boolean;
+}
+
 export const api = {
   init: () => invoke<InitInfo>("init"),
   updateSettings: (s: Settings) => invoke<void>("update_settings", { ...s }),
@@ -117,6 +225,19 @@ export const api = {
   revealFile: (id: string) => invoke<void>("reveal_file", { id }),
   copyPath: (id: string) => invoke<string>("copy_path", { id }),
   takeRecovered: () => invoke<string[]>("take_recovered"),
+  trashSummary: (ids: string[]) => invoke<TrashSummary>("trash_summary", { ids }),
+  /** Moves items to the system Trash / Recycle Bin. Never deletes permanently. */
+  trashItems: (ids: string[]) => invoke<TrashResult>("trash_items", { ids }),
+  /** Returns the item's new id. Never overwrites an existing item. */
+  renameItem: (id: string, name: string) => invoke<string>("rename_item", { id, name }),
+  analysisLocations: () => invoke<LocationInfo[]>("analysis_locations"),
+  analysisChooseFolder: () => invoke<LocationInfo>("analysis_choose_folder"),
+  analysisStart: (locations: string[], kinds: AnalysisKind[], recursive: boolean) => invoke<void>("analysis_start", { locations, kinds, recursive }),
+  analysisCancel: () => invoke<void>("analysis_cancel"),
+  analysisResults: () => invoke<AnalysisView | null>("analysis_results"),
+  analysisClear: () => invoke<void>("analysis_clear"),
+  analysisCleanup: (plan: PlanItem[]) => invoke<CleanupOutcome>("analysis_cleanup", { plan }),
+  analysisCleanupCancel: () => invoke<void>("analysis_cleanup_cancel"),
 };
 
 /**
@@ -398,3 +519,8 @@ export function typeLabel(e: Entry): string {
 export const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 
 export const isMac = navigator.userAgent.includes("Mac");
+
+export const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/** Display entry for an analyzer file (the preview and thumbnails work by id). */
+export const dupEntry = (f: DupFile): Entry => ({ id: f.id, name: f.name, path: f.path, ext: f.ext, kind: f.kind, size: f.size, modified: f.modified, created: f.created });

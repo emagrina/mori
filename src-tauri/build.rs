@@ -21,6 +21,17 @@ const COMMANDS: &[&str] = &[
     "ui_alive",
     "video_session_end",
     "take_recovered",
+    "trash_summary",
+    "trash_items",
+    "rename_item",
+    "analysis_locations",
+    "analysis_choose_folder",
+    "analysis_start",
+    "analysis_cancel",
+    "analysis_results",
+    "analysis_clear",
+    "analysis_cleanup",
+    "analysis_cleanup_cancel",
 ];
 
 fn main() {

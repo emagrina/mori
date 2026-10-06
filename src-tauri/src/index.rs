@@ -145,7 +145,7 @@ pub fn parent_of(path: &str) -> &str {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Index {
     pub version: u32,
     pub root: String,
@@ -172,6 +172,43 @@ impl Index {
         for (i, e) in self.dirs.iter().enumerate() {
             self.by_id.insert(e.id, (true, i));
         }
+    }
+
+    /// Remove items (and everything below removed folders) after they were
+    /// moved to the Trash, so views update without a rescan.
+    pub fn remove_paths(&mut self, rels: &[String]) {
+        let hit = |p: &str| {
+            rels.iter()
+                .any(|r| p == r || (p.len() > r.len() && p.as_bytes()[r.len()] == b'/' && p.starts_with(r.as_str())))
+        };
+        self.files.retain(|e| !hit(&e.path));
+        self.dirs.retain(|e| !hit(&e.path));
+        self.build_lookup();
+    }
+
+    /// Apply a rename of `old` → `new` (file or folder, including its contents).
+    pub fn rename_path(&mut self, old: &str, new: &str) {
+        let new_name = new.rsplit('/').next().unwrap_or(new).to_owned();
+        for e in self.files.iter_mut().chain(self.dirs.iter_mut()) {
+            if e.path == old {
+                e.path = new.to_owned();
+                e.name = new_name.clone();
+                if e.kind != Kind::Folder {
+                    e.ext = match new_name.rfind('.') {
+                        Some(i) if i > 0 => new_name[i + 1..].to_lowercase(),
+                        _ => String::new(),
+                    };
+                    e.kind = kind_for_ext(&e.ext);
+                }
+            } else if e.path.len() > old.len() && e.path.as_bytes()[old.len()] == b'/' && e.path.starts_with(old) {
+                e.path = format!("{new}{}", &e.path[old.len()..]);
+            } else {
+                continue;
+            }
+            e.key = fold(&e.path);
+            e.id = id_for(&e.path);
+        }
+        self.build_lookup();
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry> {
@@ -232,7 +269,7 @@ const PACKAGE_EXT: &[&str] = &[
 ];
 
 /// Folders and files that are never worth showing in a media browser.
-fn should_skip(name: &str, is_dir: bool) -> bool {
+pub fn should_skip(name: &str, is_dir: bool) -> bool {
     if name.starts_with('.') {
         return true;
     }
@@ -779,6 +816,26 @@ mod tests {
         assert_eq!(names(&inner), ["Photos/Family/2025/birthday.jpg", "Photos/Family/2025/party.mp4"]);
         // Root + recursive = everything.
         assert_eq!(query(&idx, &Query { folder: String::new(), recursive: true, ..base.clone() }).items.len(), 8);
+    }
+
+    #[test]
+    fn removal_and_rename_update_in_place() {
+        let d = family_tree();
+        let mut idx = scan_tree(&d);
+        let n = idx.files.len();
+        idx.remove_paths(&["Photos/Family/2024".into(), "Photos/random.jpg".into()]);
+        assert_eq!(idx.files.len(), n - 3);
+        assert!(idx.dirs.iter().all(|e| e.path != "Photos/Family/2024"));
+        assert!(idx.get(&id_str(id_for("Photos/Family/2024/beach.jpg"))).is_none());
+
+        idx.rename_path("Photos/Family", "Photos/Familia");
+        assert!(idx.get(&id_str(id_for("Photos/Familia/2025/party.mp4"))).is_some());
+        assert!(idx.get(&id_str(id_for("Photos/Family/sister.jpg"))).is_none());
+        idx.rename_path("Photos/Familia/sister.jpg", "Photos/Familia/hermana.png");
+        let e = idx.get(&id_str(id_for("Photos/Familia/hermana.png"))).unwrap();
+        assert_eq!((e.name.as_str(), e.ext.as_str()), ("hermana.png", "png"));
+        let found = query(&idx, &Query { search: "hermana".into(), global: true, ..Default::default() });
+        assert_eq!(found.items.len(), 1, "search sees the new name");
     }
 
     #[test]

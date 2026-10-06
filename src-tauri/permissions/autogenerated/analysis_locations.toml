@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-analysis-locations"
+description = "Enables the analysis_locations command without any pre-configured scope."
+commands.allow = ["analysis_locations"]
+
+[[permission]]
+identifier = "deny-analysis-locations"
+description = "Denies the analysis_locations command without any pre-configured scope."
+commands.deny = ["analysis_locations"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-analysis-choose-folder"
+description = "Enables the analysis_choose_folder command without any pre-configured scope."
+commands.allow = ["analysis_choose_folder"]
+
+[[permission]]
+identifier = "deny-analysis-choose-folder"
+description = "Denies the analysis_choose_folder command without any pre-configured scope."
+commands.deny = ["analysis_choose_folder"]

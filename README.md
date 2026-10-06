@@ -30,7 +30,17 @@ Mori is a small desktop app (Tauri + Rust + React) that you can keep on an exter
 - **Portable mode.** When run from an external drive, Mori opens that drive automatically. Otherwise it asks for a folder once and remembers it.
 - **Local caching and indexing.** A small index and thumbnail cache stay on the computer. **Clear cache** removes them.
 - **Light and dark interface** that follows the system setting.
-- **Read-only.** Mori never renames, moves, deletes or writes next to your files.
+- **Safe file management.**
+  - Rename, and **Move to Trash** (the system Trash / Recycle Bin, so items can be restored). Mori has no permanent-delete function.
+  - Multi-selection with Cmd/Ctrl+Click and Shift+Click; ⌘⌫ on macOS, Delete on Windows.
+  - Several items or a folder ask for confirmation first. Views, search results and the index update immediately.
+- **Duplicate Analyzer** (Tools → Find Duplicates), which only runs when you start it.
+  - **Scope:** you choose the locations (the current drive, Home, Pictures, Movies/Videos, Downloads, Documents or any folder you pick), the file types, and whether to include subfolders.
+  - **Exact duplicates only.** Files are grouped by size, then a partial fingerprint, then a full BLAKE3 hash of the content. Names, dates and visual similarity are never used, and media is never decoded.
+  - **Live Photos.** A HEIC/JPEG + MOV pair with the same name in the same folder is treated as one item: both halves are kept or trashed together.
+  - **Review before anything changes.** You pick the copy to keep per group, or auto-select the suggested copies, then confirm in a final review. Only that last step moves files to the Trash.
+  - **Never removes every copy.** At least one copy of every group is always kept, and this is enforced in the Rust backend, not just the UI. Kept copies are re-checked just before cleanup; if one has changed or its drive is gone, that group is left untouched.
+  - **Private results.** Results stay in memory and are discarded with **Clear Analysis** or when Mori quits.
 
 ### Not implemented yet
 
@@ -38,8 +48,7 @@ These have been discussed for Mori but **are not in the code yet**:
 
 - HEIC / HEIF previews. HEIC files are listed but shown as *Preview not supported*.
 - Apple Live Photos (Still / Live / Loop modes).
-- Duplicate file analyzer and exact-duplicate detection.
-- Safe Trash / Recycle Bin operations. Mori is currently strictly read-only.
+- Detection of *similar* (not byte-identical) images.
 
 ## Security design
 
@@ -56,7 +65,11 @@ Mori treats every file on a drive as **untrusted input**. It is designed to redu
   - Each IPC command is allow-listed individually.
   - Every path is canonicalized and confined to the selected folder, and symlinks are never followed.
 - **No networking.** A strict Content-Security-Policy blocks every remote origin, and the Rust side has no network code.
-- **Read-only access** to your files wherever possible (currently everywhere).
+- **Conservative file changes.**
+  - Browsing and analysis are read-only.
+  - The only changes Mori can make are a rename (which never overwrites an existing item) and moving items to the system Trash, always as an explicit user action.
+  - Symlinks are never followed or acted on.
+  - The Duplicate Analyzer reads only the folders you select. A folder picked with *Choose a Folder…* is remembered only for the current session.
 - **Resource limits.**
   - Decoders have pixel, memory, input-size and time limits.
   - At most three workers run at once.
@@ -98,14 +111,14 @@ The macOS build is not signed with a Developer ID. A copy that came from another
 
 ## Data stored on your computer
 
-Mori writes nothing to the browsed drive. Everything lives in per-user app directories:
+Mori stores nothing on the browsed drive. It changes your files only when you rename an item or move it to the Trash (on an external drive, the system keeps trashed items in that drive's own Trash folder). Everything Mori itself stores lives in per-user app directories:
 
 | | macOS | Windows |
 |---|---|---|
 | Settings, index, video blocklist | `~/Library/Application Support/app.mori.viewer/` | `%APPDATA%\app.mori.viewer\` |
 | Thumbnail cache | `~/Library/Caches/app.mori.viewer/thumbs/` | `%LOCALAPPDATA%\app.mori.viewer\thumbs\` |
 
-Thumbnails are small re-encodes stored under hash names. Full-size previews are kept only in memory.
+Thumbnails are small re-encodes stored under hash names. Full-size previews are kept only in memory. Duplicate Analyzer results, and thumbnails of analyzed files outside the browsed drive, are never written to disk.
 
 ## Platform status
 

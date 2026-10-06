@@ -72,12 +72,14 @@ fn ok(bytes: Vec<u8>, mime: &str, cache: bool) -> Response<Vec<u8>> {
 }
 
 /// Open a file by id, re-validating that it lives inside the root.
+/// Open a browser or analyzer file by id, confined to its authorised root.
 fn open(state: &AppState, id: &str) -> Option<(File, std::fs::Metadata, std::path::PathBuf, String)> {
-    let root = state.root_canon()?;
-    let idx = state.index();
-    let entry = idx.file(id)?;
-    let (file, meta, canon) = secure::open_inside(&root, &entry.path).ok()?;
-    Some((file, meta, canon, entry.ext.clone()))
+    let loc = state.locate(id).ok()?;
+    if loc.is_dir {
+        return None;
+    }
+    let (file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).ok()?;
+    Some((file, meta, canon, loc.ext))
 }
 
 fn sniff_file(file: &mut File, ext: &str) -> Detected {
@@ -86,30 +88,56 @@ fn sniff_file(file: &mut File, ext: &str) -> Detected {
     secure::sniff(&head, ext)
 }
 
+/// Files outside the browsed folder (analyzer results elsewhere) never get
+/// their thumbnails written to disk.
+fn volatile(state: &AppState, canon: &std::path::Path) -> bool {
+    state.root_canon().is_none_or(|root| !canon.starts_with(root))
+}
+
 fn thumbnail(state: &AppState, id: &str) -> Response<Vec<u8>> {
     let Some((mut file, meta, canon, ext)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
     let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, THUMB_SIZE);
-    if let Some((bytes, mime)) = crate::thumbs::cached(&stem) {
-        return ok(bytes, mime, true);
+    let mem = volatile(state, &canon);
+    if mem {
+        match state.volatile_thumbs.get(&stem) {
+            Some(Some((bytes, mime))) => return ok(bytes, mime, true),
+            Some(None) => return status(StatusCode::NOT_FOUND),
+            None => {}
+        }
+    } else {
+        if let Some((bytes, mime)) = crate::thumbs::cached(&stem) {
+            return ok(bytes, mime, true);
+        }
+        if crate::thumbs::is_miss(&stem) {
+            return status(StatusCode::NOT_FOUND);
+        }
     }
-    if crate::thumbs::is_miss(&stem) {
-        return status(StatusCode::NOT_FOUND);
-    }
+    let miss = |stem: &std::path::Path| {
+        if mem {
+            state.volatile_thumbs.put(stem, None);
+        } else {
+            crate::thumbs::mark_miss(stem); // never retried automatically
+        }
+    };
     if !sniff_file(&mut file, &ext).is_image() {
         // Videos get a thumbnail from a webview-captured frame (see `store_frame`).
         return status(StatusCode::NOT_FOUND);
     }
     let Ok(input) = secure::read_limited(file, &meta, worker::MAX_INPUT) else {
-        crate::thumbs::mark_miss(&stem);
+        miss(&stem);
         return status(StatusCode::PAYLOAD_TOO_LARGE);
     };
     match worker::run(Op::Thumb, THUMB_SIZE, input, THUMB_TIMEOUT) {
         Ok(out) => {
-            crate::thumbs::store(&stem, &out);
+            if mem {
+                state.volatile_thumbs.put(&stem, Some((out.bytes.clone(), out.format.mime())));
+            } else {
+                crate::thumbs::store(&stem, &out);
+            }
             ok(out.bytes, out.format.mime(), true)
         }
         Err(_) => {
-            crate::thumbs::mark_miss(&stem); // never retried automatically
+            miss(&stem);
             status(StatusCode::UNPROCESSABLE_ENTITY)
         }
     }
@@ -226,20 +254,19 @@ pub fn store_frame(state: &AppState, id: &str, png: Vec<u8>) -> bool {
         return false;
     }
     let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, THUMB_SIZE);
-    if png.is_empty() || png.len() > 16 * 1024 * 1024 {
-        crate::thumbs::mark_miss(&stem);
-        return false;
+    let mem = volatile(state, &canon);
+    let result = if png.is_empty() || png.len() > 16 * 1024 * 1024 {
+        None
+    } else {
+        worker::run(Op::Frame, THUMB_SIZE, png, THUMB_TIMEOUT).ok()
+    };
+    match (result, mem) {
+        (Some(out), true) => state.volatile_thumbs.put(&stem, Some((out.bytes, out.format.mime()))),
+        (Some(out), false) => crate::thumbs::store(&stem, &out),
+        (None, true) => state.volatile_thumbs.put(&stem, None),
+        (None, false) => crate::thumbs::mark_miss(&stem),
     }
-    match worker::run(Op::Frame, THUMB_SIZE, png, THUMB_TIMEOUT) {
-        Ok(out) => {
-            crate::thumbs::store(&stem, &out);
-            true
-        }
-        Err(_) => {
-            crate::thumbs::mark_miss(&stem);
-            false
-        }
-    }
+    state.volatile_thumbs.get(&stem).is_some_and(|v| v.is_some()) || (!mem && crate::thumbs::cached(&stem).is_some())
 }
 
 // --------------------------------------------------------- preview cache

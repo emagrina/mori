@@ -40,7 +40,19 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 - *Open in system* runs only when you click it, and only for passive formats (photos, video, audio, PDF, text, Office documents). It is refused for anything whose content is executable (Mach-O, PE, ELF, `#!` scripts) or contradicts its extension. Mori launches the OS opener directly (`/usr/bin/open`, `explorer.exe`) with an argument array and never uses a shell.
 - The scanner never follows symlinks and never enters other mounted filesystems. It indexes only regular files and folders (no devices, FIFOs or sockets), stops 64 levels deep, and skips names that aren't valid Unicode.
 
-**Mori is read-only and quiet.** It opens files for reading only, and has no rename, move or delete. Release builds log nothing. Search history is not stored.
+**Mori is quiet and conservative about changes.** Browsing, previews and duplicate analysis open files for reading only. Release builds log nothing. Search history is not stored.
+
+**File changes** are limited to two operations, each triggered only by an explicit user action and implemented in `src-tauri/src/fileops.rs`:
+
+- **Rename.** The new name is validated: no separators, `..`, leading dots, control or bidi characters, reserved Windows names, or trailing dots/spaces. The rename is atomic and never replaces an existing item (`renamex_np(RENAME_EXCL)` / `renameat2(RENAME_NOREPLACE)` / `MoveFileExW` without `REPLACE_EXISTING`).
+- **Move to Trash** through the OS Trash / Recycle Bin (`NSFileManager` on macOS, the shell on Windows, freedesktop trash on Linux). There is no permanent-delete code path. If the platform refuses, the item stays where it is and the failure is reported.
+- **Target checks.** Before either operation, the parent folder is canonicalized and must lie inside the selected root. The item itself must be a regular file or folder, never a symlink, and never the root.
+
+**Duplicate Analyzer.**
+- **Scope.** It reads only the locations you select. The UI sends opaque keys, not paths, and a folder chosen with the native picker is authorized for the current session only.
+- **Exact matches only.** Comparison uses raw bytes (size, a partial fingerprint, then a streaming BLAKE3 hash with a fixed-size buffer). Nothing is decoded.
+- **Cleanup safety.** A cleanup plan is validated in Rust: every group must keep at least one copy, and half of a Live Photo can't be trashed alone. Before each group is cleaned, the kept copies are re-checked (still present, same size and modification time, same fingerprint), and each file to be trashed is re-checked too. Only files the OS actually moved are reported as removed.
+- **Privacy.** Results and hashes live only in memory. Thumbnails of analyzed files outside the browsed root are also kept only in memory, and Clear Analysis drops them.
 
 Known limits: on Windows the worker relies on Job object limits and the absence of any path, not on a filesystem-denying sandbox. Linux uses rlimits and `no_new_privs`, without seccomp yet. Video decoding trusts the OS webview's sandbox. Crash/hang recovery of the web content process is implemented for macOS; on Windows a hung WebView2 page is reloaded, without process termination. WebM thumbnails usually fall back to an icon because WebKit doesn't expose WebM frames to a canvas.
 
