@@ -111,6 +111,37 @@ Mori is **not** an antivirus, a malware guarantee, a perfect sandbox, or a foren
   Names with a high-attention pattern get a small warning mark in the file list.
 - **Symbolic links** are listed and described (where they point, and whether that is outside the folder). They are **never followed**: not when browsing, scanning, searching, analysing or opening. A link to `/` or a link loop cannot pull anything into Mori.
 
+### Open in Isolation
+
+- **Open in Isolation** (file menu) shows a file using only copies made by Mori's sandboxed worker. The original is never opened in another app, never run, and the view has no *Open* button.
+  - Images: the worker's re-encoded copy.
+  - Videos: eight still frames sampled across the video, each re-encoded by the worker. No player is shown. (The frames are decoded by the system web view's own sandboxed media engine, under the same probe, blocklist and watchdog as normal playback.)
+  - PDFs: pages rasterised by the worker (see below).
+  - Text: plain text. Archives: a listing.
+  - Anything else: *Preview unavailable* plus the factual report (detected type, extension check, findings). There is never a fallback to the original.
+
+### Safe Inspection Mode (new drives)
+
+- When a drive Mori has never seen is connected while Mori runs, Mori offers **Inspect Safely with Mori**.
+- A drive opened that way is indexed from filesystem metadata only (names, sizes, dates; the scanner never reads file contents), and **nothing is decoded automatically**: thumbnails, previews and video frames are refused by the backend. A banner shows *SAFE INSPECTION MODE · Files indexed N · Media decoded N*.
+- Opening a file is an explicit request and always shows it isolated.
+- **Generate previews** allows automatic thumbnails for that drive (remembered per volume UUID). **Browse metadata only** keeps it as it is and collapses the banner.
+
+### PDF preview
+
+- Pages are rendered to bitmaps by macOS CoreGraphics **inside the sandboxed worker**, with page thumbnails, page navigation (Page Up / Page Down) and zoom.
+- Nothing interactive exists: no JavaScript, actions, links, forms, attachments or network. Their presence is reported ("Contains JavaScript, automatic actions… — not run").
+- Encrypted (locked) or unreadable PDFs show *Preview unavailable* and the file report. PDF preview is macOS-only for now.
+
+### Archive inspection
+
+- ZIP (and JAR, Office Open XML, OpenDocument, EPUB), TAR and gzip / tar.gz are **listed, never extracted**: names, sizes, compressed sizes, links, encryption.
+- Flags per entry: `../` traversal, absolute or drive-letter paths, hidden characters, nested archives, extreme compression. Archive-level findings: zip-bomb ratios, too many entries, nesting depth.
+- Limits: 200,000 entries, 5,000 listed, 3 nesting levels (nested archives up to 64 MB are listed in memory), 512 MB total inflation for gzip/nested data, 20 s.
+
+![Safe PDF preview](docs/images/phase2/pdf.jpg)
+![Archive listing](docs/images/phase2/archive.jpg)
+
 ### Read-only Mode and protected folders
 
 - **Read-only Mode** (More menu) makes Mori refuse every change to your files: rename, Trash, and every future destructive operation.
@@ -187,6 +218,8 @@ Mori stores nothing on the browsed drive. It changes your files only when you re
 | Similar-media fingerprints | `~/Library/Caches/app.mori.viewer/similar/` | `%LOCALAPPDATA%\app.mori.viewer\similar\` |
 | "Not duplicates" decisions | `…/app.mori.viewer/similar-dismissed.bin` | `%APPDATA%\app.mori.viewer\similar-dismissed.bin` |
 | Private folders | `…/app.mori.viewer/private-folders.json` | `%APPDATA%\app.mori.viewer\private-folders.json` |
+| Protected folders | `…/app.mori.viewer/protected-folders.json` | `%APPDATA%\app.mori.viewer\protected-folders.json` |
+| Known drives (Safe Inspection Mode) | `…/app.mori.viewer/drives.json` | `%APPDATA%\app.mori.viewer\drives.json` |
 
 Thumbnails are small re-encodes stored under hash names. Full-size previews are kept only in memory. Analysis results, and thumbnails of analyzed files outside the browsed drive, are never written to disk. Similar-media fingerprints are 64×64 grayscale miniatures stored under hash names (no file names), and "not duplicates" decisions are stored as pairs of content hashes (no names or paths).
 

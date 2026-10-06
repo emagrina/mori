@@ -36,7 +36,7 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 **Nothing is executed and nothing reaches the network.**
 - The webview CSP is `default-src 'none'`, plus scripts and styles from the bundle, images and media from `mori:` only, and IPC. Prototypes are frozen, and navigation away from the bundled UI is blocked.
 - There's no `eval`, no `innerHTML`, and no file content inserted as markup. Names, paths, text and metadata are rendered as plain text, so URLs inside files are never clickable. Filenames have control and bidi-override characters replaced, so `photo\u202Egpj.exe` can't pose as a `.jpg`.
-- HTML, SVG and PDF are never rendered inside Mori.
+- HTML and SVG are never rendered inside Mori. PDFs are only ever shown as bitmaps rasterised by the sandboxed worker (see *PDFs* below).
 - *Open in system* runs only when you click it, and only for passive formats (photos, video, audio, PDF, text, Office documents). It is refused for anything whose content is executable (Mach-O, PE, ELF, `#!` scripts) or contradicts its extension. Mori launches the OS opener directly (`/usr/bin/open`, `explorer.exe`) with an argument array and never uses a shell.
 - The scanner never follows symlinks and never enters other mounted filesystems. It indexes only regular files and folders (no devices, FIFOs or sockets), stops 64 levels deep, and skips names that aren't valid Unicode.
 
@@ -76,6 +76,26 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Decisions:** "Not duplicates" decisions are stored as pairs of 16-byte content identities (size plus partial BLAKE3), with no names or paths.
 - **Cleanup:** uses the same validated executor as exact duplicates (at least one copy kept, kept copies re-checked, OS Trash only, Live Photo halves together).
 - **Failures:** a file that can't be decoded or sampled is reported as "could not safely analyze" and remembered until it changes; the rest of the analysis continues.
+
+## PDFs (macOS)
+
+- **Where.** `pdf.rs` runs only inside the worker (`pdfinfo`, `pdfpage` ops). The UI receives JPEG bitmaps of pages and a short `key=value` fact list (page count, encryption, info fields, presence of JavaScript / OpenAction / embedded files / forms).
+- **Renderer.** CoreGraphics' PDF renderer draws page content only. It has no JavaScript engine and does not perform actions, follow links, open attachments or fetch anything.
+- **Sandbox.** PDF jobs use a dedicated deny-by-default profile. The only additions over pure computation are read access to system fonts and frameworks (needed to draw the standard fonts documents reference without embedding) and metadata reads under system paths. No IPC services, no IOKit, no writes, no network, no processes. `cargo test --test worker` checks both that text renders and that user files, writes, network and process creation are denied.
+- **Limits.** 160 MB input, 5,000 pages, page sizes up to 2,400 px, 25 s per page, absurd page boxes refused. Locked PDFs aren't rendered.
+
+## Archives
+
+- **Listing only.** `archive.rs` parses ZIP (central directory, ZIP64), TAR (ustar, pax and GNU long names) and gzip in the main process. Nothing is extracted or written; no entry is ever opened by another program.
+- **Why not the worker.** Parsing is bounded, memory-safe Rust over directory metadata (plus streaming inflate for gzip and nested archives, with hard byte caps). This is a deliberate deviation from worker isolation, documented here.
+- **Defences.** 200,000 entries, 128 MB central directory, 3 nesting levels, 64 MB per nested archive, 512 MB total inflation, 20 s time budget, `catch_unwind` around the whole listing. Declared sizes are never trusted for allocation.
+- **Findings.** Traversal (`../`), absolute and drive-letter paths, control characters, symlinks, encrypted entries, zip-bomb ratios, entry counts, nesting depth, and partial listings.
+
+## Open in Isolation and Safe Inspection Mode
+
+- **Isolation** is a view, not a container. The `mori://iso-*` routes are explicit per-file requests. The isolated view never offers *Open in system* and never falls back to the original. Video is shown as worker-re-encoded still frames (the frames themselves are decoded by the system web view's sandboxed media engine, behind the codec probe, blocklist and watchdog).
+- **Safe Inspection Mode** is enforced in the protocol handler. For files under a drive in this mode, `thumb`, `preview`, `media`, `frame` and `pdf` requests without the `iso-` prefix return 403, and `store_frame` refuses non-explicit frames. The UI also skips video-thumbnail capture. A counter records how many media were decoded since the drive was opened.
+- **Drive detection** polls `/Volumes` every 3 s for real, browsable mount points (macOS). Drives present at launch and drives Mori already knows are not announced. Nothing on the drive is read until you choose *Inspect Safely*.
 
 ## Mutation policy
 
