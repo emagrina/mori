@@ -52,6 +52,86 @@ export interface Status {
   decoded: number;
   /** Temporary session: nothing about this folder is saved. */
   temporary: boolean;
+  /** Private Inspection: temporary + read-only + Safe Inspection Mode. */
+  privateInspection: boolean;
+  /** Read-only in effect (the setting, or forced by Private Inspection). */
+  readOnly: boolean;
+}
+
+export interface Checksum {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  modified: number;
+  detected: string | null;
+  sha256: string;
+  cached: boolean;
+}
+
+export interface SnapshotInfo {
+  id: string;
+  label: string;
+  kind: "file" | "folder";
+  created: number;
+  files: number;
+  bytes: number;
+  skipped: { links: number; privateFolders: number; unreadable: number };
+  available: boolean;
+}
+
+export interface VerifyResult {
+  snapshot: SnapshotInfo;
+  unchanged: number;
+  changed: string[];
+  missing: string[];
+  added: string[];
+  unreadable: string[];
+}
+
+export interface IntegrityProgress {
+  stage: "listing" | "hashing";
+  files: number;
+  bytesDone: number;
+  bytesTotal: number;
+  paused: boolean;
+}
+
+export interface IntegrityDone {
+  status: "done" | "cancelled" | "failed";
+  kind: "save" | "verify";
+  message: string | null;
+  snapshot: SnapshotInfo | null;
+  result: VerifyResult | null;
+}
+
+export type DiagStatus = "pass" | "limited" | "fail" | "info";
+
+export interface DiagCheck {
+  section: "media" | "security" | "privacy" | "network" | "ephemeral" | "logging";
+  label: string;
+  status: DiagStatus;
+  value: string;
+  detail: string;
+}
+
+export type DataCategory = "cache" | "analysis" | "history" | "organization" | "rules" | "integrity" | "settings";
+
+export interface DataGroup {
+  category: DataCategory;
+  title: string;
+  what: string;
+  sensitivity: string;
+  bytes: number;
+  files: number;
+  locations: { path: string; bytes: number; files: number }[];
+}
+
+export interface LocalData {
+  groups: DataGroup[];
+  session: { temporary: boolean; checksums: number; history: number; analyses: number; thumbnailsInMemory: boolean };
+  dataDir: string;
+  cacheDir: string;
 }
 
 export interface TagInfo {
@@ -626,6 +706,25 @@ export const api = {
   openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
   /** "Generate previews" for the current drive (or back to metadata only). */
   setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** SHA-256, calculated locally; cached in memory for this session only. */
+  checksumFile: (id: string) => invoke<Checksum>("checksum_file", { id }),
+  checksumCancel: () => invoke<void>("checksum_cancel"),
+  /** Exact binary comparison by SHA-256 (not visual similarity). */
+  compareFiles: (a: string, b: string) => invoke<{ a: Checksum; b: Checksum; same: boolean }>("compare_files", { a, b }),
+  /** Opt-in local record in Mori's app data; refused in temporary sessions. */
+  integritySave: (id: string) => invoke<void>("integrity_save", { id }),
+  integrityVerify: (snapshot: string) => invoke<void>("integrity_verify", { snapshot }),
+  integrityPause: (paused: boolean) => invoke<void>("integrity_pause", { paused }),
+  integrityCancel: () => invoke<void>("integrity_cancel"),
+  integrityList: () => invoke<SnapshotInfo[]>("integrity_list"),
+  integrityDelete: (snapshot: string) => invoke<void>("integrity_delete", { snapshot }),
+  runDiagnostics: () => invoke<DiagCheck[]>("run_diagnostics"),
+  localData: () => invoke<LocalData>("local_data"),
+  /** Removes Mori's own data only. Never user files. */
+  clearMoriData: (categories: DataCategory[]) => invoke<number>("clear_mori_data", { categories }),
+  resetMori: () => invoke<number>("reset_mori"),
+  /** Temporary + read-only + Safe Inspection Mode. `key`: a newly connected drive; null: pick a folder. */
+  startPrivateInspection: (key: string | null) => invoke<Status>("start_private_inspection", { key }),
   /** Dry run: what an operation would do, and what the policy refuses. Nothing changes. */
   planOperation: (op: "trash" | "delete" | "overwrite", ids: string[]) => invoke<OperationPlan>("plan_operation", { op, ids }),
   /** Permanent: no Trash. `confirm` must be "DELETE" when the plan requires typed confirmation. */

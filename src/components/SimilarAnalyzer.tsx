@@ -665,10 +665,10 @@ function SimGroupCard({
         </div>
         <div className="dup-title">
           <div className="truncate">
-            {allExact ? "100% identical" : `${g.similarity}% estimated similarity`}
+            {allExact ? "Identical content (verified by hash)" : `${g.similarity}% estimated visual similarity`}
           </div>
           <div className="muted">
-            {allExact ? <span className="tag">Exact duplicate</span> : <span className="tag">Visually similar</span>}
+            {allExact ? <span className="tag">Exact duplicate</span> : <span className="tag" title="Looks alike; the files are not byte-identical. Use Compare Integrity for an exact SHA-256 check.">Visually similar</span>}
             {g.members.some((m) => m.files.length > 1) && <span className="tag">Live Photo</span>}
             {g.burst && (
               <span className="tag" title="Taken in quick succession by the same camera (from capture times)">
@@ -716,7 +716,7 @@ function SimGroupCard({
                     {m.files.length > 1 && ` + ${m.files[1].ext.toUpperCase()}`}
                   </span>
                   {i === 0 && <span className="tag suggested">★ Suggested original</span>}
-                  {i > 0 && (m.exact ? <span className="tag">Identical (verified)</span> : <span className="tag">{m.similarity}% similar</span>)}
+                  {i > 0 && (m.exact ? <span className="tag" title="Byte-for-byte identical, confirmed by a full content hash">Identical bytes (verified)</span> : <span className="tag">{m.similarity}% similar</span>)}
                 </div>
                 <div className="truncate muted" title={`${f.location}/${f.path}`}>
                   {[f.location, ...parentOf(f.path).split("/").filter(Boolean)].join(" / ")}

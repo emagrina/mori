@@ -63,7 +63,12 @@ impl Store {
         self.save(&d);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by Forget this drive (organization)
+    /// Forget every known drive (Clear Mori Data). The file is removed too.
+    pub fn clear(&self) {
+        self.data.lock().unwrap_or_else(PoisonError::into_inner).drives.clear();
+        let _ = fs::remove_file(&self.file);
+    }
+
     pub fn forget(&self, key: &str) {
         let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
         d.drives.retain(|x| x.key != key);
