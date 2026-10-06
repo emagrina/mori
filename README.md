@@ -142,6 +142,30 @@ Mori is **not** an antivirus, a malware guarantee, a perfect sandbox, or a foren
 ![Safe PDF preview](docs/images/phase2/pdf.jpg)
 ![Archive listing](docs/images/phase2/archive.jpg)
 
+### Metadata
+
+- **Get Info → Metadata** lists what a file carries: EXIF, XMP, IPTC, QuickTime/MP4 atoms (including Apple's location and device keys), ID3v2 tags and FLAC Vorbis comments.
+  - The default view shows the revealing fields. **Show all metadata** lists everything, grouped.
+  - Fields are tagged as Location, People & authors, Device, Software, Comments & descriptions, or Unique IDs.
+- **Analyze → Sensitive Metadata** scans photos, videos and audio in chosen locations and lists the files carrying such fields.
+  - Filter by category; pause, resume or cancel the scan.
+  - Private folders inside the chosen locations are skipped.
+  - Results stay in memory only.
+- **Places** shows every position found on an **offline map**.
+  - Bundled Natural Earth land outlines, clustering, zoom and pan.
+  - No tiles are loaded and no coordinates are sent anywhere (Google, Apple, Mapbox, OpenStreetMap or any other service).
+- **Create Sanitized Copy** (inspector, or for a selection in Sensitive Metadata) writes `name-sanitized.jpg` next to the original.
+  - Same pixels, no metadata. Only the orientation is kept, so the copy isn't shown rotated.
+  - JPEG, PNG and WebP up to 60 MB.
+  - The original is never modified. Mori never strips metadata in place.
+  - Each copy is verified **before** it is written: it decodes to the same dimensions and a fresh metadata read finds nothing left.
+  - It is then written with create-new semantics (never replacing a file, never through a symlink) and read back.
+  - Read-only Mode and Never Modify folders refuse it.
+
+![Metadata in Get Info](docs/images/phase3/inspector-metadata.jpg)
+![Sensitive Metadata](docs/images/phase3/sensitive-metadata.jpg)
+![Places (offline map)](docs/images/phase3/places.jpg)
+
 ### Read-only Mode and protected folders
 
 - **Read-only Mode** (More menu) makes Mori refuse every change to your files: rename, Trash, and every future destructive operation.

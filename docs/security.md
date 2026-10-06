@@ -91,6 +91,24 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Defences.** 200,000 entries, 128 MB central directory, 3 nesting levels, 64 MB per nested archive, 512 MB total inflation, 20 s time budget, `catch_unwind` around the whole listing. Declared sizes are never trusted for allocation.
 - **Findings.** Traversal (`../`), absolute and drive-letter paths, control characters, symlinks, encrypted entries, zip-bomb ratios, entry counts, nesting depth, and partial listings.
 
+## Metadata
+
+- **Parsing in the worker.** `metadata.rs` (EXIF via the pure-Rust `kamadak-exif`, plus Mori's own bounded readers for XMP, IPTC, MP4/QuickTime atoms, ID3v2 and FLAC) runs only in the worker, under the pure-computation sandbox.
+- **What the worker gets.**
+  - MP4/MOV: the `moov` box, located by walking box headers.
+  - Other files: the first 4 MB (scan) or 32 MB (inspector).
+  - Output is JSON; the host re-checks every string (control and bidi characters, lengths) and every coordinate.
+- **XMP is read as text.** There is no DTD, no entity definitions and no external references. Only the five XML entities and numeric references are decoded.
+- **Limits.** 1,500 fields, 400 characters per value, 2 MB XMP, MP4 nesting depth 8, 4,096 boxes per level, the exif crate's own IFD-count cap.
+- **One failure, one result.** Scans parse files in batches of 32 in one worker. If a batch's worker fails, each file is re-parsed in its own worker. Inside the worker each item is also isolated with `catch_unwind`.
+- **Sanitized copies.** `sanitize.rs` rewrites containers in the worker (no re-encoding).
+  - JPEG: only JFIF, ICC, Adobe and the image segments are kept; everything after the main image's EOI is dropped.
+  - PNG: a whitelist of image chunks.
+  - WebP: image chunks only, with the VP8X flags fixed.
+  - Verification before writing: the output must decode to the same dimensions as the original, and a fresh metadata read must find no sensitive field or position.
+  - Writing: `fileops::create_new` checks the mutation policy (`Create`), then `openat(O_CREAT|O_EXCL|O_NOFOLLOW)` under an `O_NOFOLLOW` directory handle. It never replaces anything and never writes through a symlink. The file is then read back and hashed.
+- **Map.** Land outlines are bundled (`src/assets/world.ts`, Natural Earth 1:110m, public domain). The CSP already blocks every remote origin, so even a bug couldn't load tiles.
+
 ## Open in Isolation and Safe Inspection Mode
 
 - **Isolation** is a view, not a container. The `mori://iso-*` routes are explicit per-file requests. The isolated view never offers *Open in system* and never falls back to the original. Video is shown as worker-re-encoded still frames (the frames themselves are decoded by the system web view's sandboxed media engine, behind the codec probe, blocklist and watchdog).
