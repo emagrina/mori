@@ -244,6 +244,11 @@ impl VideoGuard {
         }
     }
 
+    /// This file version stopped the media engine before (any media kind).
+    pub fn is_blocked(&self, key: &str) -> bool {
+        self.blocked.lock().unwrap_or_else(PoisonError::into_inner).contains(key)
+    }
+
     /// Cached probe for a file version (`key` = thumbnail-cache stem string).
     pub fn info(&self, key: &str, probe: impl FnOnce() -> VideoInfo) -> VideoInfo {
         if self.blocked.lock().unwrap_or_else(PoisonError::into_inner).contains(key) {
