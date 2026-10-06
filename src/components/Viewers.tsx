@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  audioUrl,
+  beginMediaSession,
   captureFrames,
+  SCRUB_FRAMES,
   formatDate,
   formatSize,
   frameUrl,
@@ -227,7 +230,7 @@ function ArchiveRow({ e, depth }: { e: ArchiveEntry; depth: number }) {
 
 // ----------------------------------------------------------- video frames
 
-const FRAMES = 8;
+const FRAMES = SCRUB_FRAMES;
 
 /**
  * Isolated video view: no <video> element is shown. Frames are sampled once,
@@ -305,6 +308,189 @@ export function FactsPanel({ entry }: { entry: Entry }) {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ audio
+
+/** Waveforms are computed only for files up to this size. */
+const WAVE_MAX_BYTES = 32 * 1024 * 1024;
+const WAVE_BINS = 600;
+
+/**
+ * Audio: played by the system engine from verified byte ranges, under the
+ * same media-session watchdog as video. The waveform is decoded at a low
+ * sample rate and only for files up to 32 MB, so memory stays bounded.
+ */
+export function AudioView({ entry, iso, onFail }: { entry: Entry; iso: boolean; onFail: () => void }) {
+  const audio = useRef<HTMLAudioElement>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [peaks, setPeaks] = useState<Float32Array | "skipped" | "failed" | null>(null);
+  const [pos, setPos] = useState(0);
+
+  useEffect(() => {
+    const a = audio.current;
+    if (!a) return;
+    let end: () => void = () => {};
+    let disposed = false;
+    beginMediaSession(entry.id).then(
+      (e) => {
+        if (disposed) return e();
+        end = e;
+        a.src = audioUrl(entry.id, iso);
+      },
+      () => onFail(),
+    );
+    const onTime = () => a.duration && setPos(a.currentTime / a.duration);
+    a.addEventListener("timeupdate", onTime);
+    a.addEventListener("error", onFail);
+    return () => {
+      disposed = true;
+      a.removeEventListener("timeupdate", onTime);
+      a.removeEventListener("error", onFail);
+      a.pause();
+      a.removeAttribute("src");
+      a.load();
+      end();
+    };
+  }, [entry.id]);
+
+  useEffect(() => {
+    if (entry.size > WAVE_MAX_BYTES) {
+      setPeaks("skipped");
+      return;
+    }
+    const ctrl = new AbortController();
+    (async () => {
+      try {
+        // Whole file in bounded chunks through the verified audio route.
+        const parts: Uint8Array[] = [];
+        let got = 0;
+        while (got < entry.size) {
+          const r = await fetch(audioUrl(entry.id, iso), { headers: { Range: `bytes=${got}-` }, signal: ctrl.signal });
+          if (!r.ok) throw new Error("range");
+          const b = new Uint8Array(await r.arrayBuffer());
+          if (!b.length) break;
+          parts.push(b);
+          got += b.length;
+        }
+        const all = new Uint8Array(got);
+        let o = 0;
+        for (const p of parts) {
+          all.set(p, o);
+          o += p.length;
+        }
+        const ctx = new OfflineAudioContext(1, 1, 3000);
+        const buf = await ctx.decodeAudioData(all.buffer);
+        const data = buf.getChannelData(0);
+        const bins = new Float32Array(WAVE_BINS);
+        const per = Math.max(1, Math.floor(data.length / WAVE_BINS));
+        for (let b = 0; b < WAVE_BINS; b++) {
+          let m = 0;
+          for (let i = b * per; i < Math.min(data.length, (b + 1) * per); i++) m = Math.max(m, Math.abs(data[i]));
+          bins[b] = m;
+        }
+        if (!ctrl.signal.aborted) setPeaks(bins);
+      } catch {
+        if (!ctrl.signal.aborted) setPeaks("failed");
+      }
+    })();
+    return () => ctrl.abort();
+  }, [entry.id]);
+
+  useEffect(() => {
+    const c = canvas.current;
+    if (!c || !(peaks instanceof Float32Array)) return;
+    const w = (c.width = c.clientWidth * devicePixelRatio);
+    const h = (c.height = c.clientHeight * devicePixelRatio);
+    const g = c.getContext("2d")!;
+    g.clearRect(0, 0, w, h);
+    const max = Math.max(0.0001, ...peaks);
+    const bw = w / peaks.length;
+    const style = getComputedStyle(c);
+    for (let i = 0; i < peaks.length; i++) {
+      const v = (peaks[i] / max) * (h / 2 - 2);
+      g.fillStyle = i / peaks.length <= pos ? style.getPropertyValue("--wave-played") || "#fff" : style.getPropertyValue("--wave") || "#666";
+      g.fillRect(i * bw, h / 2 - v, Math.max(1, bw - 1), v * 2 || 1);
+    }
+  }, [peaks, pos]);
+
+  return (
+    <div className="audio-view">
+      <Icon name="audio" size={56} />
+      <div className="name">{entry.name}</div>
+      <div
+        className="wave"
+        onClick={(e) => {
+          const a = audio.current;
+          if (!a?.duration) return;
+          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          a.currentTime = ((e.clientX - r.left) / r.width) * a.duration;
+        }}
+      >
+        {peaks instanceof Float32Array ? <canvas ref={canvas} /> : <div className="wave-note muted small">{peaks === null ? "Reading waveform…" : peaks === "skipped" ? "Waveform shown for files up to 32 MB" : "Waveform unavailable"}</div>}
+      </div>
+      <audio ref={audio} controls preload="metadata" controlsList="nodownload noremoteplayback" />
+    </div>
+  );
+}
+
+// -------------------------------------------------------------- filmstrip
+
+/**
+ * Frames along a video under the player. Uses frames already sampled
+ * (sanitized by the worker); sampling more is an explicit click.
+ */
+export function Filmstrip({ entry, onSeek }: { entry: Entry; onSeek: (fraction: number) => void }) {
+  const [ready, setReady] = useState<Set<number>>(() => new Set());
+  const [state, setState] = useState<"checking" | "none" | "busy" | "done">("checking");
+  useEffect(() => {
+    let alive = true;
+    setReady(new Set());
+    setState("checking");
+    // Probe the cache: an image that loads means the frame exists.
+    Promise.all(
+      Array.from(
+        { length: SCRUB_FRAMES },
+        (_, k) =>
+          new Promise<number | null>((r) => {
+            const i = new Image();
+            i.onload = () => r(k);
+            i.onerror = () => r(null);
+            i.src = frameUrl(entry.id, k);
+          }),
+      ),
+    ).then((ks) => {
+      if (!alive) return;
+      const s = new Set(ks.filter((k): k is number => k !== null));
+      setReady(s);
+      setState(s.size ? "done" : "none");
+    });
+    return () => {
+      alive = false;
+    };
+  }, [entry.id]);
+  const sample = () => {
+    setState("busy");
+    const ctrl = new AbortController();
+    captureFrames(entry.id, SCRUB_FRAMES, false, ctrl.signal, (k) => setReady((r) => new Set(r).add(k))).then(() => setState("done"));
+  };
+  if (state === "checking") return null;
+  if (state === "none") {
+    return (
+      <button className="btn small filmstrip-btn" onClick={sample}>
+        Show Filmstrip
+      </button>
+    );
+  }
+  return (
+    <div className="filmstrip">
+      {Array.from({ length: SCRUB_FRAMES }, (_, k) => (
+        <button key={k} disabled={!ready.has(k)} onClick={() => onSeek((k + 0.5) / SCRUB_FRAMES)} title={`Jump to ${Math.round(((k + 0.5) / SCRUB_FRAMES) * 100)}%`}>
+          {ready.has(k) ? <img src={frameUrl(entry.id, k)} alt="" draggable={false} /> : state === "busy" && <span className="dot-spinner" />}
+        </button>
+      ))}
     </div>
   );
 }

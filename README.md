@@ -129,6 +129,37 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 ![Tags](docs/images/phase6/tags.jpg)
 ![Forget This Drive](docs/images/phase6/forget-drive.jpg)
 
+### Keyboard and viewing
+
+| Key | Action |
+|---|---|
+| Arrow keys | Move the selection |
+| Return | Open the folder or the preview |
+| Space | **Mori Quick Look**: a floating preview inside Mori, never the system's Quick Look |
+| Esc | Close / clear |
+| `I` | Get Info |
+| `F` | Add to / remove from Favorites |
+| ⌘F / Ctrl+F | Search |
+| ⌘K / Ctrl+K | **Command palette**: every view, analysis and action, plus files and folders by name |
+| ⌘1 / ⌘2 / ⌘3 | List / Grid / Gallery |
+| ← → in a preview | Previous / next file |
+
+Shortcuts never fire while you type in a text field. *Keyboard Shortcuts* in the palette lists them all.
+
+- **Slideshow**: the play button in the preview steps through the photos every 4 seconds. Any key or click stops it.
+- **Filmstrip** under a playing video: eight frames along the video, re-encoded by the worker. Click one to jump there.
+- **Hover scrub**: moving the pointer across a video thumbnail shows those frames.
+  - Only frames already sampled are used.
+  - Lingering on a video asks for them in the background, through the thumbnail queue and never during a preview.
+  - They are refused in Safe Inspection Mode.
+- **Audio**: MP3, AAC/M4A, WAV, AIFF and FLAC (verified by magic bytes) play in the preview, with a waveform you can click to seek.
+  - The waveform is decoded at a low sample rate, and only for files up to 32 MB.
+  - Audio isn't played in the isolated view.
+
+![Command palette](docs/images/phase7/command-palette.jpg)
+![Audio with waveform](docs/images/phase7/audio.jpg)
+![Filmstrip](docs/images/phase7/filmstrip.jpg)
+
 ### Private folders
 
 Right-click a folder and choose **Make Private** to create a visibility boundary inside Mori. The folder stays where it is and opens normally, but its contents are no longer surfaced from outside it:

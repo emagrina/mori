@@ -152,6 +152,16 @@ The worker still receives only bytes, never a path. The same resource limits (di
   - Similar-media fingerprints are content-addressed and can't be attributed to a drive; Clear Cache removes them.
   - Thumbnails made before this version sit in the old shared layout until Clear Cache.
 
+## Audio, filmstrips and scrubbing
+
+- **The `mori://audio` route** serves bounded byte ranges only for MP3, AAC/M4A, WAV, AIFF and FLAC identified by magic bytes. A PNG or an executable named `.mp3` is refused (tested).
+  - The route respects Safe Inspection Mode and the media blocklist.
+  - Playback and the waveform decode run in the system web view's media engine, inside a media session, so the existing hang/crash recovery and blocklist cover them.
+  - The waveform is decoded at 3 kHz, only for files of at most 32 MB.
+  - The isolated view doesn't play audio, because that would be the original bytes.
+- **Filmstrip and hover-scrub frames** go through the same capture path as the isolated view: the webview decodes, the worker re-encodes, and the cache stores the copies. Non-explicit requests are refused in Safe Inspection Mode.
+- **Quick Look** is Mori's own preview in a floating panel. Mori never invokes the system Quick Look or any other viewer.
+
 ## Mutation policy
 
 - **One gate.** All changes to the user's files go through `fileops`, whose mutating functions (`move_to_trash`, `rename_no_replace`, and later operations) take a `&Policy` and call `policy.check` first.

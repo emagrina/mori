@@ -32,6 +32,7 @@ import { AnalysisCenter } from "./components/AnalysisCenter";
 import { HealthView } from "./components/HealthView";
 import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
 import { TagDialog, TagManager } from "./components/Organize";
+import { CommandPalette, ShortcutsHelp, type Command } from "./components/CommandPalette";
 import { StorageView } from "./components/StorageView";
 import { Preview } from "./components/Preview";
 import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
@@ -115,6 +116,10 @@ export default function App() {
   const [previewId, setPreviewId] = useState<string | null>(null);
   /** The preview was opened with "Open in Isolation". */
   const [previewIso, setPreviewIso] = useState(false);
+  /** The preview is Mori Quick Look (Space). */
+  const [previewQuick, setPreviewQuick] = useState(false);
+  const [palette, setPalette] = useState(false);
+  const [shortcuts, setShortcuts] = useState(false);
   /** A drive connected while Mori runs, offered for safe inspection. */
   const [newDrive, setNewDrive] = useState<ConnectedDrive | null>(null);
   /** The Safe Inspection banner was collapsed ("Browse metadata only"). */
@@ -198,8 +203,23 @@ export default function App() {
   // Background video decoding (thumbnail frames) pauses while previewing.
   useEffect(() => setPreviewOpen(previewId !== null || extPreview !== null), [previewId, extPreview]);
   useEffect(() => {
-    if (!previewId) setPreviewIso(false);
+    if (!previewId) {
+      setPreviewIso(false);
+      setPreviewQuick(false);
+    }
   }, [previewId]);
+
+  // ⌘K / Ctrl+K works everywhere except over other dialogs.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((isMac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === "k" && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        if (!dialog) setPalette((p) => !p);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dialog]);
 
   // Safe Inspection Mode: keep the "Media decoded" counter current.
   useEffect(() => {
@@ -516,9 +536,11 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || mode !== "browse") return; // dialogs and the analyzer handle their own keys
+      if (dialog || palette || shortcuts || mode !== "browse") return; // dialogs and the analyzer handle their own keys
       const mod = isMac ? e.metaKey : e.ctrlKey;
-      const inInput = (e.target as HTMLElement).tagName === "INPUT";
+      const t = e.target as HTMLElement;
+      // Never steal keys from text fields.
+      const inInput = t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable;
       // Move to Trash: ⌘⌫ on macOS, Delete on Windows/Linux. Never a permanent delete.
       if (!inInput && (isMac ? e.metaKey && e.key === "Backspace" : e.key === "Delete")) {
         e.preventDefault();
@@ -558,7 +580,7 @@ export default function App() {
         } else selectOnly(null);
       } else if (mod && ["1", "2", "3"].includes(e.key)) {
         e.preventDefault();
-        setView((["gallery", "grid", "list"] as const)[Number(e.key) - 1]);
+        setView((["list", "grid", "gallery"] as const)[Number(e.key) - 1]);
       } else if (!inInput && (e.key === "Backspace" || (mod && e.key === "[") || (mod && e.key === "ArrowUp"))) {
         e.preventDefault();
         if (mod && e.key === "ArrowUp" && loc.scope === "folder" && loc.folder) {
@@ -591,6 +613,57 @@ export default function App() {
   }, [menu, pop]);
 
   // --------------------------------------------------------------- render
+
+  const sel = selected >= 0 ? items[selected] : null;
+  const commands: Command[] = [
+    { id: "v-list", title: "List View", section: "View", icon: "list", keys: `${isMac ? "⌘" : "Ctrl+"}1`, run: () => setView("list") },
+    { id: "v-grid", title: "Grid View", section: "View", icon: "grid", keys: `${isMac ? "⌘" : "Ctrl+"}2`, run: () => setView("grid") },
+    { id: "v-gallery", title: "Gallery View", section: "View", icon: "gallery", keys: `${isMac ? "⌘" : "Ctrl+"}3`, run: () => setView("gallery") },
+    { id: "v-sub", title: recursive ? "Hide Subfolder Contents" : "Include Subfolders", section: "View", icon: "folder", run: () => setRecursive(!recursive) },
+    { id: "g-search", title: "Search", section: "Go", icon: "search", keys: `${isMac ? "⌘" : "Ctrl+"}F`, run: () => setTimeout(() => searchRef.current?.focus(), 0) },
+    { id: "g-drive", title: `Go to ${status?.rootName ?? "Drive"}`, section: "Go", icon: "drive", run: () => navigate({ scope: "folder", folder: "" }) },
+    ...[...FILTERS, ...CAPTURE_FILTERS].map((f) => ({
+      id: `l-${f.kind}`,
+      title: LIBRARY_TITLE[f.kind],
+      section: "Library",
+      icon: f.icon,
+      run: () => {
+        navigate({ scope: "library", folder: "" }, { keepKind: true });
+        setKind(f.kind);
+      },
+    })),
+    { id: "l-fav", title: "Favorites", section: "Library", icon: "star", run: () => (navigate({ scope: "library", folder: "" }, { keepKind: true }), setKind("favorites")) },
+    ...tags.map((t) => ({ id: `t-${t.id}`, title: t.name, section: "Tag", icon: "tag" as IconName, run: () => (navigate({ scope: "library", folder: "" }, { keepKind: true }), setKind(`tag:${t.id}`)) })),
+    { id: "a-center", title: "Analysis Center", section: "Analyze", icon: "all", run: () => setMode("center") },
+    { id: "a-storage", title: "Storage", section: "Analyze", icon: "drive", words: "space size treemap empty folders", run: () => setMode("storage") },
+    { id: "a-dupes", title: "Exact Duplicates", section: "Analyze", icon: "duplicate", run: () => setMode("analyzer") },
+    { id: "a-similar", title: "Similar Media", section: "Analyze", icon: "gallery", words: "bursts compare", run: () => setMode("similar") },
+    { id: "a-meta", title: "Sensitive Metadata", section: "Analyze", icon: "tag", words: "exif gps location privacy", run: () => setMode("metadata") },
+    { id: "a-places", title: "Places", section: "Analyze", icon: "pin", words: "map gps", run: () => setMode("places") },
+    { id: "a-health", title: "Media Health", section: "Analyze", icon: "warning", words: "broken unsupported", run: () => setMode("health") },
+    ...(sel && sel.kind !== "link"
+      ? [
+          ...(sel.kind !== "folder"
+            ? [
+                { id: "s-ql", title: `Quick Look “${sel.name}”`, section: "Selection", icon: "gallery" as IconName, keys: "Space", run: () => (setPreviewQuick(true), setPreviewId(sel.id)) },
+                { id: "s-iso", title: `Open “${sel.name}” in Isolation`, section: "Selection", icon: "shield" as IconName, run: () => (setPreviewIso(true), setPreviewId(sel.id)) },
+              ]
+            : []),
+          { id: "s-info", title: `Get Info for “${sel.name}”`, section: "Selection", icon: "info" as IconName, keys: "I", run: () => setInspectId(sel.id) },
+          { id: "s-fav", title: sel.favorite ? `Remove “${sel.name}” from Favorites` : `Add “${sel.name}” to Favorites`, section: "Selection", icon: "star" as IconName, keys: "F", run: () => setFavorite([sel], !sel.favorite) },
+          { id: "s-tags", title: `Tags for “${sel.name}”…`, section: "Selection", icon: "tag" as IconName, run: () => setDialog({ kind: "tags", entries: selectionTargets() }) },
+          { id: "s-copy", title: "Copy Path", section: "Selection", icon: "copy" as IconName, run: () => copyPath(sel) },
+          { id: "s-reveal", title: isMac ? "Show in Finder" : "Show in Folder", section: "Selection", icon: "reveal" as IconName, run: () => api.revealFile(sel.id) },
+        ]
+      : []),
+    { id: "m-ro", title: readOnly ? "Turn Off Read-only Mode" : "Turn On Read-only Mode", section: "Mori", icon: "shield", run: toggleReadOnly },
+    { id: "m-change", title: "Change Folder…", section: "Mori", icon: "folder", run: chooseRoot },
+    { id: "m-temp", title: "Browse Without Indexing…", section: "Mori", icon: "clock", words: "temporary private", run: startTemporary },
+    { id: "m-tags", title: "Manage Tags…", section: "Mori", icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
+    { id: "m-session", title: "Clear Session Data…", section: "Mori", icon: "close", run: () => setDialog({ kind: "clearSession" }) },
+    { id: "m-rescan", title: "Rescan", section: "Mori", icon: "refresh", run: () => api.rescan() },
+    { id: "m-keys", title: "Keyboard Shortcuts", section: "Help", icon: "command", words: "keys help", run: () => setShortcuts(true) },
+  ];
 
   if (!info) return <div className="app loading" />;
   if (!status?.hasRoot) return <Welcome info={info} onChoose={chooseRoot} />;
@@ -812,7 +885,7 @@ export default function App() {
           </div>
           <div className="spacer" data-tauri-drag-region />
           <div className="icon-group" aria-label="View">
-            {(["gallery", "grid", "list"] as const).map((v, i) => (
+            {(["list", "grid", "gallery"] as const).map((v, i) => (
               <button
                 key={v}
                 className={`icon-btn ${view === v ? "on" : ""}`}
@@ -930,6 +1003,12 @@ export default function App() {
             onSort={(k) => (k === sort ? setDesc((d) => !d) : (setSort(k), setDesc(false)))}
             onSelect={(i) => selectOnly(items[i]?.id ?? null)}
             onActivate={activate}
+            onQuickLook={(i) => {
+              const e = items[i];
+              if (!e || e.kind === "folder" || e.kind === "link") return;
+              setPreviewQuick(true);
+              setPreviewId(e.id);
+            }}
             onClickItem={clickItem}
             onContextMenu={(e, i) => {
               const entry = items[i];
@@ -1007,6 +1086,7 @@ export default function App() {
           onCopyPath={copyPath}
           onError={flash}
           isolated={previewIso}
+          quick={previewQuick}
         />
       )}
 
@@ -1270,6 +1350,19 @@ export default function App() {
           </div>
         </ModalFrame>
       )}
+
+      {palette && (
+        <CommandPalette
+          commands={commands}
+          onClose={() => setPalette(false)}
+          onOpenEntry={(e) => {
+            if (e.kind === "folder") navigate({ scope: "folder", folder: e.id });
+            else if (e.kind === "link") setInspectId(e.id);
+            else setExtPreview({ items: [e], index: 0, isolated: false });
+          }}
+        />
+      )}
+      {shortcuts && <ShortcutsHelp onClose={() => setShortcuts(false)} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>

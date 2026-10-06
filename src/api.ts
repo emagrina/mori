@@ -168,7 +168,7 @@ export interface VideoInfo {
 
 export interface Inspection {
   detected: string;
-  preview: "image" | "video" | "text" | "pdf" | "archive" | "none";
+  preview: "image" | "video" | "text" | "pdf" | "archive" | "audio" | "none";
   canOpen: boolean;
   mismatch: boolean;
   video: VideoInfo | null;
@@ -675,6 +675,8 @@ export const previewUrl = (id: string, iso = false) => moriUrl("preview", id, is
 export const mediaUrl = (id: string, iso = false) => moriUrl("media", id, iso);
 /** A PDF page rasterised by the sandboxed worker. */
 export const pdfPageUrl = (id: string, page: number, size: number, iso = false) => moriUrl("pdf", `${id}/${page}/${size}`, iso);
+/** Byte ranges of an audio file whose format was verified by magic bytes. */
+export const audioUrl = (id: string, iso = false) => moriUrl("audio", id, iso);
 /** Sampled video frame `k`, re-encoded by the sandboxed worker. */
 export const frameUrl = (id: string, k: number, iso = false) => moriUrl("frame", `${id}/${k}`, iso);
 
@@ -1138,6 +1140,31 @@ function grabFrame(src: string, signal: AbortSignal): Promise<Uint8Array | undef
     document.body.appendChild(v);
     v.src = src;
   });
+}
+
+/** Frames sampled for filmstrips, hover scrub and the isolated view. */
+export const SCRUB_FRAMES = 8;
+const scrubRequested = new Set<string>();
+
+/**
+ * Hover scrub: ask (once) for a video's sampled frames in the background,
+ * through the same queue as video thumbnails (never during a preview). The
+ * backend refuses them in Safe Inspection Mode.
+ */
+export function requestScrubFrames(e: Entry, onReady: () => void) {
+  if (scrubRequested.has(e.id)) return;
+  scrubRequested.add(e.id);
+  enqueue(
+    {
+      run: async (signal) => {
+        const info = await api.inspect(e.id).catch(() => null);
+        if (signal.aborted || info?.preview !== "video" || info.previewsOff) return false;
+        return (await captureFrames(e.id, SCRUB_FRAMES, false, signal, () => {})) > 0;
+      },
+      done: (ok) => ok && onReady(),
+    },
+    false,
+  );
 }
 
 export function resetThumbs() {

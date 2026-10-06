@@ -49,6 +49,7 @@ pub fn handle(app: &AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
         "preview" => preview(&state, rest, explicit),
         "media" => media(&state, rest, req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()), explicit),
         "frame" => frame(&state, rest, explicit),
+        "audio" => audio(&state, rest, req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()), explicit),
         "pdf" => pdf_page(&state, rest, explicit),
         _ => status(StatusCode::NOT_FOUND),
     };
@@ -218,6 +219,35 @@ fn media(state: &AppState, id: &str, range: Option<&str>, explicit: bool) -> Res
     if !state.video_playable(&canon, &meta, detected) {
         return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
+    ranged(file, &meta, mime, range)
+}
+
+/// Audio formats handed to the system player, identified by magic bytes.
+pub fn audio_mime(head: &[u8], size: u64) -> Option<&'static str> {
+    let t = crate::filetype::detect(head, size);
+    (t.family == crate::filetype::Family::Audio && matches!(t.id, "mp3" | "m4a" | "wav" | "aiff" | "flac" | "aac"))
+        .then_some(t.mime)
+}
+
+/// Byte ranges of an audio file whose format was verified by magic bytes.
+fn audio(state: &AppState, id: &str, range: Option<&str>, explicit: bool) -> Response<Vec<u8>> {
+    let Some((mut file, meta, canon, _)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
+    if gated(state, &canon, explicit) {
+        return status(StatusCode::FORBIDDEN);
+    }
+    if state.video.is_blocked(&state.file_key(&canon, &meta)) {
+        return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let head = secure::read_head(&mut file, crate::filetype::HEAD_LEN);
+    let Some(mime) = audio_mime(&head, meta.len()) else {
+        return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    };
+    let _ = file.seek(SeekFrom::Start(0));
+    ranged(file, &meta, mime, range)
+}
+
+/// Serve one bounded byte range (at most `MEDIA_CHUNK`) of an open file.
+fn ranged(mut file: File, meta: &std::fs::Metadata, mime: &str, range: Option<&str>) -> Response<Vec<u8>> {
     let len = meta.len();
     if len == 0 {
         return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
@@ -447,5 +477,20 @@ mod tests {
         assert_eq!(parse_range("bytes=0-1,5-6"), None);
         assert_eq!(percent_decode("/thumb%2F00ff"), "/thumb/00ff");
         assert_eq!(percent_decode("/a%2"), "/a%2");
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    #[test]
+    fn only_verified_audio_formats_are_served() {
+        let wav = b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0";
+        assert_eq!(super::audio_mime(wav, 1000), Some("audio/wav"));
+        assert_eq!(super::audio_mime(b"ID3\x03\0\0\0\0\0\x0a", 1000), Some("audio/mpeg"));
+        assert_eq!(super::audio_mime(b"fLaC\0\0\0\x22", 1000), Some("audio/flac"));
+        assert_eq!(super::audio_mime(b"\x89PNG\r\n\x1a\n", 1000), None, "a PNG named .mp3 is not audio");
+        assert_eq!(super::audio_mime(b"MZ\x90\0", 1000), None);
+        assert_eq!(super::audio_mime(b"OggS\0\x02", 1000), None, "Ogg isn't played by the system engine here");
+        assert_eq!(super::audio_mime(b"", 0), None);
     }
 }

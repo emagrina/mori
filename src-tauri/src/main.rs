@@ -765,6 +765,8 @@ async fn inspect(state: State<'_, AppState>, id: String) -> Result<Inspection, S
         "pdf"
     } else if matches!(ft.id, "zip" | "tar" | "gzip" | "jar" | "ooxml" | "odf" | "epub") {
         "archive"
+    } else if protocol::audio_mime(&head, meta.len()).is_some() {
+        "audio"
     } else {
         "none"
     };
