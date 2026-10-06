@@ -6,6 +6,7 @@ mod fileops;
 #[cfg(target_os = "macos")]
 mod heif;
 mod index;
+mod privacy;
 mod probe;
 mod protocol;
 mod secure;
@@ -67,6 +68,8 @@ pub struct AppState {
     /// The one pending video-frame request to the webview: (token, reply).
     similar_capture: Mutex<Option<SimilarReply>>,
     similar_token: AtomicU64,
+    /// Private folders (visibility boundaries), persisted in app data.
+    privacy: privacy::Store,
 }
 
 type SimilarReply = (u64, std::sync::mpsc::Sender<Result<similar::Capture, similar::CaptureError>>);
@@ -350,8 +353,14 @@ fn emit_status(app: &AppHandle) {
     let _ = app.emit("status", status(&app.state::<AppState>()));
 }
 
-fn publish_index(app: &AppHandle, idx: Index) {
-    *app.state::<AppState>().index.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(idx);
+/// The one place a new index becomes visible: private-folder boundaries are
+/// applied here, so every query, search and count respects them.
+fn publish_index(app: &AppHandle, mut idx: Index) {
+    let state = app.state::<AppState>();
+    if let Some(root) = state.root_canon() {
+        idx.apply_boundaries(&state.privacy.boundaries(&root));
+    }
+    *state.index.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(idx);
     let _ = app.emit("index-changed", ());
 }
 
@@ -385,6 +394,9 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         let mut progress = |count: usize, snapshot: index::Snapshot<'_>| {
             state.scan_count.store(count, Ordering::SeqCst);
             if let Some((files, dirs)) = snapshot {
+                // Follow moved private folders before anything is shown.
+                let found: Vec<(&str, u64)> = dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
+                state.privacy.reconcile(&root, &found);
                 let partial = Index::new(root.to_string_lossy().into_owned(), 0, files.to_vec(), dirs.to_vec());
                 publish_index(&app, partial);
             }
@@ -401,6 +413,9 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         if index::save(&state.index_file(&root), &idx).is_err() {
             debug_log!("mori: could not save index");
         }
+        // Private folders moved or renamed outside Mori: follow them by inode.
+        let dirs: Vec<(&str, u64)> = idx.dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
+        state.privacy.reconcile(&root, &dirs);
         publish_index(&app, idx);
         state.scanning.store(false, Ordering::SeqCst);
         emit_status(&app);
@@ -560,6 +575,9 @@ struct QueryResponse {
     total: usize,
     truncated: bool,
     crumbs: Vec<Crumb>,
+    /// The current folder is private or inside a private folder.
+    #[serde(rename = "privateScope")]
+    private_scope: bool,
 }
 
 #[tauri::command]
@@ -578,6 +596,7 @@ async fn query(state: State<'_, AppState>, q: Query) -> Result<QueryResponse, ()
         total: r.total,
         truncated: r.truncated,
         crumbs: index::crumbs(&idx, &q.folder).into_iter().map(|(id, name)| Crumb { id, name }).collect(),
+        private_scope: r.private_scope,
     })
 }
 
@@ -886,6 +905,10 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
         invalidate_thumbs(&state, &path, &meta);
     }
     fileops::rename_no_replace(&path, &target)?;
+    if meta.is_dir() {
+        // A private folder (or one containing private folders) keeps its privacy.
+        state.privacy.renamed(&path, &target);
+    }
     let old_rel = loc.rel.clone();
     let new_rel = match old_rel.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/{name}"),
@@ -893,6 +916,106 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
     };
     apply_index_change(&app, |idx| idx.rename_path(&old_rel, &new_rel));
     Ok(index::id_str(index::id_for(&new_rel)))
+}
+
+// ---------------------------------------------------------- private folders
+
+/// Make a browser folder private (a visibility boundary) or public again.
+/// Only Mori's own records change; the folder itself is never touched.
+#[tauri::command]
+async fn set_folder_private(app: AppHandle, id: String, private: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_private(&app, &id, private))
+        .await
+        .map_err(|_| "The operation failed.".to_string())?
+}
+
+fn set_private(app: &AppHandle, id: &str, private: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if id.starts_with('x') || id.starts_with('y') {
+        return Err("Choose the folder in the browser.".to_string());
+    }
+    let loc = state.locate(id)?;
+    if !loc.is_dir {
+        return Err("Only folders can be made private.".into());
+    }
+    let (path, meta) = fileops::confined_item(&loc.root, &loc.rel)?;
+    if !meta.is_dir() {
+        return Err("Only folders can be made private.".into());
+    }
+    state.privacy.set(&path, privacy::ino_of(&meta), private)?;
+    if private {
+        hide_from_analyses(&state, &path);
+    }
+    // Re-publishing applies the new boundaries to every view and count.
+    apply_index_change(app, |_| {});
+    Ok(())
+}
+
+/// Debug builds only: `MORI_DEBUG_PRIVACY=<folder relative to the root>`
+/// with `MORI_DEBUG_PRIVACY_MODE=mark|unmark|report` changes or reports a
+/// folder's privacy through the same path as the menu command and prints
+/// what the views would show (testing without UI automation).
+fn debug_privacy(app: &AppHandle) {
+    let Ok(rel) = std::env::var("MORI_DEBUG_PRIVACY") else { return };
+    let mode = std::env::var("MORI_DEBUG_PRIVACY_MODE").unwrap_or_else(|_| "report".into());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        let state = app.state::<AppState>();
+        while state.scanning.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let report = |when: &str| {
+            let idx = state.index();
+            let s = index::stats(&idx);
+            let lib = index::query(&idx, &Query { scope: "library".into(), kind: "all".into(), ..Default::default() });
+            let inside = lib.items.iter().filter(|e| e.path.starts_with(&format!("{rel}/"))).count();
+            let id = index::id_str(index::id_for(&rel));
+            let parent = index::id_str(index::id_for(index::parent_of(&rel)));
+            let rec = index::query(
+                &idx,
+                &Query { folder: parent, recursive: true, kind: "all".into(), ..Default::default() },
+            );
+            let own = index::query(&idx, &Query { folder: id.clone(), kind: "all".into(), ..Default::default() });
+            let private = idx.get(&id).is_some_and(|e| e.private);
+            eprintln!(
+                "mori: DEBUG privacy {when}: private={private} files={} photos={} library-items-inside={inside} parent-recursive-inside={} own-folder-items={} private-scope={}",
+                s.files,
+                s.photo,
+                rec.items.iter().filter(|e| e.path.starts_with(&format!("{rel}/"))).count(),
+                own.items.len(),
+                own.private_scope
+            );
+            id
+        };
+        let id = report("before");
+        if mode != "report" {
+            let r = set_private(&app, &id, mode == "mark");
+            eprintln!("mori: DEBUG privacy {mode}: {r:?}");
+            report("after");
+        }
+    });
+}
+
+/// A folder just became private: drop its contents from analysis results
+/// that were computed from outside it (results from an analysis rooted at
+/// the folder itself, or inside it, stay: that was an explicit choice).
+fn hide_from_analyses(state: &AppState, dir: &Path) {
+    let hidden = |root: &Path, rel: &str| !(root == dir || root.starts_with(dir)) && root.join(rel).starts_with(dir);
+    if let Some(store) = state.analysis.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+        let a = &mut store.analysis;
+        let gone: HashSet<usize> =
+            (0..a.files.len()).filter(|&i| hidden(&a.roots[a.files[i].root].canon, &a.files[i].rel)).collect();
+        dupes::forget(a, &gone);
+    }
+    if let Some(r) =
+        state.similar.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|s| s.result.as_mut())
+    {
+        let a = &r.analysis;
+        let gone: HashSet<usize> =
+            (0..a.files.len()).filter(|&i| hidden(&a.roots[a.files[i].root].canon, &a.files[i].rel)).collect();
+        similar::forget(r, &gone);
+    }
 }
 
 // ------------------------------------------------------ duplicate analyzer
@@ -1010,7 +1133,8 @@ fn analysis_start(
     for key in locations.iter().take(32) {
         if let Some((canon, label)) = location_path(&app, &state, key) {
             if !roots.iter().any(|r| r.canon == canon) {
-                roots.push(dupes::Root { canon, label });
+                let private = state.privacy.boundaries(&canon);
+                roots.push(dupes::Root { canon, label, private });
             }
         }
     }
@@ -1280,7 +1404,8 @@ fn similar_start(
     for key in locations.iter().take(32) {
         if let Some((canon, label)) = location_path(&app, &state, key) {
             if !roots.iter().any(|r| r.canon == canon) {
-                roots.push(dupes::Root { canon, label });
+                let private = state.privacy.boundaries(&canon);
+                roots.push(dupes::Root { canon, label, private });
             }
         }
     }
@@ -1395,7 +1520,8 @@ fn debug_similar_autorun(app: &AppHandle) {
         let state = app.state::<AppState>();
         state.similar_running.store(true, Ordering::SeqCst);
         let t = std::time::Instant::now();
-        let root = dupes::Root { canon, label: "Debug".into() };
+        let private = state.privacy.boundaries(&canon);
+        let root = dupes::Root { canon, label: "Debug".into(), private };
         launch_similar(app.clone(), &state, vec![root], true, true, true, similar::Sensitivity::Balanced);
         while state.similar_running.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
@@ -1907,6 +2033,7 @@ fn main() {
                 similar_cancel: Arc::new(AtomicBool::new(false)),
                 similar_capture: Mutex::new(None),
                 similar_token: AtomicU64::new(0),
+                privacy: privacy::Store::load(data_dir_for_video.join("private-folders.json")),
             });
             spawn_media_watchdog(app.handle().clone());
             // Debug builds only: MORI_DEBUG_FREEZE_AT=<secs> wedges the page's JS
@@ -1926,6 +2053,7 @@ fn main() {
             build_window(app)?;
             if cfg!(debug_assertions) {
                 debug_similar_autorun(app.handle());
+                debug_privacy(app.handle());
             }
             Ok(())
         })
@@ -1969,7 +2097,8 @@ fn main() {
             similar_dismissed_count,
             similar_forget_decisions,
             similar_clear,
-            similar_cleanup
+            similar_cleanup,
+            set_folder_private
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mori");

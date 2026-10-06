@@ -1475,13 +1475,22 @@ mod tests {
     }
 
     fn run(lab: &Path, dismissed: &HashSet<PairKey>, cancel: &AtomicBool) -> Result<SimilarAnalysis, Cancelled> {
+        run_with(lab, HashSet::new(), dismissed, cancel)
+    }
+
+    fn run_with(
+        lab: &Path,
+        private: HashSet<String>,
+        dismissed: &HashSet<PairKey>,
+        cancel: &AtomicBool,
+    ) -> Result<SimilarAnalysis, Cancelled> {
         let decode = |b: Vec<u8>| crate::worker::fingerprint_in_process(&b);
         let mut capture = |_: usize, _: &FileRec, _: &[f64]| Err(CaptureError::Failed);
         let mut registered = |_: &[Root], _: &[FileRec]| {};
         let mut env =
             Env { cache_dir: None, decode: &decode, capture: &mut capture, registered: &mut registered, dismissed };
         let spec = Spec {
-            roots: vec![Root { canon: lab.to_path_buf(), label: "Lab".into() }],
+            roots: vec![Root { canon: lab.to_path_buf(), label: "Lab".into(), private }],
             photos: true,
             videos: true,
             recursive: true,
@@ -1521,6 +1530,28 @@ mod tests {
         assert_eq!(n.len(), 3);
         assert!(r.meta[0].members.iter().skip(1).all(|m| !m.exact && m.similarity < 100), "never shown as identical");
         assert_eq!(r.stats.uninformative, 1, "the flat image is not compared");
+        fs::remove_dir_all(lab).unwrap();
+    }
+
+    /// Private folders (privacy.rs): skipped from a parent, analysed when
+    /// chosen explicitly.
+    #[test]
+    fn private_folders_are_skipped_unless_chosen_explicitly() {
+        let lab = temp_lab();
+        let a = scene(6, 1200, 900);
+        save(&a, &lab.join("Private/original.jpg"));
+        save(
+            &image::imageops::resize(&a, 600, 450, image::imageops::FilterType::Triangle),
+            &lab.join("Private/small.png"),
+        );
+        save(&scene(7, 1200, 900), &lab.join("Public/other.jpg"));
+        let from_parent =
+            run_with(&lab, ["Private".to_string()].into(), &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert!(from_parent.analysis.groups.is_empty());
+        assert!(from_parent.analysis.files.iter().all(|f| !f.rel.starts_with("Private")));
+        assert_eq!(from_parent.stats.photos, 1);
+        let explicit = run(&lab.join("Private"), &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(explicit.analysis.groups.len(), 1);
         fs::remove_dir_all(lab).unwrap();
     }
 
@@ -1723,7 +1754,7 @@ mod lab {
             dismissed: &dismissed,
         };
         let spec = Spec {
-            roots: vec![Root { canon: fs::canonicalize(lab).unwrap(), label: "Lab".into() }],
+            roots: vec![Root { canon: fs::canonicalize(lab).unwrap(), label: "Lab".into(), ..Default::default() }],
             photos: true,
             videos: true,
             recursive: true,
@@ -2085,7 +2116,11 @@ mod lab {
                 dismissed: &dismissed,
             };
             let spec = Spec {
-                roots: vec![Root { canon: fs::canonicalize(&dir).unwrap(), label: "Bench".into() }],
+                roots: vec![Root {
+                    canon: fs::canonicalize(&dir).unwrap(),
+                    label: "Bench".into(),
+                    ..Default::default()
+                }],
                 photos: true,
                 videos: true,
                 recursive: true,

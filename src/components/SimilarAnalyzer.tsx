@@ -384,6 +384,7 @@ export function SimilarAnalyzer({
             <p className="fineprint">
               Everything happens on this computer: photos are decoded in Mori's sandboxed worker and videos are sampled at 12 points by the system video
               engine, then reduced to small grayscale fingerprints. Fingerprints are cached locally (removed by Clear Cache); nothing is uploaded.
+              Private folders inside the chosen locations are skipped; choose a private folder directly to analyze it.
               {dismissedCount > 0 && (
                 <>
                   {" "}

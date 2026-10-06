@@ -22,6 +22,8 @@ export interface Entry {
   created: number | null;
   /** Folder relative to the current view ("" = directly in it). */
   location?: string;
+  /** A private folder: its contents aren't surfaced outside it. */
+  private?: boolean;
 }
 
 export interface Status {
@@ -55,6 +57,8 @@ export interface QueryResult {
   total: number;
   truncated: boolean;
   crumbs: Crumb[];
+  /** The current folder is private, or inside a private folder. */
+  privateScope?: boolean;
 }
 
 export type Stats = Record<"files" | "folders" | "bytes" | Exclude<KindFilter, "all">, number>;
@@ -310,6 +314,8 @@ export const api = {
   similarForgetDecisions: () => invoke<void>("similar_forget_decisions"),
   similarClear: () => invoke<void>("similar_clear"),
   similarCleanup: (plan: PlanItem[]) => invoke<CleanupOutcome>("similar_cleanup", { plan }),
+  /** Mark a folder private (a Mori visibility boundary) or public. Never touches the folder. */
+  setFolderPrivate: (id: string, isPrivate: boolean) => invoke<void>("set_folder_private", { id, private: isPrivate }),
 };
 
 /**
@@ -745,6 +751,9 @@ export function typeLabel(e: Entry): string {
 export const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 
 export const isMac = navigator.userAgent.includes("Mac");
+
+/** Tooltip for the private-folder indicator. */
+export const PRIVATE_HINT = "Private: contents are hidden from global and recursive views.";
 
 export const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 

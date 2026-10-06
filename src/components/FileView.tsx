@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { formatDate, formatShortDate, formatSize, isMac, parentOf, typeLabel, type Entry, type SortKey, type ViewMode } from "../api";
+import { formatDate, formatShortDate, formatSize, isMac, parentOf, PRIVATE_HINT, typeLabel, type Entry, type SortKey, type ViewMode } from "../api";
 
 /** Folder an item came from, relative to the view ("" = the viewed folder itself). */
 const locationOf = (e: Entry) => (e.location ?? parentOf(e.path)).split("/").join(" / ");
@@ -151,6 +151,11 @@ export function FileView(p: Props) {
             <span className="c-name">
               <Icon name={e.kind} size={16} />
               <span className="truncate">{e.name}</span>
+              {e.private && (
+                <span className="private-mark" title={PRIVATE_HINT}>
+                  <Icon name="lock" size={11} />
+                </span>
+              )}
             </span>
             <span className="c-type">{typeLabel(e)}</span>
             <span className="c-size">{e.kind === "folder" ? "—" : formatSize(e.size)}</span>
@@ -163,7 +168,14 @@ export function FileView(p: Props) {
           <div key={e.id} className={`tile gallery ${isMedia(e) ? "" : "plain"}`} {...common}>
             <Thumb entry={e} fit={e.kind === "folder" ? "contain" : "cover"} iconSize={e.kind === "folder" ? Math.round(tileW * 0.22) : 40} />
             <div className="caption-overlay">
-              <div className="truncate">{e.name}</div>
+              <div className="truncate">
+                {e.private && (
+                  <span className="private-mark" title={PRIVATE_HINT}>
+                    <Icon name="lock" size={11} />{" "}
+                  </span>
+                )}
+                {e.name}
+              </div>
               {p.showLocation && locationOf(e) && <div className="truncate where">{locationOf(e)}</div>}
             </div>
           </div>,
@@ -177,10 +189,18 @@ export function FileView(p: Props) {
             <div className="caption">
               <div className="name truncate">{e.name}</div>
               <div className="meta truncate">
+                {e.kind === "folder" && e.private && (
+                  <>
+                    <span className="private-mark" title={PRIVATE_HINT}>
+                      <Icon name="lock" size={10} /> Private
+                    </span>
+                    {" · "}
+                  </>
+                )}
                 {e.kind === "folder"
                   ? p.showLocation && locationOf(e)
                     ? locationOf(e)
-                    : `Folder · ${formatShortDate(e.modified)}`
+                    : `${e.private ? "" : "Folder · "}${formatShortDate(e.modified)}`
                   : p.showLocation && locationOf(e)
                     ? locationOf(e)
                     : `${formatSize(e.size)} · ${formatShortDate(e.modified)}`}

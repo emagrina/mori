@@ -47,6 +47,7 @@
     "allow-similar-dismissed-count",
     "allow-similar-forget-decisions",
     "allow-similar-clear",
-    "allow-similar-cleanup"
+    "allow-similar-cleanup",
+    "allow-set-folder-private"
   ]
 }
