@@ -63,6 +63,43 @@ fn sandbox_denies_filesystem_network_and_processes() {
     assert_eq!(out.trim(), "fs_denied=true write_denied=true net_denied=true spawn_denied=true");
 }
 
+/// HEIC jobs use their own profile (Apple's decoder service allowed); user
+/// files, writes, the network and new processes must still be denied.
+#[cfg(target_os = "macos")]
+#[test]
+fn heif_sandbox_still_denies_files_network_and_processes() {
+    let (code, out, _) = run(&["selftest", "heif"], b"");
+    assert_eq!(code, Some(0));
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out.trim(), "fs_denied=true write_denied=true net_denied=true spawn_denied=true");
+}
+
+/// Fingerprints: fixed-size grayscale miniatures plus the source size.
+#[test]
+fn fingerprints_stills_and_rejects_junk() {
+    let (code, out, _) = run(&["fingerprint", "64"], &png(1200, 800));
+    assert_eq!(code, Some(0));
+    assert_eq!(&out[0..4], b"MORI");
+    assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 1200);
+    assert_eq!(out[12], 5, "raw miniatures");
+    assert_eq!(out.len(), 16 + 64 * 64 * 2);
+    for junk in [&b"\0\0\0\x18ftypheic\0\0\0\0garbage"[..], b"<svg onload=alert(1)>", b""] {
+        let (code, out, _) = run(&["fingerprint", "64"], junk);
+        assert_ne!(code, Some(0));
+        assert!(out.is_empty());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn fingerprints_heic_inside_the_sandbox() {
+    let heic = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tiny.heic")).unwrap();
+    let (code, out, _) = run(&["fingerprint", "64", "heif"], &heic);
+    assert_eq!(code, Some(0));
+    assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 16);
+    assert_eq!(out.len(), 16 + 64 * 64 * 2);
+}
+
 #[test]
 fn reencodes_a_valid_image() {
     let (code, out, _) = run(&["thumb", "256"], &png(1200, 800));
@@ -91,11 +128,16 @@ fn rejects_active_and_unknown_content() {
         b"<html><script>fetch('https://evil')</script></html>",
         b"%PDF-1.7 /JavaScript",
         b"MZ\x90\x00\x03",
-        b"\x00\x00\x00\x18ftypheic",
         b"",
     ] {
         let (code, out, _) = run(&["thumb", "256"], input);
         assert_eq!(code, Some(2), "{:?}", String::from_utf8_lossy(input));
+        assert!(out.is_empty());
+    }
+    // A truncated HEIC: unsupported off macOS, a decode failure on macOS.
+    for args in [&["thumb", "256"][..], &["thumb", "256", "heif"]] {
+        let (code, out, _) = run(args, b"\x00\x00\x00\x18ftypheic");
+        assert_ne!(code, Some(0));
         assert!(out.is_empty());
     }
 }

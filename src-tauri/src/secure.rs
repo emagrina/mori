@@ -76,6 +76,8 @@ pub enum Detected {
     Png,
     Webp,
     Gif,
+    /// HEIC / HEIF still (decoded only where the platform decoder is available).
+    Heif,
     Mp4,
     Mov,
     Webm,
@@ -88,6 +90,7 @@ pub enum Detected {
 impl Detected {
     pub fn is_image(self) -> bool {
         matches!(self, Detected::Jpeg | Detected::Png | Detected::Webp | Detected::Gif)
+            || (self == Detected::Heif && cfg!(target_os = "macos"))
     }
     pub fn is_video(self) -> bool {
         matches!(self, Detected::Mp4 | Detected::Mov | Detected::Webm)
@@ -133,7 +136,10 @@ pub fn sniff(head: &[u8], ext: &str) -> Detected {
         if brand == b"qt  " {
             return Detected::Mov;
         }
-        // HEIC/AVIF and other ISO-BMFF flavours are deliberately unsupported.
+        if matches!(brand, b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1") {
+            return Detected::Heif;
+        }
+        // AVIF and other ISO-BMFF flavours are deliberately unsupported.
         return if MP4_BRANDS.iter().any(|b| &b[..] == brand) { Detected::Mp4 } else { Detected::Unknown };
     }
     if head.len() >= 8 && ext == "mov" && matches!(&head[4..8], b"moov" | b"mdat" | b"wide" | b"free" | b"skip") {
@@ -182,6 +188,7 @@ pub fn expected_for_ext(ext: &str) -> Option<&'static [Detected]> {
         "png" => &[Png],
         "webp" => &[Webp],
         "gif" => &[Gif],
+        "heic" | "heif" => &[Heif],
         "mp4" | "m4v" | "mov" => &[Mp4, Mov],
         "webm" => &[Webm],
         "pdf" => &[Pdf],
@@ -241,7 +248,8 @@ mod tests {
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 ", "jpg"), Detected::Webp);
         assert_eq!(sniff(b"\0\0\0\x18ftypmp42\0\0\0\0", "mov"), Detected::Mp4);
         assert_eq!(sniff(b"\0\0\0\x14ftypqt  \0\0\0\0", "mov"), Detected::Mov);
-        assert_eq!(sniff(b"\0\0\0\x18ftypheic\0\0\0\0", "jpg"), Detected::Unknown);
+        assert_eq!(sniff(b"\0\0\0\x18ftypheic\0\0\0\0", "heic"), Detected::Heif);
+        assert_eq!(sniff(b"\0\0\0\x18ftypavif\0\0\0\0", "avif"), Detected::Unknown);
         assert_eq!(
             sniff(b"\x1a\x45\xdf\xa3\x01\0\0\0\0\0\0\x1f\x42\x86\x81\x01\x42\x82\x84webm", "webm"),
             Detected::Webm

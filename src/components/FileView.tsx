@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { formatDate, formatShortDate, formatSize, parentOf, typeLabel, type Entry, type SortKey, type ViewMode } from "../api";
+import { formatDate, formatShortDate, formatSize, isMac, parentOf, typeLabel, type Entry, type SortKey, type ViewMode } from "../api";
 
 /** Folder an item came from, relative to the view ("" = the viewed folder itself). */
 const locationOf = (e: Entry) => (e.location ?? parentOf(e.path)).split("/").join(" / ");
@@ -9,7 +9,10 @@ import { Thumb } from "./Thumb";
 interface Props {
   items: Entry[];
   view: ViewMode;
+  /** Keyboard focus (and the anchor for Shift+Click ranges). */
   selected: number;
+  /** Ids of every selected item (multi-selection). */
+  marked: ReadonlySet<string>;
   /** Changes whenever the location changes, to reset scroll. */
   locationKey: string;
   keyboardActive: boolean;
@@ -22,6 +25,8 @@ interface Props {
   onSort: (key: SortKey) => void;
   onSelect: (i: number) => void;
   onActivate: (i: number) => void;
+  /** Click with modifiers: Cmd/Ctrl toggles, Shift extends a range. */
+  onClickItem: (i: number, mods: { toggle: boolean; range: boolean }) => void;
   onContextMenu: (e: React.MouseEvent, i: number) => void;
 }
 
@@ -131,14 +136,11 @@ export function FileView(p: Props) {
           : { top: top + r * rowH, left: PAD + c * (tileW + gap), width: tileW, height: rowH - gap };
       const common = {
         style,
-        "data-selected": i === p.selected || undefined,
-        onClick: () => {
-          p.onSelect(i);
-          p.onActivate(i);
-        },
+        "data-selected": p.marked.has(e.id) || undefined,
+        onClick: (ev: React.MouseEvent) => p.onClickItem(i, { toggle: isMac ? ev.metaKey : ev.ctrlKey, range: ev.shiftKey }),
+        onMouseDown: (ev: React.MouseEvent) => ev.shiftKey && ev.preventDefault(), // no text selection on Shift+Click
         onContextMenu: (ev: React.MouseEvent) => {
           ev.preventDefault();
-          p.onSelect(i);
           p.onContextMenu(ev, i);
         },
         title: e.name,

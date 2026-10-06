@@ -27,6 +27,26 @@
     "allow-video-session-start",
     "allow-ui-alive",
     "allow-video-session-end",
-    "allow-take-recovered"
+    "allow-take-recovered",
+    "allow-trash-summary",
+    "allow-trash-items",
+    "allow-rename-item",
+    "allow-analysis-locations",
+    "allow-analysis-choose-folder",
+    "allow-analysis-start",
+    "allow-analysis-cancel",
+    "allow-analysis-results",
+    "allow-analysis-clear",
+    "allow-analysis-cleanup",
+    "allow-analysis-cleanup-cancel",
+    "allow-similar-start",
+    "allow-similar-cancel",
+    "allow-similar-frames",
+    "allow-similar-results",
+    "allow-similar-dismiss",
+    "allow-similar-dismissed-count",
+    "allow-similar-forget-decisions",
+    "allow-similar-clear",
+    "allow-similar-cleanup"
   ]
 }

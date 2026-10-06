@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-clear"
+description = "Enables the similar_clear command without any pre-configured scope."
+commands.allow = ["similar_clear"]
+
+[[permission]]
+identifier = "deny-similar-clear"
+description = "Denies the similar_clear command without any pre-configured scope."
+commands.deny = ["similar_clear"]

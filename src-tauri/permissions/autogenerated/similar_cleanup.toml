@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-cleanup"
+description = "Enables the similar_cleanup command without any pre-configured scope."
+commands.allow = ["similar_cleanup"]
+
+[[permission]]
+identifier = "deny-similar-cleanup"
+description = "Denies the similar_cleanup command without any pre-configured scope."
+commands.deny = ["similar_cleanup"]

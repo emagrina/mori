@@ -56,3 +56,38 @@ pub fn store(stem: &Path, out: &Output) {
         let _ = fs::rename(&tmp, &target);
     }
 }
+
+/// Thumbnails of files outside the browsed folder (shown only by the
+/// Duplicate Analyzer). Kept in memory, never written to disk, and dropped
+/// with the analysis, so no trace of e.g. ~/Pictures is left in the cache.
+#[derive(Default)]
+pub struct Volatile(std::sync::Mutex<VolatileMap>);
+
+/// Cache stem → encoded thumbnail and MIME type (`None` = known miss).
+type VolatileMap = std::collections::HashMap<PathBuf, Option<(Vec<u8>, &'static str)>>;
+
+/// Enough for every thumbnail on screen plus generous scrolling history.
+const VOLATILE_MAX: usize = 2000;
+
+impl Volatile {
+    fn map(&self) -> std::sync::MutexGuard<'_, VolatileMap> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `Some(None)` = known miss.
+    pub fn get(&self, stem: &Path) -> Option<Option<(Vec<u8>, &'static str)>> {
+        self.map().get(stem).cloned()
+    }
+
+    pub fn put(&self, stem: &Path, value: Option<(Vec<u8>, &'static str)>) {
+        let mut m = self.map();
+        if m.len() >= VOLATILE_MAX {
+            m.clear();
+        }
+        m.insert(stem.to_owned(), value);
+    }
+
+    pub fn clear(&self) {
+        self.map().clear();
+    }
+}

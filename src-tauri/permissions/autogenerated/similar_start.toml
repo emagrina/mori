@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-start"
+description = "Enables the similar_start command without any pre-configured scope."
+commands.allow = ["similar_start"]
+
+[[permission]]
+identifier = "deny-similar-start"
+description = "Denies the similar_start command without any pre-configured scope."
+commands.deny = ["similar_start"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-forget-decisions"
+description = "Enables the similar_forget_decisions command without any pre-configured scope."
+commands.allow = ["similar_forget_decisions"]
+
+[[permission]]
+identifier = "deny-similar-forget-decisions"
+description = "Denies the similar_forget_decisions command without any pre-configured scope."
+commands.deny = ["similar_forget_decisions"]

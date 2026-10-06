@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-dismissed-count"
+description = "Enables the similar_dismissed_count command without any pre-configured scope."
+commands.allow = ["similar_dismissed_count"]
+
+[[permission]]
+identifier = "deny-similar-dismissed-count"
+description = "Denies the similar_dismissed_count command without any pre-configured scope."
+commands.deny = ["similar_dismissed_count"]

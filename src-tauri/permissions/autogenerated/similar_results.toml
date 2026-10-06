@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-results"
+description = "Enables the similar_results command without any pre-configured scope."
+commands.allow = ["similar_results"]
+
+[[permission]]
+identifier = "deny-similar-results"
+description = "Denies the similar_results command without any pre-configured scope."
+commands.deny = ["similar_results"]
