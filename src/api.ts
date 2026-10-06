@@ -803,7 +803,20 @@ export function startLivenessPing() {
 /** URL on Mori's own protocol. Only ids ever appear in it, never paths. */
 const moriUrl = (route: string, id: string, iso = false) => convertFileSrc(`${iso ? "iso-" : ""}${route}/${id}`, "mori");
 
-export const thumbUrl = (id: string) => moriUrl("thumb", id);
+/**
+ * Bumped by `resetThumbs`, so thumbnails refused earlier (Safe Inspection
+ * Mode, a cleared cache) are asked for again under a fresh URL rather than
+ * reusing a failed image the web view may still hold for the old one.
+ */
+let thumbGeneration = 0;
+const resetListeners = new Set<() => void>();
+/** For `useSyncExternalStore`: tiles re-check their thumbnail after a reset. */
+export function onThumbsReset(listener: () => void): () => void {
+  resetListeners.add(listener);
+  return () => resetListeners.delete(listener);
+}
+export const thumbsGeneration = () => thumbGeneration;
+export const thumbUrl = (id: string) => `${moriUrl("thumb", id)}?g=${thumbGeneration}`;
 /**
  * A re-encoded, size-limited copy produced by the sandboxed worker. `iso`
  * marks an explicit isolated-view request (allowed in Safe Inspection Mode).
@@ -879,7 +892,7 @@ export function requestThumb(e: Entry, onDone: (url: string | null) => void): ()
       // Video frames are captured separately (one at a time, never during a
       // preview) so they don't hold up image thumbnails.
       cancelCapture = enqueueCapture(e, async (ok) => {
-        const again = `${url}?v=1`;
+        const again = `${url}&v=1`;
         const final = ok && (await loadImage(again)) ? again : null;
         cache.set(e.id, final);
         onDone(final);
@@ -1307,6 +1320,8 @@ export function requestScrubFrames(e: Entry, onReady: () => void) {
 
 export function resetThumbs() {
   cache.clear();
+  thumbGeneration += 1;
+  resetListeners.forEach((f) => f());
 }
 
 // ------------------------------------------------------------ formatting

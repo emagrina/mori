@@ -15,7 +15,7 @@ absolute security guarantee.
 The isolation is meant to protect:
 - **the rest of your files:** decoder workers can't read or write files, and Mori never follows links out of a folder;
 - **Mori itself:** a crashing or hung decoder fails one preview, not the app;
-- **your privacy:** no network, nothing uploaded, minimal persistent state.
+- **your privacy:** everything runs locally, nothing is uploaded, and Mori keeps as little persistent state as it can.
 
 How:
 - **Type detection** by content, never by extension.
@@ -34,16 +34,22 @@ How:
 - a compromised or malicious operating system, or kernel-level attacks;
 - hardware attacks, including malicious USB devices (BadUSB);
 - files you choose to open in other applications;
-- traces outside Mori's control: swap, snapshots, backups, crash reports, journals, SSD behaviour.
+- traces outside Mori's control: swap, snapshots, backups, crash reports, journals, SSD behaviour. Temporary sessions minimise what *Mori* keeps; Mori does not claim complete forensic trace elimination.
 
 **Platform notes:**
+- Mori 1.0.0 is released for **macOS on Apple Silicon** only.
 - The worker sandbox is enforced on **macOS**.
 - **Windows** uses Job object limits and no file paths, but no filesystem-denying sandbox.
 - **Linux** uses resource limits and `no_new_privs`, without seccomp yet.
 
 ## Supported versions
 
-Only the latest release is supported with security fixes.
+| Version | Supported |
+|---|---|
+| 1.0.x | Yes |
+| Earlier development builds | No |
+
+Security fixes are released for the latest 1.x version.
 
 ## Reporting a vulnerability
 

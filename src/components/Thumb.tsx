@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { cachedThumb, frameUrl, requestScrubFrames, requestThumb, SCRUB_FRAMES, type Entry } from "../api";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { cachedThumb, frameUrl, onThumbsReset, requestScrubFrames, requestThumb, SCRUB_FRAMES, thumbsGeneration, type Entry } from "../api";
 import { FolderGlyph, Icon } from "./Icon";
 
 /** Lazily loaded thumbnail; only mounted while its tile is on screen. */
@@ -7,22 +7,34 @@ export function Thumb({ entry, fit = "contain", iconSize = 40 }: { entry: Entry;
   const thumbable = entry.kind === "photo" || entry.kind === "gif" || entry.kind === "video";
   const [url, setUrl] = useState<string | null | undefined>(() => (thumbable ? cachedThumb(entry) : null));
   const [loaded, setLoaded] = useState(false);
+  // A tile can stay mounted while thumbnails are reset (e.g. Generate previews
+  // in Safe Inspection Mode): one that has none yet must ask again.
+  const generation = useSyncExternalStore(onThumbsReset, thumbsGeneration);
+  const shown = useRef<{ key: string; url: string | null | undefined }>({ key: "", url: undefined });
+  const key = `${entry.id}:${entry.modified}`;
 
   useEffect(() => {
     if (!thumbable) return;
     const hit = cachedThumb(entry);
     if (hit !== undefined) {
+      shown.current = { key, url: hit };
       setUrl(hit);
       return;
     }
+    // After a reset, a thumbnail already on screen stays; only missing ones are requested again.
+    if (shown.current.key === key && typeof shown.current.url === "string") return;
     setUrl(undefined);
     let alive = true;
-    const cancel = requestThumb(entry, (u) => alive && setUrl(u));
+    const cancel = requestThumb(entry, (u) => {
+      if (!alive) return;
+      shown.current = { key, url: u };
+      setUrl(u);
+    });
     return () => {
       alive = false;
       cancel();
     };
-  }, [entry.id, entry.modified, thumbable]);
+  }, [entry.id, entry.modified, thumbable, generation]);
 
   // Hover scrub (videos): frames sampled earlier and re-encoded by the worker.
   const [frame, setFrame] = useState<number | null>(null);
@@ -71,7 +83,10 @@ export function Thumb({ entry, fit = "contain", iconSize = 40 }: { entry: Entry;
           decoding="async"
           className={loaded ? "loaded" : ""}
           onLoad={() => setLoaded(true)}
-          onError={() => setUrl(null)}
+          onError={() => {
+            shown.current = { key, url: null };
+            setUrl(null);
+          }}
         />
         {entry.kind === "video" && (
           <span className="badge">

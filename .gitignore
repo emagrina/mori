@@ -54,3 +54,6 @@ desktop.ini
 
 # Original full-resolution branding artwork (large; processed outputs are committed instead)
 assets/branding/source/
+
+# Release workflow output
+dist-release/
