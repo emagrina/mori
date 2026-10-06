@@ -77,6 +77,29 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Cleanup:** uses the same validated executor as exact duplicates (at least one copy kept, kept copies re-checked, OS Trash only, Live Photo halves together).
 - **Failures:** a file that can't be decoded or sampled is reported as "could not safely analyze" and remembered until it changes; the rest of the analysis continues.
 
+## Mutation policy
+
+- **One gate.** All changes to the user's files go through `fileops`, whose mutating functions (`move_to_trash`, `rename_no_replace`, and later operations) take a `&Policy` and call `policy.check` first.
+- **The policy refuses:**
+  - everything in Read-only Mode;
+  - any change to a path that is, or is inside, a protected folder;
+  - trashing, renaming or deleting a folder that contains a protected folder;
+  - creating files inside a protected folder.
+- **Not covered:** Mori's own app state (index, caches, settings, marks).
+
+## Type detection and risk indicators
+
+- **Detection** (`filetype.rs`) reads only the first bytes (and, for truncation checks, the last kilobyte) and matches signatures. Nothing is executed or decoded.
+- **Risk indicators** (`risk.rs`) are factual checks with explanations. Image dimensions come from header fields only.
+- **No verdicts.** The UI never says a file is safe. With no findings it says "No anomaly detected".
+
+## Symbolic links
+
+- **Indexed, never followed.** The scanner records links as their own entries (link text plus whether it points outside the root, decided lexically without touching the target).
+- **Never opened through the link.** Links can't be opened, previewed or read through Mori: `open_by_id` and the `mori://` protocol refuse them.
+- **Mutations act on the link itself.** Trash and rename (`confined_item` uses `symlink_metadata`) never touch the target.
+- **Analyses** (`dupes::collect`) skip links entirely.
+
 ## Private folders (visibility boundaries)
 
 Private folders are a Mori visibility rule, **not a security boundary against other software**:

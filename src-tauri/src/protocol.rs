@@ -75,7 +75,7 @@ fn ok(bytes: Vec<u8>, mime: &str, cache: bool) -> Response<Vec<u8>> {
 /// Open a browser or analyzer file by id, confined to its authorised root.
 fn open(state: &AppState, id: &str) -> Option<(File, std::fs::Metadata, std::path::PathBuf, String)> {
     let loc = state.locate(id).ok()?;
-    if loc.is_dir {
+    if loc.is_dir || loc.is_link {
         return None;
     }
     let (file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).ok()?;

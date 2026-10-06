@@ -1,14 +1,17 @@
 //! The only operations through which Mori changes the filesystem:
 //! moving items to the OS Trash / Recycle Bin, and renaming without ever
-//! overwriting. There is deliberately no permanent-delete function.
+//! overwriting. Every mutation takes a `&Policy` (read-only mode, protected
+//! folders) and checks it first.
 
+use crate::policy::{Op, Policy};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 /// Move a file or folder to the OS Trash (macOS) / Recycle Bin (Windows) /
 /// freedesktop trash (Linux). Recoverable by the user. Never falls back to a
 /// permanent delete: if the platform refuses, the item stays where it is.
-pub fn move_to_trash(path: &Path) -> Result<(), String> {
+pub fn move_to_trash(policy: &Policy, path: &Path) -> Result<(), String> {
+    policy.check(Op::Trash, path)?;
     #[allow(unused_mut)]
     let mut ctx = trash::TrashContext::default();
     #[cfg(target_os = "macos")]
@@ -32,8 +35,9 @@ fn describe_trash_error(e: &trash::Error) -> String {
 }
 
 /// Resolve an existing item for a filesystem change. Unlike reading, this
-/// must not follow a final symlink (we act on the entry itself) and the item
-/// must be a plain file or directory strictly inside `root` (never the root).
+/// never follows a final symlink: a link is acted on as itself (its target
+/// is never touched). The item must be a plain file, directory or link
+/// strictly inside `root` (never the root).
 pub fn confined_item(root: &Path, rel: &str) -> Result<(PathBuf, fs::Metadata), String> {
     let rel_path = Path::new(rel);
     if rel.is_empty() || rel_path.components().any(|c| !matches!(c, Component::Normal(_))) {
@@ -50,7 +54,7 @@ pub fn confined_item(root: &Path, rel: &str) -> Result<(PathBuf, fs::Metadata), 
     let path = parent_canon.join(name);
     let meta = fs::symlink_metadata(&path).map_err(|_| "item no longer exists")?;
     let ft = meta.file_type();
-    if !(ft.is_file() || ft.is_dir()) || ft.is_symlink() {
+    if !(ft.is_file() || ft.is_dir() || ft.is_symlink()) {
         return Err("not a regular file or folder".into());
     }
     if path == root {
@@ -99,7 +103,9 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 }
 
 /// Rename `from` to `to` atomically, failing (never overwriting) if `to` exists.
-pub fn rename_no_replace(from: &Path, to: &Path) -> Result<(), String> {
+pub fn rename_no_replace(policy: &Policy, from: &Path, to: &Path) -> Result<(), String> {
+    policy.check(Op::Rename, from)?;
+    policy.check(Op::Create, to)?;
     let r = platform_rename_excl(from, to);
     match r {
         Ok(()) => Ok(()),
@@ -198,9 +204,13 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("a.txt"), b"a").unwrap();
         fs::write(d.join("b.txt"), b"b").unwrap();
-        assert!(rename_no_replace(&d.join("a.txt"), &d.join("b.txt")).is_err());
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        assert!(rename_no_replace(&p, &d.join("a.txt"), &d.join("b.txt")).is_err());
         assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"b", "target untouched");
-        rename_no_replace(&d.join("a.txt"), &d.join("c.txt")).unwrap();
+        let ro = Policy { read_only: true, protected: &store };
+        assert_eq!(rename_no_replace(&ro, &d.join("a.txt"), &d.join("c.txt")).unwrap_err(), crate::policy::READ_ONLY);
+        rename_no_replace(&p, &d.join("a.txt"), &d.join("c.txt")).unwrap();
         assert!(d.join("c.txt").exists() && !d.join("a.txt").exists());
         fs::remove_dir_all(&d).unwrap();
     }
@@ -219,7 +229,8 @@ mod tests {
         assert!(confined_item(&root, "sub/in.txt").is_ok());
         assert!(confined_item(&root, "sub").is_ok());
         assert!(confined_item(&root, "../outside.txt").is_err());
-        assert!(confined_item(&root, "link.txt").is_err(), "symlink itself is not acted on");
+        let (p, m) = confined_item(&root, "link.txt").unwrap();
+        assert!(m.file_type().is_symlink() && p.ends_with("link.txt"), "a link is the item itself, never its target");
         assert!(confined_item(&root, "escape/outside.txt").is_err(), "symlinked parent escaping the root");
         assert!(confined_item(&root, "").is_err());
         fs::remove_dir_all(&base).unwrap();
@@ -235,10 +246,22 @@ mod tests {
         fs::create_dir_all(d.join("folder")).unwrap();
         fs::write(d.join("file.txt"), b"x").unwrap();
         fs::write(d.join("folder/inner.txt"), b"y").unwrap();
-        move_to_trash(&d.join("file.txt")).unwrap();
-        move_to_trash(&d.join("folder")).unwrap();
+        let store = crate::privacy::Store::load(std::env::temp_dir().join("mori-trash-test-protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        move_to_trash(&p, &d.join("file.txt")).unwrap();
+        move_to_trash(&p, &d.join("folder")).unwrap();
         assert!(!d.join("file.txt").exists() && !d.join("folder").exists());
-        assert!(move_to_trash(&d.join("missing.txt")).is_err(), "a missing item is an error, not a silent success");
+        assert!(move_to_trash(&p, &d.join("missing.txt")).is_err(), "a missing item is an error, not a silent success");
+        // A link goes to the Trash as itself; its target is untouched.
+        fs::write(d.join("target.txt"), b"keep").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("target.txt"), d.join("link.txt")).unwrap();
+            move_to_trash(&p, &d.join("link.txt")).unwrap();
+            assert!(fs::symlink_metadata(d.join("link.txt")).is_err());
+            assert_eq!(fs::read(d.join("target.txt")).unwrap(), b"keep");
+        }
+        fs::remove_file(d.join("target.txt")).unwrap();
         fs::remove_dir(&d).unwrap();
     }
 }

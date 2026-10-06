@@ -151,6 +151,17 @@ export function FileView(p: Props) {
             <span className="c-name">
               <Icon name={e.kind} size={16} />
               <span className="truncate">{e.name}</span>
+              {e.flagged && (
+                <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
+                  <Icon name="warning" size={11} />
+                </span>
+              )}
+              {e.protected && (
+                <span className="private-mark" title="Never Modify">
+                  <Icon name="shield" size={11} />
+                </span>
+              )}
+              {e.link && <span className="link-target truncate">→ {e.link}</span>}
               {e.private && (
                 <span className="private-mark" title={PRIVATE_HINT}>
                   <Icon name="lock" size={11} />
@@ -187,8 +198,23 @@ export function FileView(p: Props) {
               <Thumb entry={e} fit={isMedia(e) ? "cover" : "contain"} iconSize={e.kind === "folder" ? Math.round((tileW - GRID_CHROME) * 0.27) : 36} />
             </div>
             <div className="caption">
-              <div className="name truncate">{e.name}</div>
+              <div className="name truncate">
+                {e.flagged && (
+                  <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
+                    <Icon name="warning" size={11} />{" "}
+                  </span>
+                )}
+                {e.name}
+              </div>
               <div className="meta truncate">
+                {e.kind === "folder" && e.protected && (
+                  <>
+                    <span className="private-mark" title="Never Modify">
+                      <Icon name="shield" size={10} /> Protected
+                    </span>
+                    {" · "}
+                  </>
+                )}
                 {e.kind === "folder" && e.private && (
                   <>
                     <span className="private-mark" title={PRIVATE_HINT}>

@@ -48,6 +48,9 @@
     "allow-similar-forget-decisions",
     "allow-similar-clear",
     "allow-similar-cleanup",
-    "allow-set-folder-private"
+    "allow-set-folder-private",
+    "allow-file-report",
+    "allow-set-read-only",
+    "allow-set-folder-protected"
   ]
 }

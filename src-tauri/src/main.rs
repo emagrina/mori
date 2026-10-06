@@ -3,12 +3,16 @@
 
 mod dupes;
 mod fileops;
+mod filetype;
 #[cfg(target_os = "macos")]
 mod heif;
 mod index;
+mod inspect;
+mod policy;
 mod privacy;
 mod probe;
 mod protocol;
+mod risk;
 mod secure;
 mod similar;
 mod thumbs;
@@ -70,6 +74,10 @@ pub struct AppState {
     similar_token: AtomicU64,
     /// Private folders (visibility boundaries), persisted in app data.
     privacy: privacy::Store,
+    /// Protected folders ("Never Modify"), persisted in app data.
+    protected: privacy::Store,
+    /// Read-only Mode: every filesystem mutation is refused (policy.rs).
+    read_only: AtomicBool,
 }
 
 type SimilarReply = (u64, std::sync::mpsc::Sender<Result<similar::Capture, similar::CaptureError>>);
@@ -98,6 +106,8 @@ pub struct Located {
     pub ext: String,
     pub name: String,
     pub is_dir: bool,
+    /// A symbolic link: described and listed, never followed or opened.
+    pub is_link: bool,
 }
 
 fn analysis_id(root: &Path, rel: &str) -> String {
@@ -128,6 +138,11 @@ impl AppState {
 
     pub fn video_playable(&self, canon: &Path, meta: &fs::Metadata, detected: Detected) -> bool {
         self.video_info(canon, meta, detected).status == video::VideoStatus::Playable
+    }
+
+    /// The gate for every change to the user's files.
+    pub fn policy(&self) -> policy::Policy<'_> {
+        policy::Policy { read_only: self.read_only.load(Ordering::SeqCst), protected: &self.protected }
     }
 
     pub fn root_canon(&self) -> Option<PathBuf> {
@@ -161,6 +176,7 @@ impl AppState {
                 ext: f.ext.clone(),
                 name: f.name.clone(),
                 is_dir: false,
+                is_link: false,
             });
         }
         if id.starts_with('x') {
@@ -174,6 +190,7 @@ impl AppState {
                 ext: f.ext.clone(),
                 name: f.name.clone(),
                 is_dir: false,
+                is_link: false,
             });
         }
         let root = self.root_canon().ok_or("No folder selected")?;
@@ -185,6 +202,7 @@ impl AppState {
             ext: e.ext.clone(),
             name: e.name.clone(),
             is_dir: e.kind == index::Kind::Folder,
+            is_link: e.kind == index::Kind::Link,
         })
     }
 
@@ -204,7 +222,8 @@ impl AppState {
     /// Open a file by id, confined to its root.
     fn open_by_id(&self, id: &str) -> Result<(fs::File, fs::Metadata, PathBuf, String), String> {
         let loc = self.locate(id)?;
-        if loc.is_dir {
+        if loc.is_dir || loc.is_link {
+            // Links are never followed: opening one would read its target.
             return Err("Not a file".into());
         }
         let (f, m, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| "File unavailable")?;
@@ -221,11 +240,20 @@ impl AppState {
         if Path::new(&loc.rel).components().any(|c| !matches!(c, Component::Normal(_))) {
             return Err("Invalid path".into());
         }
-        let canon = fs::canonicalize(loc.root.join(&loc.rel)).map_err(|_| "Item unavailable")?;
+        // A link is shown as itself: resolve its folder, never its target.
+        let (dir, last) = match loc.rel.rsplit_once('/') {
+            Some((d, n)) if loc.is_link => (d.to_owned(), Some(n.to_owned())),
+            None if loc.is_link => (String::new(), Some(loc.rel.clone())),
+            _ => (loc.rel.clone(), None),
+        };
+        let canon = fs::canonicalize(loc.root.join(&dir)).map_err(|_| "Item unavailable")?;
         if !canon.starts_with(&loc.root) {
             return Err("Item unavailable".into());
         }
-        Ok(canon)
+        Ok(match last {
+            Some(name) => canon.join(name),
+            None => canon,
+        })
     }
 }
 
@@ -246,6 +274,8 @@ struct Settings {
     recursive: Option<bool>,
     #[serde(default)]
     search_global: Option<bool>,
+    #[serde(default)]
+    read_only: Option<bool>,
 }
 
 const VIEWS: &[&str] = &["gallery", "grid", "list"];
@@ -359,6 +389,7 @@ fn publish_index(app: &AppHandle, mut idx: Index) {
     let state = app.state::<AppState>();
     if let Some(root) = state.root_canon() {
         idx.apply_boundaries(&state.privacy.boundaries(&root));
+        idx.apply_protection(&state.protected.boundaries(&root), state.protected.covering(&root).is_some());
     }
     *state.index.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(idx);
     let _ = app.emit("index-changed", ());
@@ -397,6 +428,7 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
                 // Follow moved private folders before anything is shown.
                 let found: Vec<(&str, u64)> = dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
                 state.privacy.reconcile(&root, &found);
+                state.protected.reconcile(&root, &found);
                 let partial = Index::new(root.to_string_lossy().into_owned(), 0, files.to_vec(), dirs.to_vec());
                 publish_index(&app, partial);
             }
@@ -416,6 +448,7 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         // Private folders moved or renamed outside Mori: follow them by inode.
         let dirs: Vec<(&str, u64)> = idx.dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
         state.privacy.reconcile(&root, &dirs);
+        state.protected.reconcile(&root, &dirs);
         publish_index(&app, idx);
         state.scanning.store(false, Ordering::SeqCst);
         emit_status(&app);
@@ -457,6 +490,7 @@ struct InitInfo {
     desc: Option<bool>,
     recursive: Option<bool>,
     search_global: Option<bool>,
+    read_only: bool,
     platform: &'static str,
     /// Differs on every app launch; lets the UI tell an in-process reload
     /// (restore where the user was) from a fresh start.
@@ -491,6 +525,7 @@ fn init(app: AppHandle, state: State<'_, AppState>) -> InitInfo {
         desc: settings.desc,
         recursive: settings.recursive,
         search_global: settings.search_global,
+        read_only: state.read_only.load(Ordering::SeqCst),
         platform: std::env::consts::OS,
         launch_id: launch_id(),
         translocated: std::env::current_exe()
@@ -578,6 +613,9 @@ struct QueryResponse {
     /// The current folder is private or inside a private folder.
     #[serde(rename = "privateScope")]
     private_scope: bool,
+    /// The current folder is protected or inside a protected folder.
+    #[serde(rename = "protectedScope")]
+    protected_scope: bool,
 }
 
 #[tauri::command]
@@ -597,6 +635,7 @@ async fn query(state: State<'_, AppState>, q: Query) -> Result<QueryResponse, ()
         truncated: r.truncated,
         crumbs: index::crumbs(&idx, &q.folder).into_iter().map(|(id, name)| Crumb { id, name }).collect(),
         private_scope: r.private_scope,
+        protected_scope: r.protected_scope,
     })
 }
 
@@ -843,7 +882,7 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
             if meta.is_file() {
                 invalidate_thumbs(&state, &path, &meta);
             }
-            match fileops::move_to_trash(&path) {
+            match fileops::move_to_trash(&state.policy(), &path) {
                 Ok(()) => {
                     out.trashed.push(id.clone());
                     out.bytes += bytes;
@@ -904,7 +943,7 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
     if meta.is_file() {
         invalidate_thumbs(&state, &path, &meta);
     }
-    fileops::rename_no_replace(&path, &target)?;
+    fileops::rename_no_replace(&state.policy(), &path, &target)?;
     if meta.is_dir() {
         // A private folder (or one containing private folders) keeps its privacy.
         state.privacy.renamed(&path, &target);
@@ -916,6 +955,90 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
     };
     apply_index_change(&app, |idx| idx.rename_path(&old_rel, &new_rel));
     Ok(index::id_str(index::id_for(&new_rel)))
+}
+
+// ----------------------------------------------------------- inspection
+
+/// Factual report on a file, folder or link (type, risk indicators,
+/// permissions, marks). Bounded reads only; nothing is decoded or followed.
+#[tauri::command]
+async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let loc = state.locate(&id)?;
+        let abs = state.path_by_id(&id)?;
+        let meta = inspect::lstat(&abs).map_err(|_| "Item unavailable")?;
+        let mut ctx = inspect::Context::default();
+        if loc.is_link {
+            let idx = state.index();
+            if let Some(e) = idx.get(&id) {
+                ctx.link_target = e.link.clone();
+                ctx.link_outside = e.link_outside;
+            }
+        }
+        let mut file = None;
+        if meta.is_file() {
+            if let Ok((mut f, m, canon)) = secure::open_inside(&loc.root, &loc.rel) {
+                let head = secure::read_head(&mut f, secure::SNIFF_LEN);
+                let detected = secure::sniff(&head, &loc.ext);
+                let _ = std::io::Seek::rewind(&mut f);
+                ctx.decode_failed = thumbs::is_miss(&thumbs::stem(&state.thumb_dir, &canon, &m, protocol::THUMB_SIZE));
+                if detected.is_video() {
+                    let status = state.video_info(&canon, &m, detected).status;
+                    ctx.media_blocked = status == video::VideoStatus::Blocked;
+                    ctx.broken_container = status == video::VideoStatus::Damaged;
+                }
+                file = Some(f);
+            }
+        }
+        let rel_display = loc.rel.clone();
+        ctx.marks = inspect::Marks {
+            private: meta.is_dir() && state.privacy.covering(&abs).is_some_and(|p| abs.ends_with(&p)),
+            inside_private: state.privacy.covering(&abs).is_some(),
+            protected: meta.is_dir() && state.protected.covering(&abs).is_some_and(|p| abs.ends_with(&p)),
+            inside_protected: state.protected.covering(&abs).is_some(),
+        };
+        Ok(inspect::report(&abs, &rel_display, &meta, file.as_mut(), ctx))
+    })
+    .await
+    .map_err(|_| "The report failed.".to_string())?
+}
+
+// ---------------------------------------------------------- read-only mode
+
+/// Read-only Mode is enforced by the mutation policy (policy.rs), not the UI.
+#[tauri::command]
+fn set_read_only(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    write_settings(&state, |s| s.read_only = Some(on))?;
+    state.read_only.store(on, Ordering::SeqCst);
+    Ok(())
+}
+
+// --------------------------------------------------------- protected folders
+
+/// Mark a folder "Never Modify" (or remove that). Mori state only: the
+/// folder itself is not touched. Allowed in Read-only Mode.
+#[tauri::command]
+async fn set_folder_protected(app: AppHandle, id: String, protected: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if id.starts_with('x') || id.starts_with('y') {
+            return Err("Choose the folder in the browser.".to_string());
+        }
+        let loc = state.locate(&id)?;
+        if !loc.is_dir {
+            return Err("Only folders can be protected.".into());
+        }
+        let (path, meta) = fileops::confined_item(&loc.root, &loc.rel)?;
+        if !meta.is_dir() {
+            return Err("Only folders can be protected.".into());
+        }
+        state.protected.set(&path, privacy::ino_of(&meta), protected)?;
+        apply_index_change(&app, |_| {});
+        Ok(())
+    })
+    .await
+    .map_err(|_| "The operation failed.".to_string())?
 }
 
 // ---------------------------------------------------------- private folders
@@ -1322,7 +1445,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
                         return Err("not a regular file".into());
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
-                    fileops::move_to_trash(&path)
+                    fileops::move_to_trash(&thumb_state.policy(), &path)
                 },
                 &cancel,
                 &mut |done, total| {
@@ -1759,7 +1882,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
                         return Err("not a regular file".into());
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
-                    fileops::move_to_trash(&path)
+                    fileops::move_to_trash(&thumb_state.policy(), &path)
                 },
                 &cancel,
                 &mut |done, total| {
@@ -2034,6 +2157,14 @@ fn main() {
                 similar_capture: Mutex::new(None),
                 similar_token: AtomicU64::new(0),
                 privacy: privacy::Store::load(data_dir_for_video.join("private-folders.json")),
+                protected: privacy::Store::load(data_dir_for_video.join("protected-folders.json")),
+                read_only: AtomicBool::new(
+                    fs::read(data_dir_for_video.join("settings.json"))
+                        .ok()
+                        .and_then(|d| serde_json::from_slice::<Settings>(&d).ok())
+                        .and_then(|s| s.read_only)
+                        .unwrap_or(false),
+                ),
             });
             spawn_media_watchdog(app.handle().clone());
             // Debug builds only: MORI_DEBUG_FREEZE_AT=<secs> wedges the page's JS
@@ -2098,7 +2229,10 @@ fn main() {
             similar_forget_decisions,
             similar_clear,
             similar_cleanup,
-            set_folder_private
+            set_folder_private,
+            file_report,
+            set_read_only,
+            set_folder_protected
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mori");

@@ -31,6 +31,8 @@ pub enum Kind {
     Document,
     Audio,
     Other,
+    /// A symbolic link. Listed and described, never followed.
+    Link,
 }
 
 impl Kind {
@@ -93,6 +95,19 @@ pub struct Entry {
     /// Folders only: this folder is itself private.
     #[serde(skip)]
     pub private: bool,
+    /// Folders only: protected ("Never Modify") itself.
+    #[serde(skip)]
+    pub protected: bool,
+    /// Inside (or equal to) a protected folder: Mori won't change it.
+    #[serde(skip)]
+    pub guarded: bool,
+    /// Links only: the link text (never resolved on disk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Links only: the target lies outside the indexed root (judged from
+    /// the link text alone).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub link_outside: bool,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -143,6 +158,16 @@ pub struct Item {
     /// A private folder (visibility boundary).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// A protected folder ("Never Modify").
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub protected: bool,
+    /// Symbolic links: where the link points (display only, never followed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// The name alone shows a high-attention pattern (double extension,
+    /// direction-control characters). Details in the inspector.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flagged: bool,
 }
 
 impl From<&Entry> for Item {
@@ -158,6 +183,9 @@ impl From<&Entry> for Item {
             created: e.created,
             location: None,
             private: e.private,
+            protected: e.protected,
+            link: e.link.as_deref().map(display_safe),
+            flagged: crate::risk::name_findings(&e.name).iter().any(|f| f.level == crate::risk::Level::High),
         }
     }
 }
@@ -185,11 +213,15 @@ pub struct Index {
     /// id -> (is_dir, position)
     #[serde(skip)]
     pub by_id: HashMap<u64, (bool, usize)>,
+    /// The root itself is inside a protected folder.
+    #[serde(skip)]
+    pub root_guarded: bool,
 }
 
 impl Index {
     pub fn new(root: String, scanned_at: i64, files: Vec<Entry>, dirs: Vec<Entry>) -> Index {
-        let mut idx = Index { version: INDEX_VERSION, root, scanned_at, files, dirs, by_id: HashMap::new() };
+        let mut idx =
+            Index { version: INDEX_VERSION, root, scanned_at, files, dirs, by_id: HashMap::new(), root_guarded: false };
         idx.build_lookup();
         idx
     }
@@ -258,6 +290,19 @@ impl Index {
                 }
             }
         }
+    }
+
+    /// Mark protected folders ("Never Modify") and everything inside them.
+    /// `protected` holds folders strictly below the root; `root_protected`
+    /// means the root itself is inside a protected folder.
+    pub fn apply_protection(&mut self, protected: &HashSet<String>, root_protected: bool) {
+        for e in self.files.iter_mut().chain(self.dirs.iter_mut()) {
+            e.protected = e.kind == Kind::Folder && protected.contains(&e.path);
+            e.guarded = root_protected
+                || e.protected
+                || (!protected.is_empty() && e.path.match_indices('/').any(|(i, _)| protected.contains(&e.path[..i])));
+        }
+        self.root_guarded = root_protected;
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry> {
@@ -369,6 +414,10 @@ pub fn make_entry(path: String, name: String, is_dir: bool, meta: &fs::Metadata)
         ino: if is_dir { crate::privacy::ino_of(meta) } else { 0 },
         boundary: 0,
         private: false,
+        protected: false,
+        guarded: false,
+        link: None,
+        link_outside: false,
     }
 }
 
@@ -405,13 +454,21 @@ pub fn scan(
             continue;
         }
         let ft = item.file_type();
-        if !ft.is_dir() && !ft.is_file() {
+        if !ft.is_dir() && !ft.is_file() && !ft.is_symlink() {
             continue;
         }
         let Some(rel) = rel_path(root, item.path()) else { continue };
+        // For links this is the link's own metadata (never the target's).
         let Ok(meta) = item.metadata() else { continue };
         let Some(name) = item.file_name().to_str().map(str::to_owned) else { continue };
-        let entry = make_entry(rel, name, ft.is_dir(), &meta);
+        let mut entry = make_entry(rel, name, ft.is_dir(), &meta);
+        if ft.is_symlink() {
+            let target = fs::read_link(item.path()).ok();
+            entry.kind = Kind::Link;
+            entry.size = 0;
+            entry.link_outside = target.as_deref().is_none_or(|t| link_escapes(root, item.path(), t));
+            entry.link = Some(target.map(|t| t.to_string_lossy().into_owned()).unwrap_or_default());
+        }
         if ft.is_dir() {
             dirs.push(entry);
         } else {
@@ -430,6 +487,29 @@ pub fn scan(
     }
     progress(files.len(), None);
     Some(Index::new(root.to_string_lossy().into_owned(), now_millis(), files, dirs))
+}
+
+/// Whether a link's text points outside `root`, decided lexically (the
+/// target is never touched: it could be slow, missing or a loop).
+pub fn link_escapes(root: &Path, link: &Path, target: &Path) -> bool {
+    use std::path::Component;
+    let mut out = if target.is_absolute() {
+        std::path::PathBuf::new()
+    } else {
+        link.parent().map(Path::to_path_buf).unwrap_or_default()
+    };
+    for c in target.components() {
+        match c {
+            Component::ParentDir => {
+                if !out.pop() {
+                    return true;
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    !out.starts_with(root)
 }
 
 pub fn load(file: &Path, root: &Path) -> Option<Index> {
@@ -486,6 +566,8 @@ pub struct QueryResult<'a> {
     pub base: &'a str,
     /// The scope is a private folder or inside one (opened explicitly).
     pub private_scope: bool,
+    /// The scope is protected ("Never Modify") or inside a protected folder.
+    pub protected_scope: bool,
 }
 
 /// Case-insensitive natural ordering: "IMG_2" < "IMG_10".
@@ -537,7 +619,14 @@ fn compare(a: &Entry, b: &Entry, sort: &str) -> Ordering {
 }
 
 pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
-    let empty = QueryResult { items: Vec::new(), total: 0, truncated: false, base: "", private_scope: false };
+    let empty = QueryResult {
+        items: Vec::new(),
+        total: 0,
+        truncated: false,
+        base: "",
+        private_scope: false,
+        protected_scope: false,
+    };
     let tokens: Vec<String> = fold(&q.search).split_whitespace().map(String::from).collect();
     let searching = !tokens.is_empty();
     let kind = Kind::parse(&q.kind);
@@ -601,8 +690,10 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
     let mut items = dirs;
     items.extend(files);
     items.truncate(RESULT_LIMIT);
-    let private_scope = !base.is_empty() && idx.get(&id_str(id_for(base))).is_some_and(|d| d.private || d.boundary > 0);
-    QueryResult { truncated: total > items.len(), items, total, base, private_scope }
+    let base_entry = (!base.is_empty()).then(|| idx.get(&id_str(id_for(base)))).flatten();
+    let private_scope = base_entry.is_some_and(|d| d.private || d.boundary > 0);
+    let protected_scope = if base.is_empty() { idx.root_guarded } else { base_entry.is_some_and(|d| d.guarded) };
+    QueryResult { truncated: total > items.len(), items, total, base, private_scope, protected_scope }
 }
 
 /// Where an entry lives, relative to the folder being viewed ("" = right there).
@@ -624,6 +715,7 @@ pub struct Stats {
     pub document: usize,
     pub audio: usize,
     pub other: usize,
+    pub links: usize,
     pub bytes: u64,
 }
 
@@ -643,6 +735,7 @@ pub fn stats(idx: &Index) -> Stats {
             Kind::Gif => s.gif += 1,
             Kind::Document => s.document += 1,
             Kind::Audio => s.audio += 1,
+            Kind::Link => s.links += 1,
             _ => s.other += 1,
         }
     }
@@ -897,6 +990,40 @@ mod tests {
         assert!(has(&lib(&idx, "photo"), "Pictures/Private/MorePrivate/deep.jpg"));
         assert_eq!(stats(&idx).files, 11);
         assert_eq!(names(&query(&idx, &Query { recursive: true, ..parent })).len(), 11);
+    }
+
+    /// Symlinks are listed and described, never followed: a link to "/" or
+    /// a link loop must not pull anything into the index.
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_listed_but_never_followed() {
+        use std::os::unix::fs::symlink;
+        let d = tempdir::Dir::new();
+        fs::create_dir_all(d.0.join("Photos")).unwrap();
+        fs::write(d.0.join("Photos/a.jpg"), b"x").unwrap();
+        symlink("/", d.0.join("Photos/whole-disk")).unwrap();
+        symlink("../Photos", d.0.join("Photos/loop")).unwrap();
+        symlink("a.jpg", d.0.join("Photos/alias.jpg")).unwrap();
+        symlink("b", d.0.join("x")).unwrap();
+        symlink("x", d.0.join("b")).unwrap();
+        let idx = scan_tree(&d);
+        let get = |p: &str| idx.files.iter().find(|e| e.path == p).unwrap_or_else(|| panic!("{p} missing"));
+        assert_eq!(get("Photos/whole-disk").kind, Kind::Link);
+        assert!(get("Photos/whole-disk").link_outside);
+        assert_eq!(get("Photos/whole-disk").link.as_deref(), Some("/"));
+        assert!(!get("Photos/loop").link_outside, "points back inside the root");
+        assert!(!get("Photos/alias.jpg").link_outside);
+        assert_eq!(get("x").kind, Kind::Link);
+        // Nothing beyond the links themselves was indexed.
+        assert_eq!(idx.files.len(), 6, "{:?}", idx.files.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert_eq!(idx.dirs.len(), 1);
+        let rec = query(&idx, &Query { recursive: true, kind: "all".into(), ..Default::default() });
+        assert_eq!(rec.items.len(), 6);
+        // Counted as links, not as photos.
+        let st = stats(&idx);
+        assert_eq!((st.photo, st.links), (1, 5));
+        assert!(link_escapes(&d.0, &d.0.join("a/l"), Path::new("../../outside")));
+        assert!(!link_escapes(&d.0, &d.0.join("a/l"), Path::new("../b/./c")));
     }
 
     #[cfg(unix)]

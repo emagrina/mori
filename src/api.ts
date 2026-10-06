@@ -1,8 +1,8 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other";
-export type KindFilter = "all" | Exclude<Kind, "folder">;
+export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
+export type KindFilter = "all" | Exclude<Kind, "folder" | "link">;
 export type ViewMode = "gallery" | "grid" | "list";
 export type SortKey = "name" | "modified" | "created" | "size" | "type";
 export type Scope = "folder" | "library";
@@ -24,6 +24,12 @@ export interface Entry {
   location?: string;
   /** A private folder: its contents aren't surfaced outside it. */
   private?: boolean;
+  /** A protected folder ("Never Modify"). */
+  protected?: boolean;
+  /** Symbolic links: where the link points (never followed). */
+  link?: string;
+  /** The name alone shows a high-attention pattern (see the inspector). */
+  flagged?: boolean;
 }
 
 export interface Status {
@@ -42,6 +48,7 @@ export interface InitInfo {
   desc: boolean | null;
   recursive: boolean | null;
   searchGlobal: boolean | null;
+  readOnly: boolean;
   platform: string;
   launchId: number;
   translocated: boolean;
@@ -59,9 +66,60 @@ export interface QueryResult {
   crumbs: Crumb[];
   /** The current folder is private, or inside a private folder. */
   privateScope?: boolean;
+  /** The current folder is protected, or inside a protected folder. */
+  protectedScope?: boolean;
 }
 
-export type Stats = Record<"files" | "folders" | "bytes" | Exclude<KindFilter, "all">, number>;
+export type Stats = Record<"files" | "folders" | "bytes" | "links" | Exclude<KindFilter, "all">, number>;
+
+// ------------------------------------------------------------- inspection
+
+export type RiskLevel = "info" | "attention" | "high";
+
+export interface Finding {
+  level: RiskLevel;
+  code: string;
+  title: string;
+  detail: string;
+}
+
+export interface FileType {
+  id: string;
+  label: string;
+  family: string;
+  mime: string;
+}
+
+export interface Permissions {
+  mode: string;
+  octal: string;
+  owner: string;
+  group: string;
+  special: string[];
+  flags: string[];
+  xattrs: string[];
+  aclEntries: number | null;
+  hardLinks: number;
+}
+
+export interface FileReport {
+  name: string;
+  path: string;
+  kind: "file" | "folder" | "link";
+  size: number;
+  modified: number | null;
+  created: number | null;
+  accessed: number | null;
+  ext: string;
+  detected: FileType | null;
+  extMatches: boolean | null;
+  findings: Finding[];
+  summary: string;
+  permissions: Permissions | null;
+  linkTarget: string | null;
+  linkOutside: boolean;
+  marks: { private: boolean; insidePrivate: boolean; protected: boolean; insideProtected: boolean };
+}
 
 export interface Query {
   /** Folder id ("" = root). */
@@ -316,6 +374,11 @@ export const api = {
   similarCleanup: (plan: PlanItem[]) => invoke<CleanupOutcome>("similar_cleanup", { plan }),
   /** Mark a folder private (a Mori visibility boundary) or public. Never touches the folder. */
   setFolderPrivate: (id: string, isPrivate: boolean) => invoke<void>("set_folder_private", { id, private: isPrivate }),
+  /** Factual report: real type, risk indicators, permissions. Nothing is decoded or followed. */
+  fileReport: (id: string) => invoke<FileReport>("file_report", { id }),
+  /** Enforced by the backend mutation policy, not just the UI. */
+  setReadOnly: (on: boolean) => invoke<void>("set_read_only", { on }),
+  setFolderProtected: (id: string, isProtected: boolean) => invoke<void>("set_folder_protected", { id, protected: isProtected }),
 };
 
 /**
@@ -733,6 +796,7 @@ export const formatDate = (ms: number | null) => (ms ? dateFmt.format(ms) : "—
 export const formatShortDate = (ms: number | null) => (ms ? shortDateFmt.format(ms) : "—");
 
 export const KIND_LABEL: Record<Kind, string> = {
+  link: "Link",
   folder: "Folder",
   photo: "Photo",
   video: "Video",
@@ -744,6 +808,7 @@ export const KIND_LABEL: Record<Kind, string> = {
 
 export function typeLabel(e: Entry): string {
   if (e.kind === "folder") return "Folder";
+  if (e.kind === "link") return "Symbolic link";
   const noun = { photo: "image", gif: "image", video: "video", audio: "audio", document: "document", other: "file" }[e.kind];
   return e.ext ? `${e.ext.toUpperCase()} ${noun}` : KIND_LABEL[e.kind];
 }

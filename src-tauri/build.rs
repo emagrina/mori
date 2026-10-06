@@ -42,6 +42,9 @@ const COMMANDS: &[&str] = &[
     "similar_clear",
     "similar_cleanup",
     "set_folder_private",
+    "file_report",
+    "set_read_only",
+    "set_folder_protected",
 ];
 
 fn main() {
