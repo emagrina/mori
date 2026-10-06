@@ -114,6 +114,12 @@ pub struct Entry {
     /// The same after the user's corrections (what views use).
     #[serde(skip)]
     pub capture: u8,
+    /// In the user's Favorites (stored outside the index, see `publish_index`).
+    #[serde(skip)]
+    pub favorite: bool,
+    /// Local tag ids (see `tags.rs`).
+    #[serde(skip)]
+    pub tags: Vec<u32>,
 }
 
 fn is_zero_u8(v: &u8) -> bool {
@@ -181,6 +187,10 @@ pub struct Item {
     /// 1 = screenshot, 2 = screen recording (a guess the user can correct).
     #[serde(skip_serializing_if = "is_zero_u8")]
     pub capture: u8,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub favorite: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<u32>,
 }
 
 impl From<&Entry> for Item {
@@ -200,6 +210,8 @@ impl From<&Entry> for Item {
             link: e.link.as_deref().map(display_safe),
             flagged: crate::risk::name_findings(&e.name).iter().any(|f| f.level == crate::risk::Level::High),
             capture: e.capture,
+            favorite: e.favorite,
+            tags: e.tags.clone(),
         }
     }
 }
@@ -317,6 +329,14 @@ impl Index {
     /// Mark protected folders ("Never Modify") and everything inside them.
     /// `protected` holds folders strictly below the root; `root_protected`
     /// means the root itself is inside a protected folder.
+    /// Favorites and tags (kept in their own stores, keyed by relative path).
+    pub fn apply_org(&mut self, favorites: &HashSet<String>, tags: &HashMap<String, Vec<u32>>) {
+        for e in self.files.iter_mut().chain(self.dirs.iter_mut()) {
+            e.favorite = favorites.contains(&e.path);
+            e.tags = tags.get(&e.path).cloned().unwrap_or_default();
+        }
+    }
+
     /// User corrections: `not` = never a screenshot/recording, `yes` = one.
     pub fn apply_capture(&mut self, not: &HashSet<String>, yes: &HashSet<String>) {
         for e in self.files.iter_mut() {
@@ -453,6 +473,8 @@ pub fn make_entry(path: String, name: String, is_dir: bool, meta: &fs::Metadata)
         ino: if is_dir { crate::privacy::ino_of(meta) } else { 0 },
         capture_auto: 0,
         capture: 0,
+        favorite: false,
+        tags: Vec::new(),
         boundary: 0,
         private: false,
         protected: false,
@@ -680,9 +702,18 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
         "recording" => Some(crate::capture::RECORDING),
         _ => None,
     };
-    let kind_ok = |e: &Entry| match capture {
-        Some(c) => e.capture == c,
-        None => kind.is_none_or(|k| e.kind == k),
+    let favorites = q.kind == "favorites";
+    let tag: Option<u32> = q.kind.strip_prefix("tag:").and_then(|t| t.parse().ok());
+    let kind_ok = |e: &Entry| {
+        if favorites {
+            e.favorite
+        } else if let Some(t) = tag {
+            e.tags.contains(&t)
+        } else if let Some(c) = capture {
+            e.capture == c
+        } else {
+            kind.is_none_or(|k| e.kind == k)
+        }
     };
 
     // Scope: the whole drive (library views, global search) or one folder,
@@ -725,7 +756,14 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
     // only when no type filter is active; never in recursive (flattened) views.
     let show_dirs =
         q.scope != "library" && if searching { kind.is_none() && (drive_wide || !recursive) } else { !recursive };
-    let mut dirs: Vec<&Entry> = if show_dirs { idx.dirs.iter().filter(|e| wanted(e)).collect() } else { Vec::new() };
+    // Favorites and tags include folders (drive-wide, like the files).
+    let mut dirs: Vec<&Entry> = if favorites || tag.is_some() {
+        idx.dirs.iter().filter(|e| kind_ok(e) && wanted(e)).collect()
+    } else if show_dirs {
+        idx.dirs.iter().filter(|e| wanted(e)).collect()
+    } else {
+        Vec::new()
+    };
     let mut files: Vec<&Entry> = idx.files.iter().filter(|e| kind_ok(e) && wanted(e)).collect();
 
     let sort = q.sort.as_str();
@@ -1050,6 +1088,36 @@ mod tests {
         assert!(has(&lib(&idx, "photo"), "Pictures/Private/MorePrivate/deep.jpg"));
         assert_eq!(stats(&idx).files, 11);
         assert_eq!(names(&query(&idx, &Query { recursive: true, ..parent })).len(), 11);
+    }
+
+    #[test]
+    fn favorites_and_tags_filter_files_and_folders() {
+        let d = tempdir::Dir::new();
+        fs::create_dir_all(d.0.join("Trips/Rome")).unwrap();
+        fs::write(d.0.join("Trips/Rome/a.jpg"), b"x").unwrap();
+        fs::write(d.0.join("b.jpg"), b"x").unwrap();
+        let mut idx = scan_tree(&d);
+        let fav: HashSet<String> = ["Trips/Rome".to_string(), "b.jpg".to_string()].into();
+        let tags: HashMap<String, Vec<u32>> =
+            [("Trips/Rome/a.jpg".to_string(), vec![7]), ("b.jpg".to_string(), vec![7, 9])].into();
+        idx.apply_org(&fav, &tags);
+        let q = |idx: &Index, k: &str| {
+            let mut v: Vec<String> =
+                query(idx, &Query { scope: "library".into(), kind: k.into(), ..Default::default() })
+                    .items
+                    .iter()
+                    .map(|e| e.path.clone())
+                    .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(q(&idx, "favorites"), ["Trips/Rome", "b.jpg"]);
+        assert_eq!(q(&idx, "tag:7"), ["Trips/Rome/a.jpg", "b.jpg"]);
+        assert_eq!(q(&idx, "tag:9"), ["b.jpg"]);
+        assert!(q(&idx, "tag:1").is_empty());
+        // Private folders stay boundaries for these views too.
+        idx.apply_boundaries(&["Trips".to_string()].into());
+        assert_eq!(q(&idx, "tag:7"), ["b.jpg"]);
     }
 
     #[test]
