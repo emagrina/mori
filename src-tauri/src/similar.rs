@@ -1446,6 +1446,157 @@ mod tests {
         let _ = fs::remove_file(p);
     }
 
+    // ------------------------------------------------ end to end (in-process)
+
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn temp_lab() -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("mori-sim-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        fs::create_dir_all(&d).unwrap();
+        fs::canonicalize(d).unwrap()
+    }
+
+    /// A textured "photo": overlapping gradients and rings, seeded.
+    fn scene(seed: u32, w: u32, h: u32) -> image::RgbImage {
+        image::RgbImage::from_fn(w, h, |x, y| {
+            let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+            let s = seed as f32;
+            let r = ((fx * (3.0 + s)).sin() * 0.5 + 0.5) * 255.0;
+            let g = (((fx - 0.5).hypot(fy - 0.4) * (14.0 + s * 3.0)).cos() * 0.5 + 0.5) * 255.0;
+            let b = ((fy * (5.0 + s * 2.0) + fx * s).cos() * 0.5 + 0.5) * 255.0;
+            image::Rgb([r as u8, g as u8, b as u8])
+        })
+    }
+
+    fn save(img: &image::RgbImage, path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        img.save(path).unwrap();
+    }
+
+    fn run(lab: &Path, dismissed: &HashSet<PairKey>, cancel: &AtomicBool) -> Result<SimilarAnalysis, Cancelled> {
+        let decode = |b: Vec<u8>| crate::worker::fingerprint_in_process(&b);
+        let mut capture = |_: usize, _: &FileRec, _: &[f64]| Err(CaptureError::Failed);
+        let mut registered = |_: &[Root], _: &[FileRec]| {};
+        let mut env =
+            Env { cache_dir: None, decode: &decode, capture: &mut capture, registered: &mut registered, dismissed };
+        let spec = Spec {
+            roots: vec![Root { canon: lab.to_path_buf(), label: "Lab".into() }],
+            photos: true,
+            videos: true,
+            recursive: true,
+            sensitivity: Sensitivity::Balanced,
+        };
+        analyze(spec, &mut env, cancel, &mut |_| {})
+    }
+
+    fn names(r: &SimilarAnalysis, g: usize) -> Vec<String> {
+        r.analysis.groups[g].members.iter().map(|m| r.analysis.files[m.files[0]].rel.clone()).collect()
+    }
+
+    #[test]
+    fn finds_variants_rejects_different_images_and_keeps_the_original() {
+        let lab = temp_lab();
+        let a = scene(1, 1600, 1200);
+        save(&a, &lab.join("DCIM/IMG_0001.jpg"));
+        save(
+            &image::imageops::resize(&a, 800, 600, image::imageops::FilterType::Triangle),
+            &lab.join("WhatsApp/WhatsApp Image.png"),
+        );
+        save(
+            &image::imageops::resize(&a, 400, 300, image::imageops::FilterType::Triangle),
+            &lab.join("Downloads/small copy.jpg"),
+        );
+        save(&scene(4, 1600, 1200), &lab.join("DCIM/IMG_0002.jpg"));
+        save(&image::RgbImage::from_pixel(640, 480, image::Rgb([90, 90, 90])), &lab.join("flat.png"));
+        let r = run(&lab, &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            r.analysis.groups.len(),
+            1,
+            "{:?}",
+            (0..r.analysis.groups.len()).map(|g| names(&r, g)).collect::<Vec<_>>()
+        );
+        let n = names(&r, 0);
+        assert_eq!(n[0], "DCIM/IMG_0001.jpg", "highest resolution original suggested");
+        assert_eq!(n.len(), 3);
+        assert!(r.meta[0].members.iter().skip(1).all(|m| !m.exact && m.similarity < 100), "never shown as identical");
+        assert_eq!(r.stats.uninformative, 1, "the flat image is not compared");
+        fs::remove_dir_all(lab).unwrap();
+    }
+
+    #[test]
+    fn identical_bytes_are_confirmed_by_hash() {
+        let lab = temp_lab();
+        save(&scene(2, 1200, 900), &lab.join("a.png"));
+        fs::create_dir_all(lab.join("b")).unwrap();
+        fs::copy(lab.join("a.png"), lab.join("b/a copy.png")).unwrap();
+        let r = run(&lab, &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(r.meta[0].members[1].similarity, 100);
+        assert!(r.meta[0].members[1].exact);
+        fs::remove_dir_all(lab).unwrap();
+    }
+
+    #[test]
+    fn cleanup_keeps_a_copy_rechecks_the_keeper_and_moves_live_photos_whole() {
+        let lab = temp_lab();
+        let a = scene(3, 1600, 1200);
+        save(&a, &lab.join("Live/IMG_0100.jpg"));
+        fs::write(lab.join("Live/IMG_0100.mov"), b"motion").unwrap();
+        save(
+            &image::imageops::resize(&a, 800, 600, image::imageops::FilterType::Triangle),
+            &lab.join("Export/IMG_0100-small.jpg"),
+        );
+        let r = run(&lab, &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(r.analysis.groups.len(), 1);
+        let g = &r.analysis.groups[0];
+        assert_eq!(g.members[0].files.len(), 2, "the Live Photo (still + motion) is one copy, and the suggested one");
+        let trashed = std::cell::RefCell::new(Vec::<String>::new());
+        let mut trash = |_: &Path, rel: &str| {
+            trashed.borrow_mut().push(rel.to_string());
+            Ok(())
+        };
+        // Never every copy.
+        let all = [dupes::PlanItem { group: 0, trash: vec![0, 1] }];
+        assert_eq!(
+            dupes::execute(&r.analysis, &all, &mut trash, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err(),
+            "At least one copy must be kept."
+        );
+        // Trashing the Live Photo moves both halves.
+        let live = [dupes::PlanItem { group: 0, trash: vec![0] }];
+        let out = dupes::execute(&r.analysis, &live, &mut trash, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        assert_eq!(out.trashed_files, 2);
+        assert_eq!(*trashed.borrow(), ["Live/IMG_0100.jpg", "Live/IMG_0100.mov"]);
+        // The kept copy changed before cleanup: nothing in the group moves.
+        trashed.borrow_mut().clear();
+        save(&scene(9, 800, 600), &lab.join("Export/IMG_0100-small.jpg"));
+        let out = dupes::execute(&r.analysis, &live, &mut trash, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        assert_eq!((out.trashed_files, out.groups_skipped), (0, 1));
+        assert!(trashed.borrow().is_empty());
+        fs::remove_dir_all(lab).unwrap();
+    }
+
+    #[test]
+    fn not_duplicates_is_remembered_by_content_and_cancel_stops() {
+        let lab = temp_lab();
+        let a = scene(5, 1200, 900);
+        save(&a, &lab.join("one.jpg"));
+        save(&image::imageops::resize(&a, 600, 450, image::imageops::FilterType::Triangle), &lab.join("two.png"));
+        let mut r = run(&lab, &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(r.analysis.groups.len(), 1);
+        let pairs = dismiss(&mut r, 0, None);
+        assert_eq!(pairs.len(), 1);
+        assert!(r.analysis.groups.is_empty());
+        // Renamed/moved files are still recognised (identity is content, not name).
+        fs::create_dir_all(lab.join("moved")).unwrap();
+        fs::rename(lab.join("two.png"), lab.join("moved/renamed.png")).unwrap();
+        let dismissed: HashSet<PairKey> = pairs.into_iter().collect();
+        let r = run(&lab, &dismissed, &AtomicBool::new(false)).unwrap();
+        assert!(r.analysis.groups.is_empty());
+        assert_eq!(r.stats.dismissed, 1);
+        assert!(run(&lab, &HashSet::new(), &AtomicBool::new(true)).is_err(), "cancelled");
+        fs::remove_dir_all(lab).unwrap();
+    }
+
     #[test]
     fn multi_index_finds_all_pairs_within_13_bits() {
         // Random hashes plus near neighbours at known distances.
