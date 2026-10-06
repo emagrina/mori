@@ -3,6 +3,9 @@ import { api, type DiagCheck, type DiagStatus } from "../api";
 import { ProgressBar } from "./Analyzer";
 import { ModalFrame } from "./Modal";
 
+/** Set at build time from package.json (kept equal to Cargo.toml and tauri.conf.json by a test). */
+declare const __MORI_VERSION__: string;
+
 const MARK: Record<DiagStatus, string> = { pass: "✓", limited: "△", fail: "✕", info: "—" };
 const SECTIONS: [DiagCheck["section"], string][] = [
   ["security", "Security"],
@@ -43,7 +46,10 @@ export function Diagnostics({ onClose }: { onClose: () => void }) {
   return (
     <ModalFrame onCancel={onClose} wide>
       <div className="diag-head">
-        <h2>Mori Diagnostics</h2>
+        <div>
+          <h2>Mori Diagnostics</h2>
+          <p className="muted small">Mori {__MORI_VERSION__}</p>
+        </div>
         <button className="btn small" onClick={run} disabled={!checks}>
           Run Self-Test
         </button>
