@@ -1,0 +1,163 @@
+# Builds Mori for release.
+#
+# - Pushing a tag vX.Y.Z (matching the app version) runs every check, builds
+#   the macOS app and DMG, and attaches them with SHA256SUMS.txt to a DRAFT
+#   GitHub Release. Nothing is published until a maintainer publishes the
+#   draft by hand.
+# - "Run workflow" (workflow_dispatch) does the same checks and build and
+#   keeps the files as a workflow artifact, without creating a release.
+#
+# Signing and notarization are optional and use only GitHub Secrets (see
+# docs/releasing.md). Without them the app is ad-hoc signed, as in a local
+# build. Secrets are passed only to the build step that needs them.
+
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: "1.99.0"
+  NODE_VERSION: "24"
+
+jobs:
+  build-macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out the exact ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the app version
+        id: version
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the app version v$version"
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Install dependencies (from lockfiles)
+        run: |
+          npm ci
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Rust format
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests (unit, sandboxed worker, persistence, version)
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Build app and DMG
+        env:
+          # All optional. Empty when the secrets are not configured.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          args=(--bundles app,dmg)
+          if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
+            # Replace the ad-hoc identity in tauri.conf.json with the Developer ID.
+            printf '{"bundle":{"macOS":{"signingIdentity":%s}}}' \
+              "$(node -p 'JSON.stringify(process.env.APPLE_SIGNING_IDENTITY)')" > "$RUNNER_TEMP/signing.json"
+            args+=(--config "$RUNNER_TEMP/signing.json")
+          else
+            unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
+          npx tauri build "${args[@]}" -- --locked
+
+      - name: Verify the bundle
+        run: |
+          app=src-tauri/target/release/bundle/macos/Mori.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist" | grep -qx "${{ steps.version.outputs.version }}"
+          lipo -archs "$app/Contents/MacOS/mori"
+
+      - name: Collect artifacts and checksums
+        run: |
+          mkdir -p dist-release
+          cp src-tauri/target/release/bundle/dmg/*.dmg dist-release/
+          cd dist-release
+          shasum -a 256 *.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mori-${{ steps.version.outputs.version }}-macos
+          path: dist-release/
+          if-no-files-found: error
+
+  draft-release:
+    name: Draft GitHub Release
+    needs: build-macos
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: docs/releases
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mori-${{ needs.build-macos.outputs.version }}-macos
+          path: dist-release
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build-macos.outputs.version }}
+        run: |
+          notes="docs/releases/$TAG.md"
+          [[ -f "$notes" ]] || { echo "::error::Missing $notes"; exit 1; }
+          gh release create "$TAG" dist-release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "Mori $VERSION" \
+            --notes-file "$notes"
