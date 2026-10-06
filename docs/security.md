@@ -115,6 +115,13 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Safe Inspection Mode** is enforced in the protocol handler. For files under a drive in this mode, `thumb`, `preview`, `media`, `frame` and `pdf` requests without the `iso-` prefix return 403, and `store_frame` refuses non-explicit frames. The UI also skips video-thumbnail capture. A counter records how many media were decoded since the drive was opened.
 - **Drive detection** polls `/Volumes` every 3 s for real, browsable mount points (macOS). Drives present at launch and drives Mori already knows are not announced. Nothing on the drive is read until you choose *Inspect Safely*.
 
+## Media intelligence
+
+- **Difference view.** It is computed in the web view from the two worker-made previews (never the originals), read through Mori's protocol with CORS. Nothing new is decoded outside the existing paths.
+- **Capture times for bursts.** They are read only for photos already in Similar Media groups, through the worker metadata op (1 MB per file).
+- **Screenshot detection.** It uses file names plus, on macOS, one `getxattr(…, XATTR_NOFOLLOW)` size query per photo/video during the index scan. No content is read.
+- **Corrections.** They are stored like private folders (`capture-not.json`, `capture-yes.json`), keyed per volume.
+
 ## Mutation policy
 
 - **One gate.** All changes to the user's files go through `fileops`, whose mutating functions (`move_to_trash`, `rename_no_replace`, and later operations) take a `&Policy` and call `policy.check` first.
