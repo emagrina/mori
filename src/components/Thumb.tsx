@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { cachedThumb, requestThumb, type Entry } from "../api";
-import { Icon } from "./Icon";
+import { FolderGlyph, Icon } from "./Icon";
 
 /** Lazily loaded thumbnail; only mounted while its tile is on screen. */
 export function Thumb({ entry, fit = "contain", iconSize = 40 }: { entry: Entry; fit?: "cover" | "contain"; iconSize?: number }) {
@@ -45,10 +45,17 @@ export function Thumb({ entry, fit = "contain", iconSize = 40 }: { entry: Entry;
       </div>
     );
   }
+  if (entry.kind === "folder") {
+    return (
+      <div className="thumb placeholder folder">
+        <FolderGlyph size={iconSize * 1.6} />
+      </div>
+    );
+  }
   return (
-    <div className={`thumb placeholder kind-${entry.kind} ${url === undefined ? "pending" : ""}`}>
-      <Icon name={entry.kind} size={iconSize} />
-      {entry.kind !== "folder" && entry.ext && url === null && <span className="ext">{entry.ext}</span>}
+    <div className={`thumb placeholder ${url === undefined && thumbable ? "pending" : ""}`}>
+      <Icon name={entry.kind} size={iconSize} stroke={1.3} />
+      {entry.ext && url === null && <span className="ext">{entry.ext}</span>}
     </div>
   );
 }
