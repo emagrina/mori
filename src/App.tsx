@@ -31,6 +31,9 @@ import { HealthView } from "./components/HealthView";
 import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
 import { TagDialog, TagManager } from "./components/Organize";
 import { HistoryPanel, OperationPreview } from "./components/Operations";
+import { ChecksumDialog, CompareDialog, IntegrityPanel } from "./components/Integrity";
+import { Diagnostics } from "./components/Diagnostics";
+import { PrivacyData } from "./components/PrivacyData";
 import { CommandPalette, ShortcutsHelp, type Command } from "./components/CommandPalette";
 import { StorageView } from "./components/StorageView";
 import { Preview } from "./components/Preview";
@@ -91,7 +94,12 @@ type Dialog =
   | { kind: "forget" }
   | { kind: "clearSession" }
   | { kind: "op"; op: "trash" | "delete"; entries: Entry[] }
-  | { kind: "history" };
+  | { kind: "history" }
+  | { kind: "checksum"; entry: Entry }
+  | { kind: "compare"; a: Entry; b: Entry }
+  | { kind: "integrity" }
+  | { kind: "diagnostics" }
+  | { kind: "privacy" };
 
 const EMPTY: QueryResult = { items: [], total: 0, truncated: false, crumbs: [] };
 
@@ -197,8 +205,9 @@ export default function App() {
   }, [view, sort, desc, recursive, searchGlobal]);
 
   useEffect(() => {
-    if (settingsLoaded.current && info) writeSession({ launchId: info.launchId, loc, kind, search });
-  }, [loc, kind, search, info]);
+    // A temporary session keeps no record of where you were or what you searched.
+    if (settingsLoaded.current && info && !status?.temporary) writeSession({ launchId: info.launchId, loc, kind, search });
+  }, [loc, kind, search, info, status?.temporary]);
 
   // Background video decoding (thumbnail frames) pauses while previewing.
   useEffect(() => setPreviewOpen(previewId !== null || extPreview !== null), [previewId, extPreview]);
@@ -421,6 +430,25 @@ export default function App() {
 
   const endTemporary = async () => {
     const s = await api.endTemporary().catch(() => null);
+    if (!s) return;
+    try {
+      sessionStorage.clear();
+    } catch {
+      // nothing stored
+    }
+    setHistory([]);
+    setSearch("");
+    setInspectId(null);
+    setPreviewId(null);
+    setExtPreview(null);
+    setAnalysisVersion((v) => v + 1);
+    rootChanged(s);
+    flash("Session cleared", 3000);
+  };
+
+  const startPrivate = async (key: string | null) => {
+    setNewDrive(null);
+    const s = await api.startPrivateInspection(key).catch((e) => (String(e) !== "cancelled" && flash(String(e), 4000), null));
     if (s) rootChanged(s);
   };
 
@@ -672,7 +700,12 @@ export default function App() {
       : []),
     { id: "m-ro", title: readOnly ? "Turn Off Read-only Mode" : "Turn On Read-only Mode", section: "Mori", icon: "shield", run: toggleReadOnly },
     { id: "m-change", title: "Change Folder…", section: "Mori", icon: "folder", run: chooseRoot },
-    { id: "m-temp", title: "Browse Without Indexing…", section: "Mori", icon: "clock", words: "temporary private", run: startTemporary },
+    { id: "m-temp", title: "Temporary Session…", section: "Mori", icon: "clock", words: "browse without indexing ephemeral", run: startTemporary },
+    { id: "m-private", title: "Private Inspection…", section: "Mori", icon: "shield", words: "usb drive unknown read-only temporary safe", run: () => startPrivate(null) },
+    { id: "m-integrity", title: "Integrity Snapshots…", section: "Mori", icon: "check", words: "sha-256 checksum verify", run: () => setDialog({ kind: "integrity" }) },
+    { id: "m-privacy", title: "Privacy & Local Data…", section: "Mori", icon: "lock", words: "clear data reset storage", run: () => setDialog({ kind: "privacy" }) },
+    { id: "m-diag", title: "Diagnostics…", section: "Mori", icon: "info", words: "self-test capabilities offline security", run: () => setDialog({ kind: "diagnostics" }) },
+    ...(sel && sel.kind !== "folder" && sel.kind !== "link" ? [{ id: "s-sum", title: `Calculate Checksum of “${sel.name}”`, section: "Selection", icon: "check" as IconName, words: "sha-256 hash integrity", run: () => setDialog({ kind: "checksum", entry: sel }) }] : []),
     { id: "m-tags", title: "Manage Tags…", section: "Mori", icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
     { id: "m-session", title: "Clear Session Data…", section: "Mori", icon: "close", run: () => setDialog({ kind: "clearSession" }) },
     { id: "m-rescan", title: "Rescan", section: "Mori", icon: "refresh", run: () => api.rescan() },
@@ -683,7 +716,41 @@ export default function App() {
   ];
 
   if (!info) return <div className="app loading" />;
-  if (!status?.hasRoot) return <Welcome info={info} onChoose={chooseRoot} />;
+  const drivePrompt = newDrive && (
+    <ModalFrame onCancel={() => setNewDrive(null)}>
+          <div className="dialog-icon">
+            <Icon name="drive" size={20} />
+          </div>
+          <h2>“{newDrive.label}” connected</h2>
+          <p>
+            Inspect it safely with Mori: only names, sizes and dates are indexed. Nothing on the drive is opened or decoded until you choose to generate
+            previews.
+          </p>
+          <p className="dialog-note">
+            <strong>Temporary inspection</strong> also makes the session read-only and keeps no Mori index, previews, history or drive record after
+            you end it.
+          </p>
+          <div className="dialog-actions">
+            <button className="btn" onClick={() => setNewDrive(null)}>
+              Not Now
+            </button>
+            <button className="btn" onClick={() => inspectDriveSafely(newDrive)}>
+              Inspect Safely
+            </button>
+            <button className="btn primary" onClick={() => startPrivate(newDrive.key)} autoFocus>
+              Temporary Inspection
+            </button>
+          </div>
+        </ModalFrame>
+  );
+  if (!status?.hasRoot)
+    return (
+      <>
+        <Welcome info={info} onChoose={chooseRoot} onPrivate={() => startPrivate(null)} />
+        {drivePrompt}
+        {toast && <div className="toast">{toast}</div>}
+      </>
+    );
 
   const browsing = mode === "browse";
   const searching = debounced.length > 0;
@@ -840,13 +907,15 @@ export default function App() {
             }}
           />
         </nav>
-        {status.temporary && (
-          <button className="readonly-chip" onClick={endTemporary} title="Temporary session: no index, thumbnails or records are saved for this folder. Click to end it.">
-            <Icon name="clock" size={12} /> Temporary session · End
-          </button>
-        )}
-        {readOnly && (
-          <button className="readonly-chip" onClick={toggleReadOnly} title="Read-only Mode is on: Mori won't change any files. Click to turn it off.">
+        {(readOnly || status.readOnly) && (
+          <button
+            className="readonly-chip"
+            // During Private Inspection read-only is part of the session: the chip
+            // never changes the saved setting unless that setting is what's on.
+            onClick={readOnly ? toggleReadOnly : undefined}
+            disabled={!readOnly}
+            title={readOnly ? "Read-only Mode is on: Mori won't change any files. Click to turn it off." : "Read-only for this Private Inspection. It ends with the session."}
+          >
             <Icon name="shield" size={12} /> Read-only Mode
           </button>
         )}
@@ -922,6 +991,27 @@ export default function App() {
           </button>
         </header>
 
+        {status.temporary && (
+          <div className="session-banner" role="status">
+            <Icon name={status.privateInspection ? "shield" : "clock"} size={13} />
+            <span className="safe-title">{status.privateInspection ? "PRIVATE INSPECTION" : "TEMPORARY SESSION"}</span>
+            {status.privateInspection ? (
+              <>
+                <span className="safe-stat">Read-only {status.readOnly ? "✓" : "—"}</span>
+                <span className="safe-stat">Temporary session ✓</span>
+                <span className="safe-stat">Automatic decoding {status.safeMode ? "Off" : "On"}</span>
+                <span className="safe-stat">Persistent indexing Off</span>
+                <span className="safe-stat">Network required No</span>
+              </>
+            ) : (
+              <span className="safe-stat">No Mori history, index or previews are kept after the session ends</span>
+            )}
+            <span className="spacer" />
+            <button className="btn small" onClick={endTemporary}>
+              End Session
+            </button>
+          </div>
+        )}
         {status.safeMode &&
           (safeCollapsed ? (
             <button className="safe-banner collapsed" onClick={() => setSafeCollapsed(false)} title="Safe Inspection Mode">
@@ -1133,6 +1223,15 @@ export default function App() {
           onProtect={() => (menu.entry.protected ? setDialog({ kind: "unprotect", entry: menu.entry }) : setProtected(menu.entry, true))}
           onPreview={() => (menu.entry.kind === "folder" ? navigate({ scope: "folder", folder: menu.entry.id }) : setPreviewId(menu.entry.id))}
           onFavorite={() => setFavorite(menu.targets, !menu.entry.favorite)}
+          onChecksum={() => setDialog({ kind: "checksum", entry: menu.entry })}
+          onCompare={() => setDialog({ kind: "compare", a: menu.targets[0], b: menu.targets[1] })}
+          compareOk={menu.targets.length === 2 && menu.targets.every((t) => t.kind !== "folder" && t.kind !== "link")}
+          onSnapshot={() =>
+            api.integritySave(menu.entry.id).then(
+              () => (flash("Creating integrity snapshot… (progress in Integrity Snapshots)", 3500), setDialog({ kind: "integrity" })),
+              (e) => flash(String(e), 4000),
+            )
+          }
           onTags={() => setDialog({ kind: "tags", entries: menu.targets })}
           onCapture={async () => {
             const e = menu.entry;
@@ -1224,6 +1323,40 @@ export default function App() {
           <button
             onClick={() => {
               setPop(null);
+              startPrivate(null);
+            }}
+            title="Read-only, temporary, no automatic decoding: for drives and folders you don't trust"
+          >
+            <Icon name="shield" size={14} /> Private Inspection…
+          </button>
+          <div className="sep" />
+          <button
+            onClick={() => {
+              setPop(null);
+              setDialog({ kind: "integrity" });
+            }}
+          >
+            <Icon name="check" size={14} /> Integrity Snapshots…
+          </button>
+          <button
+            onClick={() => {
+              setPop(null);
+              setDialog({ kind: "privacy" });
+            }}
+          >
+            <Icon name="lock" size={14} /> Privacy & Local Data…
+          </button>
+          <button
+            onClick={() => {
+              setPop(null);
+              setDialog({ kind: "diagnostics" });
+            }}
+          >
+            <Icon name="info" size={14} /> Diagnostics…
+          </button>
+          <button
+            onClick={() => {
+              setPop(null);
               setDialog({ kind: "history" });
             }}
             title="Changes Mori made to your files in this session, with Undo where possible"
@@ -1237,7 +1370,7 @@ export default function App() {
             }}
             title="Open a folder without saving an index, thumbnails or anything else about it"
           >
-            <Icon name="clock" size={14} /> Browse Without Indexing…
+            <Icon name="clock" size={14} /> Temporary Session…
           </button>
           <button
             onClick={() => {
@@ -1318,6 +1451,26 @@ export default function App() {
           }}
         />
       )}
+      {dialog?.kind === "checksum" && <ChecksumDialog entry={dialog.entry} canSave={!status.temporary} onClose={() => setDialog(null)} onNotice={(m) => flash(m, 2500)} />}
+      {dialog?.kind === "compare" && <CompareDialog a={dialog.a} b={dialog.b} onClose={() => setDialog(null)} onNotice={(m) => flash(m, 2500)} />}
+      {dialog?.kind === "integrity" && <IntegrityPanel onClose={() => setDialog(null)} onNotice={(m) => flash(m, 3000)} />}
+      {dialog?.kind === "diagnostics" && <Diagnostics onClose={() => setDialog(null)} />}
+      {dialog?.kind === "privacy" && (
+        <PrivacyData
+          onClose={() => setDialog(null)}
+          onCleared={(m, reset) => {
+            flash(m, 5000);
+            resetThumbs();
+            api.tagsList().then(setTags, () => {});
+            setIndexVersion((v) => v + 1);
+            if (reset) {
+              setDialog(null);
+              api.status().then(setStatus);
+              setReadOnlyState(false);
+            }
+          }}
+        />
+      )}
       {dialog?.kind === "history" && <HistoryPanel onClose={() => setDialog(null)} onUndone={(m) => (flash(m, 3500), setAnalysisVersion((v) => v + 1))} />}
       {dialog?.kind === "forget" && (
         <ModalFrame onCancel={() => setDialog(null)}>
@@ -1370,26 +1523,7 @@ export default function App() {
 
       {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} onNotice={(m) => flash(m, 3000)} />}
 
-      {newDrive && (
-        <ModalFrame onCancel={() => setNewDrive(null)}>
-          <div className="dialog-icon">
-            <Icon name="drive" size={20} />
-          </div>
-          <h2>“{newDrive.label}” connected</h2>
-          <p>
-            Inspect it safely with Mori: only names, sizes and dates are indexed. Nothing on the drive is opened or decoded until you choose to generate
-            previews.
-          </p>
-          <div className="dialog-actions">
-            <button className="btn" onClick={() => setNewDrive(null)}>
-              Not Now
-            </button>
-            <button className="btn primary" onClick={() => inspectDriveSafely(newDrive)} autoFocus>
-              Inspect Safely with Mori
-            </button>
-          </div>
-        </ModalFrame>
-      )}
+      {drivePrompt}
 
       {palette && (
         <CommandPalette
@@ -1514,6 +1648,10 @@ function ContextMenu({
   onPreview,
   onIsolate,
   onFavorite,
+  onChecksum,
+  onCompare,
+  compareOk,
+  onSnapshot,
   onTags,
   onCapture,
   onCopy,
@@ -1533,6 +1671,10 @@ function ContextMenu({
   onPreview: () => void;
   onIsolate: () => void;
   onFavorite: () => void;
+  onChecksum: () => void;
+  onCompare: () => void;
+  compareOk: boolean;
+  onSnapshot: () => void;
   onTags: () => void;
   onCapture: () => void;
   onCopy: () => void;
@@ -1549,6 +1691,11 @@ function ContextMenu({
     return (
       <div className="menu" style={{ left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 90) }} onContextMenu={(e) => e.preventDefault()}>
         <div className="menu-label">{plural(count, "item")} selected</div>
+        {count === 2 && compareOk && (
+          <button onClick={onCompare} title="Exact comparison by SHA-256 (not visual similarity)">
+            <Icon name="check" size={14} /> Compare Integrity
+          </button>
+        )}
         <button onClick={onFavorite}>
           <Icon name="star" size={14} /> {entry.favorite ? "Remove from Favorites" : "Add to Favorites"}
         </button>
@@ -1609,6 +1756,15 @@ function ContextMenu({
           <button onClick={onTags}>
             <Icon name="tag" size={14} /> Tags…
           </button>
+          {folder ? (
+            <button onClick={onSnapshot} title="Record SHA-256 of every file here (saved in Mori's local data) to verify later">
+              <Icon name="check" size={14} /> Create Integrity Snapshot
+            </button>
+          ) : (
+            <button onClick={onChecksum}>
+              <Icon name="check" size={14} /> Calculate Checksum
+            </button>
+          )}
         </>
       )}
       <div className="sep" />
@@ -1718,7 +1874,7 @@ function RenameDialog({ entry, onCancel, onDone }: { entry: Entry; onCancel: () 
   );
 }
 
-function Welcome({ info, onChoose }: { info: InitInfo; onChoose: () => void }) {
+function Welcome({ info, onChoose, onPrivate }: { info: InitInfo; onChoose: () => void; onPrivate: () => void }) {
   return (
     <div className={`welcome ${isMac ? "mac" : ""}`} data-tauri-drag-region>
       <div className="welcome-card">
@@ -1727,6 +1883,9 @@ function Welcome({ info, onChoose }: { info: InitInfo; onChoose: () => void }) {
         <p>Choose the drive or folder you want to browse. Mori remembers it, works fully offline, and only changes files when you ask it to.</p>
         <button className="btn primary large" onClick={onChoose}>
           Choose Folder…
+        </button>
+        <button className="btn large" onClick={onPrivate} title="Read-only, temporary, no automatic decoding, nothing remembered afterwards">
+          <Icon name="shield" size={14} /> Private Inspection…
         </button>
         {info.translocated && (
           <p className="hint">

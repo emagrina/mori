@@ -223,6 +223,12 @@ impl Store {
         }
     }
 
+    /// Forget every tag and assignment (Clear Mori Data). The file is removed too.
+    pub fn clear(&self) {
+        *self.data.lock().unwrap_or_else(PoisonError::into_inner) = Data::default();
+        let _ = fs::remove_file(&self.file);
+    }
+
     /// "Forget this drive": drop every assignment on that volume (tag names stay).
     pub fn forget_volume(&self, vol: &VolumeId) {
         let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);

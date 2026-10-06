@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-integrity-cancel"
+description = "Enables the integrity_cancel command without any pre-configured scope."
+commands.allow = ["integrity_cancel"]
+
+[[permission]]
+identifier = "deny-integrity-cancel"
+description = "Denies the integrity_cancel command without any pre-configured scope."
+commands.deny = ["integrity_cancel"]

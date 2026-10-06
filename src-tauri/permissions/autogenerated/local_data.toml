@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-data"
+description = "Enables the local_data command without any pre-configured scope."
+commands.allow = ["local_data"]
+
+[[permission]]
+identifier = "deny-local-data"
+description = "Denies the local_data command without any pre-configured scope."
+commands.deny = ["local_data"]

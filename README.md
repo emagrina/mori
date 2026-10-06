@@ -13,7 +13,18 @@
 
 ---
 
-Mori is a small desktop app (Tauri + Rust + React) that you can keep on an external drive and open with a double-click. It browses that drive like a Finder-style gallery: no accounts, no cloud, no telemetry, and no network access at all.
+Mori is a small desktop app (Tauri + Rust + React) that you can keep on an external drive and open with a double-click. It browses that drive like a Finder-style gallery: no accounts, no cloud, no telemetry, and no network functionality.
+
+## Four pillars
+
+These define how Mori behaves. Each is backed by code and tests; **Mori → Diagnostics** shows what is verified on your installation right now.
+
+- **Privacy.** Your files and what Mori learns about them stay on your computer. No account, login, cloud service, telemetry, analytics or remote processing. Everything Mori stores is listed, with sizes, in **Privacy & Local Data**, where it can be cleared selectively or reset entirely.
+- **Security.** Mori treats every unknown file as untrusted input. Content is identified by its bytes rather than its name. Decoding happens in a separate worker process locked down by the OS sandbox (no file access, no writes, no network, no new processes; verified by the self-test), and the UI only ever receives re-encoded copies. Archives are listed, never extracted. Links are never followed.
+- **Offline.** Core functionality needs no internet connection: browsing, search, previews, analyses, metadata, checksums and integrity checks all run locally. The web view's Content-Security-Policy refuses every remote origin, and the decoder workers are denied network access by the OS sandbox. The main process contains no network code but isn't sandboxed from the network, so this is a property of the code, not an OS-enforced barrier.
+- **Ephemeral inspection.** **Temporary Session** and **Private Inspection** keep the index, thumbnails, previews, frames, checksums, analyses and history in memory, refuse to save records, and clear everything when the session ends. Private Inspection also makes the session read-only and turns off automatic decoding. An automated test checks that a session leaves no trace in anything Mori writes.
+
+**Limits.** Mori minimises its own footprint but can't control traces created outside it: file-system journals, swap and memory compression, APFS/Time Machine snapshots, system crash reports, backups, SSD wear-levelling, Spotlight or other indexing, the macOS folder picker's own records, and third-party monitoring software. It is not anonymous, not an antivirus, and no sandbox is an absolute guarantee. See [docs/privacy.md](docs/privacy.md) and [SECURITY.md](SECURITY.md).
 
 ## Features
 
@@ -183,6 +194,46 @@ Shortcuts never fire while you type in a text field. *Keyboard Shortcuts* in the
 
 ![Operation Preview](docs/images/phase8/operation-preview.jpg)
 ![Undo History](docs/images/phase8/undo-history.jpg)
+
+### Integrity: checksums, comparison and snapshots
+
+- **Calculate Checksum** (file menu) computes **SHA-256** locally and shows it with the file's size, date and detected type. Copy puts it on the clipboard only when you click it. Mori never reads the clipboard.
+- **Compare Integrity** (with exactly two files selected) reports **SAME CONTENT** when the SHA-256 values match, and **DIFFERENT CONTENT** otherwise. This is exact binary equality, unrelated to Similar Media: `photo.heic` and `photo.jpg` can be 97 % visually similar and still have different SHA-256 values. That is expected.
+- **Checksums are cached in memory only**, for the session.
+  - The cache is keyed by the file's device, inode, size, modification and change times; any change invalidates it.
+  - Nothing is written to disk.
+- **Save Integrity Check** (a file) and **Create Integrity Snapshot** (a folder) record relative paths, sizes and SHA-256 values in Mori's local data, never next to your files.
+  - Folder snapshots skip private folders inside the chosen folder (choosing the private folder itself includes it), never follow links, and skip system clutter.
+  - **Integrity Snapshots…** verifies a snapshot later: *Unchanged*, or the lists of *Changed*, *Missing* and *New* files.
+  - Snapshots are opt-in local state and are refused during temporary sessions.
+
+### Private Inspection and Temporary Session
+
+- **Temporary Session…** (More menu, ⌘K) browses a folder with nothing kept afterwards.
+  - Index, thumbnails, previews, video frames, PDF pages, metadata results, checksums, analysis results, undo history and search stay in memory.
+  - Requests to save records (tags, favorites, folder rules, snapshots, drive settings, "not duplicates" decisions) are refused.
+  - Opening files in other apps and revealing them in Finder are disabled, since those apps keep their own history.
+- **Private Inspection…** (More menu, Welcome screen, or **Temporary Inspection** when a new drive is connected) is the one-step preset for unknown drives:
+  - Read-only ✓
+  - Temporary session ✓
+  - Automatic decoding off (Safe Inspection Mode)
+  - Persistent indexing off
+  - Network required: no
+  - The drive isn't remembered. *Generate previews* turns decoding on for the session only.
+- **End Session** cancels running analyses and checks, and drops every in-memory result, cache and history entry of the session. It then returns to your normal folder and shows *Session cleared*.
+- **The folder picker.** macOS records the last folder chosen in a folder picker in Mori's preferences. Mori removes that record after every picker, at quit and at launch.
+
+### Diagnostics and Privacy & Local Data
+
+- **Diagnostics…** runs a self-test on synthetic data made in memory (never your files, never the network).
+  - Media: JPEG/PNG/WebP/GIF/HEIC decoding, PDF rendering.
+  - Security: worker sandbox, every sandbox profile, resource limits, malformed media, type detection, archive traversal, symlinks, Read-only Mode, protected folders.
+  - Network: the web view CSP, and the workers' network denial (tested on the loopback interface only).
+  - Ephemeral mode, local data store and logging.
+  - Each result is ✓ (verified now), △ (limited), ✕ (not working) or — (a fact about the code or configuration that can't be tested at runtime). There are no hard-coded check marks; a unit test checks that capabilities show as failing when the worker can't run.
+- **Privacy & Local Data…** lists everything Mori stores, with sizes and locations. You can clear any of: cache & thumbnails, analysis data, history, tags & favorites, folder rules, integrity snapshots.
+  - **Reset Mori…** (type RESET) removes all of Mori's own data.
+  - None of these delete or change files on your drives.
 
 ### Private folders
 
@@ -360,21 +411,17 @@ The macOS build is not signed with a Developer ID. A copy that came from another
 
 ## Data stored on your computer
 
-Mori stores nothing on the browsed drive. It changes your files only when you rename an item or move it to the Trash (on an external drive, the system keeps trashed items in that drive's own Trash folder). Everything Mori itself stores lives in per-user app directories:
+Mori never writes to a browsed drive except when you ask it to: rename, move to the Trash, create a sanitized copy, or delete permanently after confirmation. Everything Mori itself stores is in per-user app directories, and **Privacy & Local Data** shows all of it.
 
-| | macOS | Windows |
-|---|---|---|
-| Settings, index, video blocklist | `~/Library/Application Support/app.mori.viewer/` | `%APPDATA%\app.mori.viewer\` |
-| Thumbnail cache | `~/Library/Caches/app.mori.viewer/thumbs/` | `%LOCALAPPDATA%\app.mori.viewer\thumbs\` |
-| Similar-media fingerprints | `~/Library/Caches/app.mori.viewer/similar/` | `%LOCALAPPDATA%\app.mori.viewer\similar\` |
-| "Not duplicates" decisions | `…/app.mori.viewer/similar-dismissed.bin` | `%APPDATA%\app.mori.viewer\similar-dismissed.bin` |
-| Private folders | `…/app.mori.viewer/private-folders.json` | `%APPDATA%\app.mori.viewer\private-folders.json` |
-| Protected folders | `…/app.mori.viewer/protected-folders.json` | `%APPDATA%\app.mori.viewer\protected-folders.json` |
-| Favorites, tags | `…/app.mori.viewer/favorites.json`, `tags.json` | `%APPDATA%\app.mori.viewer\favorites.json`, `tags.json` |
-| Screenshot corrections | `…/app.mori.viewer/capture-not.json`, `capture-yes.json` | `%APPDATA%\app.mori.viewer\capture-*.json` |
-| Known drives (Safe Inspection Mode) | `…/app.mori.viewer/drives.json` | `%APPDATA%\app.mori.viewer\drives.json` |
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| App data (settings, indexes, records, snapshots) | `~/Library/Application Support/app.mori.viewer/` | `%APPDATA%\app.mori.viewer\` | `~/.local/share/app.mori.viewer/` |
+| Cache (thumbnails, fingerprints) | `~/Library/Caches/app.mori.viewer/` | `%LOCALAPPDATA%\app.mori.viewer\` | `~/.cache/app.mori.viewer/` |
+| Preferences (window, folder picker) | `~/Library/Preferences/app.mori.viewer.plist` | — | — |
+| Temporary files | none; temporary sessions stay in memory | none | none |
+| Logs | none in release builds | none | none |
 
-Thumbnails are small re-encodes stored under hash names. Full-size previews are kept only in memory. Analysis results, and thumbnails of analyzed files outside the browsed drive, are never written to disk. Similar-media fingerprints are 64×64 grayscale miniatures stored under hash names (no file names), and "not duplicates" decisions are stored as pairs of content hashes (no names or paths).
+The complete inventory — what each file is, why it exists, when it is deleted and what it can reveal — is in [docs/privacy.md](docs/privacy.md). To remove Mori completely, use **Reset Mori…**, then delete the app; or delete the folders above.
 
 ## Platform status
 

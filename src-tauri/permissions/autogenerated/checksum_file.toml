@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-checksum-file"
+description = "Enables the checksum_file command without any pre-configured scope."
+commands.allow = ["checksum_file"]
+
+[[permission]]
+identifier = "deny-checksum-file"
+description = "Denies the checksum_file command without any pre-configured scope."
+commands.deny = ["checksum_file"]
