@@ -641,7 +641,13 @@ fn selftest() -> ! {
 pub enum WorkerError {
     /// Not a format the worker will decode.
     Unsupported,
-    /// Crashed, timed out, hit a limit or produced garbage.
+    /// The data is damaged: the decoder rejected it.
+    Decode,
+    /// Over a safety limit (dimensions, pixels, memory, input size).
+    Limits,
+    /// Took too long and was killed.
+    Timeout,
+    /// Crashed, or produced output that failed validation.
     Failed,
 }
 
@@ -725,12 +731,13 @@ pub fn run(op: Op, max: u32, input: Vec<u8>, timeout: std::time::Duration) -> Re
     };
     let _ = writer.join();
     let out = reader.join().unwrap_or_default();
-    let Some(status) = status else { return Err(WorkerError::Failed) };
-    if status.code() == Some(EXIT_UNSUPPORTED) {
-        return Err(WorkerError::Unsupported);
-    }
-    if !status.success() {
-        return Err(WorkerError::Failed);
+    let Some(status) = status else { return Err(WorkerError::Timeout) };
+    match status.code() {
+        Some(0) => {}
+        Some(EXIT_UNSUPPORTED) => return Err(WorkerError::Unsupported),
+        Some(EXIT_DECODE) => return Err(WorkerError::Decode),
+        Some(EXIT_LIMITS) => return Err(WorkerError::Limits),
+        _ => return Err(WorkerError::Failed),
     }
     parse_output(out)
 }
