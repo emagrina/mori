@@ -244,6 +244,11 @@ impl VideoGuard {
         }
     }
 
+    /// Forget cached container probes (memory only) when a session ends.
+    pub fn clear_session_probes(&self) {
+        self.probes.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
     /// This file version stopped the media engine before (any media kind).
     pub fn is_blocked(&self, key: &str) -> bool {
         self.blocked.lock().unwrap_or_else(PoisonError::into_inner).contains(key)

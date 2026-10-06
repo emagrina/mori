@@ -9,7 +9,7 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
   - drops privileges with the macOS `pure-computation` sandbox: no filesystem, no network, no new processes;
   - sets resource limits: CPU time, no file creation, few file descriptors, no core dumps;
   - on Windows is placed in a Job object (1 GB memory cap, a single process, no UI/clipboard access, killed with Mori).
-- The worker never receives a path. Mori reads the file and pipes the bytes in, and the worker writes back a freshly encoded JPEG/PNG/GIF behind a tiny fixed binary header, which Mori validates. A test (`cargo test --test worker`) proves that inside the worker, reading files, writing files, network access and spawning processes all fail.
+- The worker never receives a path. Mori reads the file and pipes the bytes in, and the worker writes back a freshly encoded JPEG/PNG/GIF behind a tiny fixed binary header, which Mori validates. A test (`cargo test --test worker`) proves that inside the worker, reading files, writing files, network access and spawning processes all fail. The network part is checked on the loopback interface only, so the test never contacts an outside server.
 - Decoding uses pure-Rust, memory-safe decoders (`image` crate: JPEG, PNG, WebP, GIF only; no C codecs, no Quick Look, no FFmpeg). The format is taken from magic bytes. Decompression bombs are refused before allocation: at most 20,000 px per side, 100 megapixels, 512 MB decode budget, a 160 MB input file, and 600 GIF frames.
 - Each job runs under a wall-clock timeout (12 s for thumbnails, 25 s for previews), and at most 3 workers run at once. A crash, hang or limit hit ends only that worker. Mori shows *Preview unavailable — file could not be safely processed.* and records the failure so it isn't retried.
 - Videos are probed before the player ever sees them. The sandboxed worker reads just the container structure (the MP4/MOV `moov` box, located by walking top-level box headers even when it sits at the end of a huge file, or the head of a WebM file). That gives codecs, dimensions and duration, and any inconsistent structure is reported as damaged. Only codecs measured to work in this platform's webview are streamed (macOS: H.264, HEVC `hvc1`, MPEG-4 Part 2, MJPEG, ProRes, VP8, VP9; Windows: H.264, VP8/VP9, AV1). Everything else shows *Video format detected, but this codec is not supported for secure preview.* This matters: on Apple silicon without AV1 hardware, an AV1 WebM wedges WebKit's content process.
@@ -236,3 +236,12 @@ Mori deliberately keeps its attack surface small. Every file is listed and searc
 Everything else (HEIC on Windows/Linux, AVIF, RAW, TIFF, SVG, HTML, PDF, Office files, audio, MKV/AVI and so on) shows **Preview not supported** with the file's details. If the format is passive, an **Open in system** button hands it to its default app. Thumbnails exist only for JPEG, PNG, WebP, GIF and (on macOS) HEIC images and for playable videos. Other files show a type icon.
 
 Library filters (Photos, Videos, GIFs, Documents, Audio) group files by extension for browsing only. That grouping is never used to decide how to parse a file.
+
+## Privacy, offline operation and ephemeral sessions
+
+The privacy model, the inventory of everything Mori stores, Temporary Session / Private Inspection behaviour and its regression test are documented in [privacy.md](privacy.md). The threat model and vulnerability reporting are in [../SECURITY.md](../SECURITY.md).
+
+- **Web view.** It uses a non-persistent data store. Its Content-Security-Policy refuses every remote origin; `connect-src` allows only IPC and Mori's own `mori:` protocol, which the audio waveform reads.
+- **Checksums.** SHA-256 is computed in the main process by reading bytes in 1 MiB chunks (no parsing). Results are cached in memory, keyed by device/inode/size/mtime/ctime.
+- **Integrity snapshots.** Opt-in JSON in `integrity/`. Snapshot ids are validated (16 hex characters) before any file path is built.
+- **Diagnostics.** They run on synthetic fixtures. Worker capabilities count as verified only when a real worker run succeeded; a unit test runs them without a worker and asserts none of them pass.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-integrity-pause"
+description = "Enables the integrity_pause command without any pre-configured scope."
+commands.allow = ["integrity_pause"]
+
+[[permission]]
+identifier = "deny-integrity-pause"
+description = "Denies the integrity_pause command without any pre-configured scope."
+commands.deny = ["integrity_pause"]

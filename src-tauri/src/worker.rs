@@ -626,10 +626,13 @@ fn enter_sandbox(_profile: Profile) -> bool {
 fn selftest() -> ! {
     let fs_denied = std::fs::read("/etc/hosts").is_err() && std::fs::read_dir("/").is_err();
     let write_denied = std::fs::write(std::env::temp_dir().join("mori-selftest"), b"x").is_err();
+    // Loopback only: proving the denial never needs to contact anyone else.
+    // (TCP port 9 is "discard"; with networking denied the socket itself fails.)
     let net_denied =
-        std::net::TcpStream::connect_timeout(&"1.1.1.1:443".parse().unwrap(), std::time::Duration::from_millis(500))
+        std::net::TcpStream::connect_timeout(&"127.0.0.1:9".parse().unwrap(), std::time::Duration::from_millis(300))
             .is_err()
-            && std::net::TcpListener::bind("127.0.0.1:0").is_err();
+            && std::net::TcpListener::bind("127.0.0.1:0").is_err()
+            && std::net::UdpSocket::bind("127.0.0.1:0").is_err();
     let spawn_denied = std::process::Command::new("/bin/echo").output().is_err();
     println!("fs_denied={fs_denied} write_denied={write_denied} net_denied={net_denied} spawn_denied={spawn_denied}");
     std::process::exit(0);

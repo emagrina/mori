@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-checksum-cancel"
+description = "Enables the checksum_cancel command without any pre-configured scope."
+commands.allow = ["checksum_cancel"]
+
+[[permission]]
+identifier = "deny-checksum-cancel"
+description = "Denies the checksum_cancel command without any pre-configured scope."
+commands.deny = ["checksum_cancel"]

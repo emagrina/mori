@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-integrity-save"
+description = "Enables the integrity_save command without any pre-configured scope."
+commands.allow = ["integrity_save"]
+
+[[permission]]
+identifier = "deny-integrity-save"
+description = "Denies the integrity_save command without any pre-configured scope."
+commands.deny = ["integrity_save"]

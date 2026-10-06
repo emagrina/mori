@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-mori"
+description = "Enables the reset_mori command without any pre-configured scope."
+commands.allow = ["reset_mori"]
+
+[[permission]]
+identifier = "deny-reset-mori"
+description = "Denies the reset_mori command without any pre-configured scope."
+commands.deny = ["reset_mori"]

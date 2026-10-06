@@ -320,6 +320,12 @@ impl Store {
         }
     }
 
+    /// Forget every record (Clear Mori Data). The file is removed too.
+    pub fn clear(&self) {
+        self.data.lock().unwrap_or_else(PoisonError::into_inner).volumes.clear();
+        let _ = fs::remove_file(&self.file);
+    }
+
     /// Forget every record on one volume ("Forget this drive").
     pub fn forget_volume(&self, vol: &VolumeId) -> bool {
         let mut data = self.data.lock().unwrap_or_else(PoisonError::into_inner);
