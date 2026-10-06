@@ -42,7 +42,7 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 
 **Mori is quiet and conservative about changes.** Browsing, previews and duplicate analysis open files for reading only. Release builds log nothing. Search history is not stored.
 
-**File changes** are limited to two operations, each triggered only by an explicit user action and implemented in `src-tauri/src/fileops.rs`:
+**File changes** are limited to the operations below, each triggered only by an explicit user action and implemented in `src-tauri/src/fileops.rs` (plus `overwrite.rs`). They are always policy-checked first. The rest of this section was written for the first two; see *File operations* below for the others.
 
 - **Rename.** The new name is validated: no separators, `..`, leading dots, control or bidi characters, reserved Windows names, or trailing dots/spaces. The rename is atomic and never replaces an existing item (`renamex_np(RENAME_EXCL)` / `renameat2(RENAME_NOREPLACE)` / `MoveFileExW` without `REPLACE_EXISTING`).
 - **Move to Trash** through the OS Trash / Recycle Bin (`NSFileManager` on macOS, the shell on Windows, freedesktop trash on Linux). There is no permanent-delete code path. If the platform refuses, the item stays where it is and the failure is reported.
@@ -161,6 +161,24 @@ The worker still receives only bytes, never a path. The same resource limits (di
   - The isolated view doesn't play audio, because that would be the original bytes.
 - **Filmstrip and hover-scrub frames** go through the same capture path as the isolated view: the webview decodes, the worker re-encodes, and the cache stores the copies. Non-explicit requests are refused in Safe Inspection Mode.
 - **Quick Look** is Mori's own preview in a floating panel. Mori never invokes the system Quick Look or any other viewer.
+
+## File operations
+
+- **Trash.** On macOS, Mori calls NSFileManager `trashItemAtURL:resultingItemURL:` directly and keeps the resulting location (in memory, for this session) so Undo can move the item back.
+  - Undo goes through `fileops::restore_from_trash`. It checks the policy (`Restore`), then uses an exclusive rename (`renamex_np(RENAME_EXCL)`), so it never overwrites an item that took the name.
+  - Other platforms use the `trash` crate and don't offer Undo for Trash.
+- **Operation plans** (`plan_operation`) run the same confinement and policy checks as the real operation, without doing anything.
+- **Permanent delete** (`fileops::delete_permanently`).
+  - Policy `Delete`: refused for protected folders, or folders containing one.
+  - Links are unlinked, never followed.
+  - Folders are removed with std's `remove_dir_all`, which never follows symlinks.
+  - `delete_items` re-plans on the backend and requires the literal confirmation `DELETE` for folders and large batches, whatever the UI sends.
+- **Secure Overwrite** (`overwrite.rs`).
+  - Eligibility is computed from `statfs` (file system type) and IOKit "Device Characteristics → Medium Type" for the volume's device. Anything other than a confirmed rotational disk with an in-place file system is refused, with a reason.
+  - The overwrite opens with `O_NOFOLLOW`, rejects links and files with other hard links, and checks the inode didn't change between check and open.
+  - It writes one pass of PRNG data, then `fsync` + `F_FULLFSYNC`, then unlinks.
+  - Tests check that the bytes are replaced in place (read through a handle opened before), that link targets and hard-linked twins are never touched, and that the system disk (APFS/SSD) is refused.
+- **History** (`history.rs`) is in memory only. Permanent deletions are recorded as not undoable.
 
 ## Mutation policy
 

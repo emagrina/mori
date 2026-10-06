@@ -10,11 +10,13 @@ mod filetype;
 mod health;
 #[cfg(target_os = "macos")]
 mod heif;
+mod history;
 mod index;
 mod inspect;
 mod jobs;
 mod metadata;
 mod metascan;
+mod overwrite;
 #[cfg(target_os = "macos")]
 mod pdf;
 mod policy;
@@ -107,6 +109,8 @@ pub struct AppState {
     /// Screenshot corrections: never one / always one (per volume, like private folders).
     capture_not: privacy::Store,
     capture_yes: privacy::Store,
+    /// Undo history of file operations (this session, memory only).
+    history: history::History,
     /// Media Health results (memory only).
     health: Mutex<Option<health::Store>>,
     health_running: AtomicBool,
@@ -951,6 +955,7 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
         let mut out = TrashResult { trashed: Vec::new(), bytes: 0, failed: Vec::new() };
         let mut removed_rels = Vec::new();
         let mut removed_abs = Vec::new();
+        let mut changes = Vec::new();
         for id in ids.iter().take(100_000) {
             let loc = match state.locate(id) {
                 Ok(l) => l,
@@ -976,12 +981,13 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
                 invalidate_thumbs(&state, &path, &meta);
             }
             match fileops::move_to_trash(&state.policy(), &path) {
-                Ok(()) => {
+                Ok(trashed) => {
                     out.trashed.push(id.clone());
                     out.bytes += bytes;
                     if let Some(rel) = browser_rel(&state, &path) {
                         removed_rels.push(rel);
                     }
+                    changes.push(history::Change::Trashed { original: path.clone(), trashed });
                     removed_abs.push(path);
                 }
                 Err(e) => out.failed.push(dupes::Failure { path: shown, reason: e }),
@@ -991,10 +997,25 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
             apply_index_change(&app, |idx| idx.remove_paths(&removed_rels));
         }
         forget_removed(&state, &removed_abs);
+        state.history.record(trash_label(&changes), changes);
         out
     })
     .await
     .map_err(|_| "The operation failed.".to_string())
+}
+
+fn trash_label(changes: &[history::Change]) -> String {
+    match changes {
+        [history::Change::Trashed { original, .. }] => {
+            format!(
+                "Moved “{}” to Trash",
+                secure::display_safe(
+                    &original.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                )
+            )
+        }
+        c => format!("Moved {} items to Trash", c.len()),
+    }
 }
 
 /// Drop removed files (or files inside removed folders) from both analyses.
@@ -1037,6 +1058,14 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
         invalidate_thumbs(&state, &path, &meta);
     }
     fileops::rename_no_replace(&state.policy(), &path, &target)?;
+    state.history.record(
+        format!(
+            "Renamed “{}” to “{}”",
+            secure::display_safe(&path.file_name().unwrap_or_default().to_string_lossy()),
+            secure::display_safe(&target.file_name().unwrap_or_default().to_string_lossy())
+        ),
+        vec![history::Change::Renamed { from: path.clone(), to: target.clone() }],
+    );
     if meta.is_dir() {
         // A private folder (or one containing private folders) keeps its privacy.
         state.privacy.renamed(&path, &target);
@@ -1100,6 +1129,249 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
     })
     .await
     .map_err(|_| "The report failed.".to_string())?
+}
+
+// ---------------------------------------------------- operations, undo
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanEntry {
+    id: String,
+    name: String,
+    path: String,
+    kind: &'static str,
+    bytes: u64,
+    files: u64,
+    /// Refused (by the mutation policy or because it's gone), with the reason.
+    blocked: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationPlan {
+    op: String,
+    entries: Vec<PlanEntry>,
+    total_bytes: u64,
+    total_files: u64,
+    blocked: usize,
+    /// Large or folder deletions must be confirmed by typing DELETE.
+    needs_typed_confirm: bool,
+    /// `None`: Secure Overwrite is meaningful here; otherwise why it isn't.
+    overwrite_unavailable: Option<String>,
+}
+
+const TYPED_CONFIRM_ITEMS: usize = 25;
+const TYPED_CONFIRM_FILES: u64 = 100;
+const TYPED_CONFIRM_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn plan(state: &AppState, op: &str, ids: &[String]) -> Result<(OperationPlan, Vec<PathBuf>), String> {
+    let pop = match op {
+        "trash" => policy::Op::Trash,
+        "delete" | "overwrite" => policy::Op::Delete,
+        _ => return Err("Unknown operation".into()),
+    };
+    let policy = state.policy();
+    let idx = state.index();
+    let mut entries = Vec::new();
+    let mut paths = Vec::new();
+    let mut vols: HashMap<String, Option<String>> = HashMap::new();
+    for id in ids.iter().take(100_000) {
+        let Ok(loc) = state.locate(id) else { continue };
+        let shown = secure::display_safe(&loc.rel);
+        let name = secure::display_safe(&loc.name);
+        let (path, meta) = match fileops::confined_item(&loc.root, &loc.rel) {
+            Ok(v) => v,
+            Err(e) => {
+                entries.push(PlanEntry {
+                    id: id.clone(),
+                    name,
+                    path: shown,
+                    kind: "file",
+                    bytes: 0,
+                    files: 0,
+                    blocked: Some(e),
+                    note: None,
+                });
+                paths.push(PathBuf::new());
+                continue;
+            }
+        };
+        let ft = meta.file_type();
+        let (kind, bytes, files) = if ft.is_symlink() {
+            ("link", 0, 0)
+        } else if ft.is_dir() {
+            let prefix = format!("{}/", loc.rel);
+            let (b, n) =
+                idx.files.iter().filter(|e| e.path.starts_with(&prefix)).fold((0, 0), |(b, n), e| (b + e.size, n + 1));
+            ("folder", b, n)
+        } else {
+            ("file", meta.len(), 1)
+        };
+        let mut blocked = policy.check(pop, &path).err();
+        if blocked.is_none() && op == "overwrite" {
+            blocked = policy.check(policy::Op::Overwrite, &path).err();
+        }
+        let note = (kind == "link")
+            .then(|| "Only the link itself is removed; what it points to is never touched.".to_string());
+        let vol = drives::key_of(&privacy::volume_of(&path));
+        vols.entry(vol).or_insert_with(|| overwrite::eligibility(&path).err());
+        entries.push(PlanEntry { id: id.clone(), name, path: shown, kind, bytes, files, blocked, note });
+        paths.push(path);
+    }
+    let ok = || entries.iter().filter(|e| e.blocked.is_none());
+    let total_bytes = ok().map(|e| e.bytes).sum();
+    let total_files = ok().map(|e| e.files).sum();
+    let blocked = entries.iter().filter(|e| e.blocked.is_some()).count();
+    let needs_typed_confirm = op != "trash"
+        && (entries.len() > TYPED_CONFIRM_ITEMS
+            || total_files > TYPED_CONFIRM_FILES
+            || total_bytes > TYPED_CONFIRM_BYTES
+            || ok().any(|e| e.kind == "folder"));
+    let overwrite_unavailable =
+        if vols.is_empty() { Some("Nothing to overwrite.".to_string()) } else { vols.into_values().flatten().next() };
+    Ok((
+        OperationPlan {
+            op: op.to_owned(),
+            entries,
+            total_bytes,
+            total_files,
+            blocked,
+            needs_typed_confirm,
+            overwrite_unavailable,
+        },
+        paths,
+    ))
+}
+
+/// A dry run: what an operation would do to each item, and what the
+/// mutation policy refuses — nothing is changed.
+#[tauri::command]
+async fn plan_operation(app: AppHandle, op: String, ids: Vec<String>) -> Result<OperationPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || plan(&app.state::<AppState>(), &op, &ids).map(|p| p.0))
+        .await
+        .map_err(|_| "The plan couldn't be made.".to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteResult {
+    deleted: Vec<String>,
+    bytes: u64,
+    failed: Vec<dupes::Failure>,
+}
+
+/// Delete permanently (no Trash), optionally overwriting file contents first
+/// where that is meaningful. Re-plans and re-checks everything here; large
+/// batches and folders require the typed confirmation "DELETE".
+#[tauri::command]
+async fn delete_items(
+    app: AppHandle,
+    ids: Vec<String>,
+    overwrite: bool,
+    confirm: String,
+) -> Result<DeleteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (plan, paths) = plan(&state, if overwrite { "overwrite" } else { "delete" }, &ids)?;
+        if plan.needs_typed_confirm && confirm != "DELETE" {
+            return Err("Type DELETE to confirm this permanent deletion.".into());
+        }
+        if overwrite {
+            if let Some(why) = &plan.overwrite_unavailable {
+                return Err(format!("Secure Overwrite isn't available here: {why}"));
+            }
+        }
+        let policy = state.policy();
+        let mut out = DeleteResult { deleted: Vec::new(), bytes: 0, failed: Vec::new() };
+        let mut rels = Vec::new();
+        let mut gone = Vec::new();
+        let mut changes = Vec::new();
+        for (e, path) in plan.entries.iter().zip(paths) {
+            if let Some(b) = &e.blocked {
+                out.failed.push(dupes::Failure { path: e.path.clone(), reason: b.clone() });
+                continue;
+            }
+            if let Ok(m) = fs::symlink_metadata(&path) {
+                if m.is_file() {
+                    invalidate_thumbs(&state, &path, &m);
+                }
+            }
+            let r = if overwrite && e.kind != "link" {
+                overwrite_tree(&policy, &path)
+            } else {
+                fileops::delete_permanently(&policy, &path)
+            };
+            match r {
+                Ok(b) => {
+                    out.deleted.push(e.id.clone());
+                    out.bytes += b;
+                    if let Some(rel) = browser_rel(&state, &path) {
+                        rels.push(rel);
+                    }
+                    changes.push(history::Change::Deleted { path: path.clone() });
+                    gone.push(path);
+                }
+                Err(reason) => out.failed.push(dupes::Failure { path: e.path.clone(), reason }),
+            }
+        }
+        if !rels.is_empty() {
+            apply_index_change(&app, |idx| idx.remove_paths(&rels));
+        }
+        forget_removed(&state, &gone);
+        let n = changes.len();
+        state.history.record(
+            format!(
+                "{} {n} item{} permanently",
+                if overwrite { "Overwrote and deleted" } else { "Deleted" },
+                if n == 1 { "" } else { "s" }
+            ),
+            changes,
+        );
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "The deletion stopped unexpectedly.".to_string())?
+}
+
+/// Overwrite every regular file under `path` (never through a link), then
+/// remove what remains (folders, links).
+fn overwrite_tree(policy: &policy::Policy, path: &Path) -> Result<u64, String> {
+    let meta = fs::symlink_metadata(path).map_err(|_| "file no longer exists".to_string())?;
+    if meta.is_file() {
+        return overwrite::overwrite_and_delete(policy, path);
+    }
+    let mut bytes = 0;
+    for e in walkdir::WalkDir::new(path).follow_links(false).into_iter() {
+        let e = e.map_err(|_| "a folder couldn't be read".to_string())?;
+        if e.file_type().is_file() {
+            bytes += overwrite::overwrite_and_delete(policy, e.path())?;
+        }
+    }
+    fileops::delete_permanently(policy, path)?;
+    Ok(bytes)
+}
+
+#[tauri::command]
+fn history_list(state: State<'_, AppState>) -> Vec<history::RecordView> {
+    state.history.list()
+}
+
+/// Undo one operation (`None` = the most recent one that can be undone).
+#[tauri::command]
+async fn history_undo(app: AppHandle, id: Option<u64>) -> Result<history::UndoOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let id = id.or_else(|| state.history.last_undoable()).ok_or("Nothing to undo.")?;
+        let out = state.history.undo(id, &state.policy())?;
+        // Restored or renamed items: let the index pick them up.
+        if out.touched.iter().any(|p| state.root_canon().is_some_and(|r| p.starts_with(r))) {
+            start_scan(&app);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "Undo failed.".to_string())?
 }
 
 // ------------------------------------------------------- favorites, tags
@@ -1309,6 +1581,72 @@ fn forget_data(state: &AppState, root: &Path) -> Forgotten {
     Forgotten { drive, indexes }
 }
 
+/// Debug builds only: `MORI_DEBUG_OPS=<scratch folder>` builds a small tree
+/// in that folder and exercises the operation commands end to end (plan,
+/// typed confirmation, overwrite refusal, Trash and Undo, permanent delete).
+fn debug_ops(app: &AppHandle) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(dir) = std::env::var_os("MORI_DEBUG_OPS").map(PathBuf::from) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Album/Keep")).unwrap();
+        fs::write(dir.join("Album/a.jpg"), vec![1u8; 2000]).unwrap();
+        fs::write(dir.join("Album/Keep/b.jpg"), vec![2u8; 3000]).unwrap();
+        fs::write(dir.join("loose.txt"), b"loose").unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        open_root(&app, &dir).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        while state.scanning.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let id = |rel: &str| index::id_str(index::id_for(rel));
+        state.protected.set(&dir.join("Album/Keep"), 0, true).unwrap();
+        let (p, _) = plan(&state, "delete", &[id("Album"), id("loose.txt")]).unwrap();
+        eprintln!(
+            "mori: DEBUG ops plan: entries={} blocked={:?} typed={} overwrite={:?}",
+            p.entries.len(),
+            p.entries.iter().map(|e| (e.path.clone(), e.blocked.clone())).collect::<Vec<_>>(),
+            p.needs_typed_confirm,
+            p.overwrite_unavailable
+        );
+        state.protected.set(&dir.join("Album/Keep"), 0, false).unwrap();
+        let no_confirm =
+            tauri::async_runtime::block_on(delete_items(app.clone(), vec![id("Album")], false, String::new()));
+        let overwrite =
+            tauri::async_runtime::block_on(delete_items(app.clone(), vec![id("loose.txt")], true, String::new()));
+        eprintln!(
+            "mori: DEBUG ops refusals: no-confirm={:?} overwrite={:?} album-still-there={}",
+            no_confirm.err(),
+            overwrite.err(),
+            dir.join("Album/a.jpg").exists()
+        );
+        let t = tauri::async_runtime::block_on(trash_items(app.clone(), vec![id("loose.txt")])).unwrap();
+        let gone = !dir.join("loose.txt").exists();
+        let u = tauri::async_runtime::block_on(history_undo(app.clone(), None));
+        eprintln!(
+            "mori: DEBUG ops trash+undo: trashed={} gone={gone} undo={:?} back={}",
+            t.trashed.len(),
+            u.map(|o| (o.restored, o.failed)),
+            fs::read(dir.join("loose.txt")).is_ok_and(|b| b == b"loose")
+        );
+        let d = tauri::async_runtime::block_on(delete_items(app.clone(), vec![id("Album")], false, "DELETE".into()))
+            .unwrap();
+        let hist = state.history.list();
+        eprintln!(
+            "mori: DEBUG ops delete: deleted={} bytes={} album-gone={} history={:?}",
+            d.deleted.len(),
+            d.bytes,
+            !dir.join("Album").exists(),
+            hist.iter().map(|h| (h.label.clone(), h.undoable, h.note.clone())).collect::<Vec<_>>()
+        );
+        eprintln!("mori: DEBUG ops done");
+    });
+}
+
 /// Debug builds only: `MORI_DEBUG_ORG=<folder>` checks on the real app that a
 /// temporary session writes nothing, and that forgetting the folder's drive
 /// removes only Mori's data (the folder itself is compared before and after).
@@ -1398,6 +1736,7 @@ fn clear_session(state: &AppState) {
     *state.health.lock().unwrap_or_else(PoisonError::into_inner) = None;
     state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner).clear();
     state.connected.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.history.clear();
     state.volatile_thumbs.clear();
     state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
 }
@@ -1442,6 +1781,7 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
         let state = app.state::<AppState>();
         let mut out = TrashResult { trashed: Vec::new(), bytes: 0, failed: Vec::new() };
         let mut removed = Vec::new();
+        let mut changes = Vec::new();
         for id in ids.iter().take(10_000) {
             let Ok(loc) = state.locate(id) else { continue };
             let shown = secure::display_safe(&loc.rel);
@@ -1465,9 +1805,10 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
                 continue;
             }
             match fileops::move_to_trash(&state.policy(), &path) {
-                Ok(()) => {
+                Ok(trashed) => {
                     out.trashed.push(id.clone());
                     removed.push(loc.rel.clone());
+                    changes.push(history::Change::Trashed { original: path.clone(), trashed });
                 }
                 Err(e) => out.failed.push(dupes::Failure { path: shown, reason: e }),
             }
@@ -1475,6 +1816,10 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
         if !removed.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&removed));
         }
+        state.history.record(
+            format!("Moved {} empty folder{} to Trash", changes.len(), if changes.len() == 1 { "" } else { "s" }),
+            changes,
+        );
         Ok(out)
     })
     .await
@@ -2097,6 +2442,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
         let state = app.state::<AppState>();
         state.cleanup_cancel.store(false, Ordering::SeqCst);
         let cancel = state.cleanup_cancel.clone();
+        let mut cleaned: Vec<history::Change> = Vec::new();
         let (outcome, removed_abs) = {
             let mut guard = state.analysis.lock().unwrap_or_else(PoisonError::into_inner);
             let store = guard.as_mut().ok_or("The analysis was cleared.")?;
@@ -2111,7 +2457,9 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
                         return Err("not a regular file".into());
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
-                    fileops::move_to_trash(&thumb_state.policy(), &path)
+                    let trashed = fileops::move_to_trash(&thumb_state.policy(), &path)?;
+                    cleaned.push(history::Change::Trashed { original: path, trashed });
+                    Ok(())
                 },
                 &cancel,
                 &mut |done, total| {
@@ -2124,6 +2472,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
             (outcome, removed_abs)
         };
         forget_removed(&state, &removed_abs);
+        state.history.record(trash_label(&cleaned), cleaned);
         let rels: Vec<String> = removed_abs.iter().filter_map(|p| browser_rel(&state, p)).collect();
         if !rels.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&rels));
@@ -2556,6 +2905,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
         let state = app.state::<AppState>();
         state.cleanup_cancel.store(false, Ordering::SeqCst);
         let cancel = state.cleanup_cancel.clone();
+        let mut cleaned: Vec<history::Change> = Vec::new();
         let (outcome, removed_abs) = {
             let mut guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
             let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or("The analysis was cleared.")?;
@@ -2570,7 +2920,9 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
                         return Err("not a regular file".into());
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
-                    fileops::move_to_trash(&thumb_state.policy(), &path)
+                    let trashed = fileops::move_to_trash(&thumb_state.policy(), &path)?;
+                    cleaned.push(history::Change::Trashed { original: path, trashed });
+                    Ok(())
                 },
                 &cancel,
                 &mut |done, total| {
@@ -2583,6 +2935,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
             (outcome, removed_abs)
         };
         forget_removed(&state, &removed_abs);
+        state.history.record(trash_label(&cleaned), cleaned);
         let rels: Vec<String> = removed_abs.iter().filter_map(|p| browser_rel(&state, p)).collect();
         if !rels.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&rels));
@@ -2855,6 +3208,7 @@ fn main() {
                 temp: AtomicBool::new(false),
                 capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
                 capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
+                history: history::History::default(),
                 health: Mutex::new(None),
                 health_running: AtomicBool::new(false),
                 health_job: Arc::new(jobs::Control::default()),
@@ -2891,6 +3245,7 @@ fn main() {
                 metascan::debug_autorun(app.handle());
                 health::debug_autorun(app.handle());
                 debug_org(app.handle());
+                debug_ops(app.handle());
                 debug_privacy(app.handle());
             }
             Ok(())
@@ -2947,6 +3302,10 @@ fn main() {
             set_capture_override,
             storage_report,
             set_favorite,
+            plan_operation,
+            delete_items,
+            history_list,
+            history_undo,
             tags_list,
             tag_items,
             tag_rename,

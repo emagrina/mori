@@ -160,6 +160,30 @@ Shortcuts never fire while you type in a text field. *Keyboard Shortcuts* in the
 ![Audio with waveform](docs/images/phase7/audio.jpg)
 ![Filmstrip](docs/images/phase7/filmstrip.jpg)
 
+### File operations, undo and permanent deletion
+
+- **Operation Preview.** Before moving several items or a folder to the Trash, or deleting permanently, Mori shows exactly what will happen: each item with its size and file count, and each item the mutation policy refuses (Read-only Mode, Never Modify), with the reason. Links are marked "only the link itself is removed". This is a dry run computed by the backend; nothing changes until you confirm.
+- **Undo** (⌘Z / Ctrl+Z, and *Undo History…* in the More menu). Undo is offered only where it really works:
+  - **Move to Trash** → put back where it was. macOS tells Mori where each item went in the Trash; elsewhere, use the system Trash.
+  - **Rename** → renamed back.
+  - **Sanitized copy** → the copy goes to the Trash.
+  - Undo never replaces something that has taken the original name, and it obeys Read-only Mode and protected folders.
+  - **Permanent deletions are listed as "can't be undone"**, never as undoable.
+  - The history lives in memory for the session. Clear Session Data clears it.
+- **Delete Permanently…** (file menu) bypasses the Trash.
+  - It always goes through the Operation Preview, with a clear warning.
+  - Folders and large batches (over 25 items, 100 files or 1 GB) require **typing DELETE**. This is enforced in the backend too, not just the dialog.
+  - Links are removed as themselves, and a link inside a deleted folder never leads Mori to its target (tested).
+- **Secure Overwrite** (an option in Delete Permanently) replaces a file's bytes once with random data, forces them to the device, then deletes the file. It is offered **only where that is meaningful**:
+  - on a spinning hard disk (identified through the system's device characteristics), with a file system that writes in place (HFS+, FAT/exFAT, NTFS).
+  - It is **refused** on APFS (copy-on-write), SSD/flash (wear-levelling), network volumes, unidentifiable drives, files with other hard links, and links (never followed).
+  - It respects Read-only Mode and protected folders.
+  - Backups, snapshots, cloud copies and caches are out of reach, so Mori never calls this "forensic" or "unrecoverable". Whole-drive erasure is out of scope.
+  - On a typical Mac (APFS on SSD) the option is shown disabled, with the reason.
+
+![Operation Preview](docs/images/phase8/operation-preview.jpg)
+![Undo History](docs/images/phase8/undo-history.jpg)
+
 ### Private folders
 
 Right-click a folder and choose **Make Private** to create a visibility boundary inside Mori. The folder stays where it is and opens normally, but its contents are no longer surfaced from outside it:
@@ -179,6 +203,12 @@ These have been discussed for Mori but **are not in the code yet**:
 - HEIC / HEIF previews on Windows and Linux (macOS only for now).
 - Apple Live Photos playback (Still / Live / Loop modes). Live Photos are recognised as pairs by the analyzers only.
 - Matching heavily cropped images, or videos where a large part was cut.
+- **PDF preview, new-drive detection, and Undo for Trash** are macOS-only. On Windows/Linux, PDFs show the file report, and trashed items are restored from the system Trash.
+- **Sanitized copies** of HEIC/AVIF images and of videos or audio: there is no safe lossless rewrite yet, so no option is offered for them.
+- **Pause/resume** for Exact Duplicates and Similar Media (they can be cancelled). Sensitive Metadata and Media Health can be paused.
+- **Apple burst identifiers** (MakerNote BurstUUID). Bursts are recognised from capture times among Similar Media groups only.
+- **Secure Overwrite** works only on spinning hard disks with in-place file systems, which a modern Mac (APFS on SSD) is not. There, the option is shown disabled with the reason.
+- **Map tiles.** The map shows bundled world outlines only, by design: no map service is ever contacted.
 
 ## Philosophy
 
@@ -286,7 +316,7 @@ Mori treats every file on a drive as **untrusted input**. It is designed to redu
 - **No networking.** A strict Content-Security-Policy blocks every remote origin, and the Rust side has no network code.
 - **Conservative file changes.**
   - Browsing and analysis are read-only.
-  - The only changes Mori can make are a rename (which never overwrites an existing item) and moving items to the system Trash, always as an explicit user action.
+  - The changes Mori can make are: a rename (which never overwrites an existing item), moving items to the system Trash or back, creating sanitized copies (never replacing a file), and — only after the Operation Preview and explicit confirmation — permanent deletion with optional Secure Overwrite where meaningful. Each one runs only as an explicit user action.
   - Symlinks are never followed or acted on.
   - Both analyzers read only the folders you select. A folder picked with *Choose a Folder…* is remembered only for the current session.
 - **Resource limits.**

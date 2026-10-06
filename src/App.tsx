@@ -2,7 +2,6 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
-  formatSize,
   isMac,
   plural,
   PRIVATE_HINT,
@@ -20,7 +19,6 @@ import {
   type SortKey,
   type Stats,
   type Status,
-  type TrashSummary,
   type ViewMode,
 } from "./api";
 import { Analyzer } from "./components/Analyzer";
@@ -32,6 +30,7 @@ import { AnalysisCenter } from "./components/AnalysisCenter";
 import { HealthView } from "./components/HealthView";
 import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
 import { TagDialog, TagManager } from "./components/Organize";
+import { HistoryPanel, OperationPreview } from "./components/Operations";
 import { CommandPalette, ShortcutsHelp, type Command } from "./components/CommandPalette";
 import { StorageView } from "./components/StorageView";
 import { Preview } from "./components/Preview";
@@ -84,14 +83,15 @@ const SORTS: { key: SortKey; label: string }[] = [
 ];
 
 type Dialog =
-  | { kind: "trash"; entries: Entry[]; summary: TrashSummary }
   | { kind: "rename"; entry: Entry }
   | { kind: "private"; entry: Entry }
   | { kind: "unprotect"; entry: Entry }
   | { kind: "tags"; entries: Entry[] }
   | { kind: "manageTags" }
   | { kind: "forget" }
-  | { kind: "clearSession" };
+  | { kind: "clearSession" }
+  | { kind: "op"; op: "trash" | "delete"; entries: Entry[] }
+  | { kind: "history" };
 
 const EMPTY: QueryResult = { items: [], total: 0, truncated: false, crumbs: [] };
 
@@ -324,9 +324,18 @@ export default function App() {
   const requestTrash = async (targets: Entry[]) => {
     if (!targets.length) return;
     if (targets.length === 1 && targets[0].kind !== "folder") return moveToTrash(targets);
-    const summary = await api.trashSummary(targets.map((t) => t.id)).catch(() => null);
-    if (!summary) return flash("Those items are no longer available");
-    setDialog({ kind: "trash", entries: targets, summary });
+    // Several items or a folder: Operation Preview first.
+    setDialog({ kind: "op", op: "trash", entries: targets });
+  };
+
+  const undoLast = async () => {
+    try {
+      const r = await api.historyUndo(null);
+      flash(r.failed.length ? `Undo: ${plural(r.restored, "change")} restored · ${r.failed[0]}` : `Undone (${plural(r.restored, "change")})`, 3500);
+      setAnalysisVersion((v) => v + 1);
+    } catch (e) {
+      flash(String(e), 3500);
+    }
   };
 
   const moveToTrash = async (targets: Entry[]) => {
@@ -355,7 +364,7 @@ export default function App() {
       }
     }
     const what = gone.length === 1 ? `“${gone[0].name}”` : plural(gone.length, "item");
-    if (!r.failed.length) flash(`Moved ${what} to Trash`);
+    if (!r.failed.length) flash(`Moved ${what} to Trash · ${isMac ? "⌘Z" : "Ctrl+Z"} to undo`, 3000);
     else if (!gone.length) flash(targets.length === 1 ? `Couldn't move to Trash: ${r.failed[0].reason}` : `Nothing was moved to Trash (${r.failed[0].reason})`, 5000);
     else flash(`Moved ${what} to Trash · ${plural(r.failed.length, "item")} couldn't be moved (${r.failed[0].reason})`, 6000);
   };
@@ -564,6 +573,11 @@ export default function App() {
         }
         return;
       }
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "z" && !inInput) {
+        e.preventDefault();
+        undoLast();
+        return;
+      }
       if (mod && e.key.toLowerCase() === "f") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -662,6 +676,9 @@ export default function App() {
     { id: "m-tags", title: "Manage Tags…", section: "Mori", icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
     { id: "m-session", title: "Clear Session Data…", section: "Mori", icon: "close", run: () => setDialog({ kind: "clearSession" }) },
     { id: "m-rescan", title: "Rescan", section: "Mori", icon: "refresh", run: () => api.rescan() },
+    { id: "m-undo", title: "Undo", section: "Edit", icon: "refresh", keys: `${isMac ? "⌘" : "Ctrl+"}Z`, run: undoLast },
+    { id: "m-history", title: "Undo History…", section: "Edit", icon: "clock", run: () => setDialog({ kind: "history" }) },
+    ...(sel && sel.kind !== "link" ? [{ id: "s-del", title: `Delete “${sel.name}” Permanently…`, section: "Selection", icon: "close" as IconName, words: "remove erase", run: () => setDialog({ kind: "op", op: "delete", entries: selectionTargets() }) }] : []),
     { id: "m-keys", title: "Keyboard Shortcuts", section: "Help", icon: "command", words: "keys help", run: () => setShortcuts(true) },
   ];
 
@@ -1109,6 +1126,7 @@ export default function App() {
           entry={menu.entry}
           count={menu.targets.length}
           onTrash={() => requestTrash(menu.targets)}
+          onDelete={() => setDialog({ kind: "op", op: "delete", entries: menu.targets })}
           onRename={() => setDialog({ kind: "rename", entry: menu.entry })}
           onPrivacy={() => (menu.entry.private ? setPrivate(menu.entry, false) : setDialog({ kind: "private", entry: menu.entry }))}
           onInfo={() => setInspectId(menu.entry.id)}
@@ -1206,6 +1224,15 @@ export default function App() {
           <button
             onClick={() => {
               setPop(null);
+              setDialog({ kind: "history" });
+            }}
+            title="Changes Mori made to your files in this session, with Undo where possible"
+          >
+            <Icon name="clock" size={14} /> Undo History…
+          </button>
+          <button
+            onClick={() => {
+              setPop(null);
               startTemporary();
             }}
             title="Open a folder without saving an index, thumbnails or anything else about it"
@@ -1234,9 +1261,6 @@ export default function App() {
         </div>
       )}
 
-      {dialog?.kind === "trash" && (
-        <TrashDialog entries={dialog.entries} summary={dialog.summary} onCancel={() => setDialog(null)} onConfirm={() => moveToTrash(dialog.entries)} />
-      )}
       {dialog?.kind === "private" && (
         <PrivateDialog entry={dialog.entry} onCancel={() => setDialog(null)} onConfirm={() => setPrivate(dialog.entry, true)} />
       )}
@@ -1279,6 +1303,22 @@ export default function App() {
           }}
         />
       )}
+      {dialog?.kind === "op" && (
+        <OperationPreview
+          op={dialog.op}
+          entries={dialog.entries}
+          onCancel={() => setDialog(null)}
+          onTrash={(ids) => moveToTrash(dialog.entries.filter((e) => ids.includes(e.id)))}
+          onDeleted={(msg, ids) => {
+            setDialog(null);
+            if (previewId && ids.includes(previewId)) setPreviewId(null);
+            setMarked(new Set());
+            setAnalysisVersion((v) => v + 1);
+            flash(msg, 5000);
+          }}
+        />
+      )}
+      {dialog?.kind === "history" && <HistoryPanel onClose={() => setDialog(null)} onUndone={(m) => (flash(m, 3500), setAnalysisVersion((v) => v + 1))} />}
       {dialog?.kind === "forget" && (
         <ModalFrame onCancel={() => setDialog(null)}>
           <div className="dialog-icon">
@@ -1482,6 +1522,7 @@ function ContextMenu({
   onInfo,
   onProtect,
   onTrash,
+  onDelete,
   onError,
 }: {
   x: number;
@@ -1500,6 +1541,7 @@ function ContextMenu({
   onInfo: () => void;
   onProtect: () => void;
   onTrash: () => void;
+  onDelete: () => void;
   onError: (msg: string) => void;
 }) {
   const folder = entry.kind === "folder";
@@ -1516,6 +1558,9 @@ function ContextMenu({
         <div className="sep" />
         <button className="danger" onClick={onTrash}>
           <Icon name="trash" size={14} /> Move {plural(count, "item")} to Trash
+        </button>
+        <button className="danger" onClick={onDelete}>
+          <Icon name="close" size={14} /> Delete Permanently…
         </button>
       </div>
     );
@@ -1584,6 +1629,9 @@ function ContextMenu({
       <button className="danger" onClick={onTrash}>
         <Icon name="trash" size={14} /> Move to Trash
       </button>
+      <button className="danger" onClick={onDelete} title="Bypasses the Trash. Shows exactly what will be deleted first.">
+        <Icon name="close" size={14} /> Delete Permanently…
+      </button>
     </div>
   );
 }
@@ -1613,34 +1661,6 @@ function PrivateDialog({ entry, onCancel, onConfirm }: { entry: Entry; onCancel:
   );
 }
 
-/** Confirmation for several items or a folder (a single file needs none). */
-function TrashDialog({ entries, summary, onCancel, onConfirm }: { entries: Entry[]; summary: TrashSummary; onCancel: () => void; onConfirm: () => void }) {
-  const onlyFiles = entries.every((e) => e.kind !== "folder");
-  const title =
-    entries.length === 1 ? `Move “${entries[0].name}” to Trash?` : `Move ${plural(entries.length, onlyFiles ? "file" : "item")} to Trash?`;
-  const parts = [plural(summary.files, "file")];
-  if (summary.folders) parts.unshift(plural(summary.folders, "folder"));
-  return (
-    <ModalFrame onCancel={onCancel}>
-      <div className="dialog-icon danger">
-        <Icon name="trash" size={20} />
-      </div>
-      <h2>{title}</h2>
-      <p className="dialog-facts">
-        {parts.join(" · ")} · {formatSize(summary.bytes)}
-      </p>
-      <p>{isMac ? "You can restore them from the Trash in Finder." : "You can restore them from the Recycle Bin."}</p>
-      <div className="dialog-actions">
-        <button className="btn" onClick={onCancel}>
-          Cancel
-        </button>
-        <button className="btn primary danger-fill" onClick={onConfirm} autoFocus>
-          Move to Trash
-        </button>
-      </div>
-    </ModalFrame>
-  );
-}
 
 function RenameDialog({ entry, onCancel, onDone }: { entry: Entry; onCancel: () => void; onDone: (id: string, name: string) => void }) {
   const [name, setName] = useState(entry.name);
