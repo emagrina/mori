@@ -9,6 +9,7 @@ mod index;
 mod probe;
 mod protocol;
 mod secure;
+mod similar;
 mod thumbs;
 mod video;
 mod worker;

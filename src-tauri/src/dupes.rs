@@ -135,13 +135,13 @@ pub struct Cancelled;
 
 // ------------------------------------------------------------------ hashing
 
-fn mtime_ns(meta: &std::fs::Metadata) -> u128 {
+pub(crate) fn mtime_ns(meta: &std::fs::Metadata) -> u128 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos())
 }
 
 /// Open a recorded file, confined to its root, refusing symlinks and
 /// non-regular files, and check it still has the recorded size and mtime.
-fn open_unchanged(root: &Path, f: &FileRec) -> Result<File, &'static str> {
+pub(crate) fn open_unchanged(root: &Path, f: &FileRec) -> Result<File, &'static str> {
     let (file, meta, _) = secure::open_inside(root, &f.rel).map_err(|_| "unavailable")?;
     if meta.len() != f.size || mtime_ns(&meta) != f.mtime_ns {
         return Err("changed");
@@ -156,7 +156,7 @@ fn read_at(file: &mut File, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
 
 /// BLAKE3 over size + three regions. For small files this *is* the full
 /// content hash (returned as `(partial, Some(full))`).
-fn partial_fingerprint(file: &mut File, size: u64) -> std::io::Result<([u8; 32], Option<[u8; 32]>)> {
+pub(crate) fn partial_fingerprint(file: &mut File, size: u64) -> std::io::Result<([u8; 32], Option<[u8; 32]>)> {
     if size <= 3 * PARTIAL_CHUNK {
         let mut all = Vec::with_capacity(size as usize);
         file.seek(SeekFrom::Start(0))?;
@@ -181,7 +181,7 @@ fn partial_fingerprint(file: &mut File, size: u64) -> std::io::Result<([u8; 32],
 }
 
 /// Streaming full-content BLAKE3. Checks `cancel` between chunks.
-fn full_hash(
+pub(crate) fn full_hash(
     file: &mut File,
     size: u64,
     cancel: &AtomicBool,
@@ -215,7 +215,7 @@ fn full_hash(
 
 // ------------------------------------------------------------- collection
 
-fn collect(
+pub(crate) fn collect(
     spec: &Spec,
     cancel: &AtomicBool,
     stats: &mut Stats,
@@ -317,7 +317,7 @@ pub fn live_pairs(files: &[FileRec]) -> Vec<(usize, usize)> {
 
 /// Run in parallel over `items` with a few worker threads while the calling
 /// thread reports progress.
-fn parallel<F>(
+pub(crate) fn parallel<F>(
     items: &[usize],
     workers: usize,
     cancel: &AtomicBool,
@@ -791,7 +791,8 @@ pub fn execute(
                         out.removed.push(f);
                     }
                     Err(e) => {
-                        let reason = if g.live && k > 0 {
+                        // Both halves of a Live Photo move together; if the second fails, say so.
+                        let reason = if member.files.len() > 1 && k > 0 {
                             format!("{e}. The Live Photo's still image was already moved to Trash; restore it from the Trash to keep the pair together.")
                         } else {
                             e
