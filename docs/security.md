@@ -48,13 +48,34 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 - **Move to Trash** through the OS Trash / Recycle Bin (`NSFileManager` on macOS, the shell on Windows, freedesktop trash on Linux). There is no permanent-delete code path. If the platform refuses, the item stays where it is and the failure is reported.
 - **Target checks.** Before either operation, the parent folder is canonicalized and must lie inside the selected root. The item itself must be a regular file or folder, never a symlink, and never the root.
 
-**Duplicate Analyzer.**
+**Exact duplicates.**
 - **Scope.** It reads only the locations you select. The UI sends opaque keys, not paths, and a folder chosen with the native picker is authorized for the current session only.
 - **Exact matches only.** Comparison uses raw bytes (size, a partial fingerprint, then a streaming BLAKE3 hash with a fixed-size buffer). Nothing is decoded.
 - **Cleanup safety.** A cleanup plan is validated in Rust: every group must keep at least one copy, and half of a Live Photo can't be trashed alone. Before each group is cleaned, the kept copies are re-checked (still present, same size and modification time, same fingerprint), and each file to be trashed is re-checked too. Only files the OS actually moved are reported as removed.
 - **Privacy.** Results and hashes live only in memory. Thumbnails of analyzed files outside the browsed root are also kept only in memory, and Clear Analysis drops them.
 
 Known limits: on Windows the worker relies on Job object limits and the absence of any path, not on a filesystem-denying sandbox. Linux uses rlimits and `no_new_privs`, without seccomp yet. Video decoding trusts the OS webview's sandbox. Crash/hang recovery of the web content process is implemented for macOS; on Windows a hung WebView2 page is reloaded, without process termination. WebM thumbnails usually fall back to an icon because WebKit doesn't expose WebM frames to a canvas.
+
+## HEIC / HEIF decoding (macOS)
+
+HEVC decoding is done by Apple's own sandboxed decoder service, which the default `pure-computation` profile cannot reach. A HEIC job (decided by magic bytes, passed to the worker as a fixed flag) therefore runs under a dedicated profile, `HEIF_PROFILE` in `worker.rs`:
+
+- **Files:** no reads outside system locations (`/System`, `/usr/lib`, `/usr/share`, `/Library/Apple`, the dyld cache) and Mori's own app bundle; no writes of any kind.
+- **Network and processes:** no network, no process creation.
+- **IPC:** no service lookups except `com.apple.coremedia.videodecoder`.
+- **IOKit:** no clients except `IOSurfaceRootUserClient` (decoded frames come back as shared surfaces).
+- **Everything else denied:** shared memory, sockets, signals to other processes, preference writes and similar.
+
+The worker still receives only bytes, never a path. The same resource limits (dimensions, pixels, CPU time, output size) apply, and a decode that fails lazily (an empty image) is treated as a failure. `tests/worker.rs` checks that the HEIF profile still denies file access, writes, the network and new processes.
+
+## Similar media analysis
+
+- **Photos:** decoded only by the worker (the `fingerprint` op), which returns two 64×64 grayscale miniatures; all comparison in Mori is arithmetic on those pixels.
+- **Videos:** sampled by the webview through the same guarded path as previews: sandboxed probe and codec allow-list, blocklist, media-session watchdog. The page reduces each frame to 64×64 grayscale and sends raw pixels; Rust validates sizes and ranges and never parses anything from the page.
+- **Cache:** fingerprints are cached under hash names in the app cache directory, versioned and tied to each file's path, size and modification time. They are strictly parsed on read; anything malformed is treated as a miss.
+- **Decisions:** "Not duplicates" decisions are stored as pairs of 16-byte content identities (size plus partial BLAKE3), with no names or paths.
+- **Cleanup:** uses the same validated executor as exact duplicates (at least one copy kept, kept copies re-checked, OS Trash only, Live Photo halves together).
+- **Failures:** a file that can't be decoded or sampled is reported as "could not safely analyze" and remembered until it changes; the rest of the analysis continues.
 
 ## Supported formats (detail)
 
@@ -63,10 +84,11 @@ Mori deliberately keeps its attack surface small. Every file is listed and searc
 | Preview | Formats (judged by content, not extension) | How |
 |---|---|---|
 | Images | JPEG, PNG, WebP | Decoded and re-encoded by the sandboxed worker (up to 3072 px) |
+| HEIC / HEIF (macOS) | HEIF stills | Decoded by macOS ImageIO inside the worker under the HEIF profile (below), then re-encoded like other images |
 | GIFs | GIF | Re-encoded frame by frame by the worker, so they still animate |
 | Videos | MP4 / MOV (H.264/HEVC), WebM | Container verified by magic bytes, then played by the system webview's sandboxed media engine |
 | Text | txt, md, csv, tsv, log, json, srt, vtt, yaml, ini | Shown as inert plain text (first 256 KB) |
 
-Everything else (HEIC, AVIF, RAW, TIFF, SVG, HTML, PDF, Office files, audio, MKV/AVI and so on) shows **Preview not supported** with the file's details. If the format is passive, an **Open in system** button hands it to its default app. Thumbnails exist only for JPEG, PNG, WebP and GIF images and for playable videos. Other files show a type icon.
+Everything else (HEIC on Windows/Linux, AVIF, RAW, TIFF, SVG, HTML, PDF, Office files, audio, MKV/AVI and so on) shows **Preview not supported** with the file's details. If the format is passive, an **Open in system** button hands it to its default app. Thumbnails exist only for JPEG, PNG, WebP, GIF and (on macOS) HEIC images and for playable videos. Other files show a type icon.
 
 Library filters (Photos, Videos, GIFs, Documents, Audio) group files by extension for browsing only. That grouping is never used to decide how to parse a file.
