@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-meta-clear"
+description = "Enables the meta_clear command without any pre-configured scope."
+commands.allow = ["meta_clear"]
+
+[[permission]]
+identifier = "deny-meta-clear"
+description = "Denies the meta_clear command without any pre-configured scope."
+commands.deny = ["meta_clear"]

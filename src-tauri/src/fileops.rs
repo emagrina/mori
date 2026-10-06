@@ -34,6 +34,75 @@ fn describe_trash_error(e: &trash::Error) -> String {
     }
 }
 
+/// Create a new file `name` in the canonical folder `dir` with `bytes`.
+/// Never replaces anything: fails if the name exists (even as a dangling
+/// symlink), and never follows a symlink in place of the folder or the file.
+/// Returns `Ok(false)` when the name is taken, so the caller can pick another.
+pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Result<bool, String> {
+    validate_name(name)?;
+    let target = dir.join(name);
+    policy.check(Op::Create, &target)?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let cdir = CString::new(dir.as_os_str().as_bytes()).map_err(|_| "invalid folder")?;
+        let cname = CString::new(name.as_bytes()).map_err(|_| "invalid name")?;
+        let dfd = unsafe {
+            libc::open(cdir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        };
+        if dfd < 0 {
+            return Err("the folder can't be opened".into());
+        }
+        let fd = unsafe {
+            libc::openat(
+                dfd,
+                cname.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o644 as libc::c_uint,
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(dfd) };
+        if fd < 0 {
+            return match err.kind() {
+                std::io::ErrorKind::AlreadyExists => Ok(false),
+                std::io::ErrorKind::PermissionDenied => Err("permission denied".into()),
+                _ => Err("the file couldn't be created".into()),
+            };
+        }
+        let mut f = unsafe { fs::File::from_raw_fd(fd) };
+        if f.write_all(bytes).and_then(|_| f.sync_all()).is_err() {
+            drop(f);
+            // Our own partial file: remove it rather than leave a broken copy.
+            let _ = fs::remove_file(&target);
+            return Err("writing the file failed (disk full?)".into());
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let meta = fs::symlink_metadata(dir).map_err(|_| "the folder can't be opened")?;
+        if !meta.is_dir() {
+            return Err("the folder can't be opened".into());
+        }
+        let mut f = match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(_) => return Err("the file couldn't be created".into()),
+        };
+        if f.write_all(bytes).and_then(|_| f.sync_all()).is_err() {
+            drop(f);
+            let _ = fs::remove_file(&target);
+            return Err("writing the file failed (disk full?)".into());
+        }
+        Ok(true)
+    }
+}
+
 /// Resolve an existing item for a filesystem change. Unlike reading, this
 /// never follows a final symlink: a link is acted on as itself (its target
 /// is never touched). The item must be a plain file, directory or link
@@ -212,6 +281,32 @@ mod tests {
         assert_eq!(rename_no_replace(&ro, &d.join("a.txt"), &d.join("c.txt")).unwrap_err(), crate::policy::READ_ONLY);
         rename_no_replace(&p, &d.join("a.txt"), &d.join("c.txt")).unwrap();
         assert!(d.join("c.txt").exists() && !d.join("a.txt").exists());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_new_never_replaces_or_follows_links() {
+        let d = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("real")).unwrap();
+        fs::write(d.join("taken.jpg"), b"original").unwrap();
+        let outside = d.join("outside.txt");
+        std::os::unix::fs::symlink(&outside, d.join("link.jpg")).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("dirlink")).unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        assert_eq!(create_new(&p, &d, "taken.jpg", b"new"), Ok(false));
+        assert_eq!(fs::read(d.join("taken.jpg")).unwrap(), b"original");
+        assert_eq!(create_new(&p, &d, "link.jpg", b"new"), Ok(false), "a dangling link counts as taken");
+        assert!(!outside.exists(), "the link target was never created");
+        assert!(create_new(&p, &d.join("dirlink"), "x.jpg", b"new").is_err(), "a linked folder is refused");
+        assert!(create_new(&p, &d, "../escape.jpg", b"new").is_err());
+        assert_eq!(create_new(&p, &d, "fresh.jpg", b"new"), Ok(true));
+        assert_eq!(fs::read(d.join("fresh.jpg")).unwrap(), b"new");
+        let ro = Policy { read_only: true, protected: &store };
+        assert_eq!(create_new(&ro, &d, "other.jpg", b"x").unwrap_err(), crate::policy::READ_ONLY);
+        assert!(!d.join("other.jpg").exists());
         fs::remove_dir_all(&d).unwrap();
     }
 

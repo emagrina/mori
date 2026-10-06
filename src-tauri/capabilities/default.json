@@ -55,6 +55,14 @@
     "allow-pdf-info",
     "allow-archive-listing",
     "allow-open-drive-safely",
-    "allow-set-drive-previews"
+    "allow-set-drive-previews",
+    "allow-file-metadata",
+    "allow-meta-start",
+    "allow-meta-pause",
+    "allow-meta-cancel",
+    "allow-meta-clear",
+    "allow-meta-results",
+    "allow-meta-places",
+    "allow-sanitize-copies"
   ]
 }

@@ -260,3 +260,64 @@ fn pdf_info_and_pages_inside_the_sandbox() {
     assert_ne!(run(&["pdfpage", "300"], b"\x01\0\0\0%PDF-1.4 junk").0, Some(0));
     assert_ne!(run(&["pdfinfo", "64"], b"").0, Some(0));
 }
+
+/// A JPEG with a comment and a minimal EXIF block (Make = "SynthCam").
+fn jpeg_with_metadata() -> Vec<u8> {
+    let img = image::RgbImage::from_fn(16, 8, |x, y| image::Rgb([x as u8 * 15, y as u8 * 30, 60]));
+    let mut plain = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut plain), image::ImageFormat::Jpeg).unwrap();
+    let mut tiff = b"MM\0*\0\0\0\x08\0\x01".to_vec();
+    tiff.extend([0x01, 0x0F, 0, 2, 0, 0, 0, 9, 0, 0, 0, 26, 0, 0, 0, 0]);
+    tiff.extend(b"SynthCam\0");
+    let seg = |m: u8, p: &[u8]| {
+        let mut s = vec![0xFF, m];
+        s.extend(((p.len() + 2) as u16).to_be_bytes());
+        s.extend(p);
+        s
+    };
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend(tiff);
+    let mut out = vec![0xFF, 0xD8];
+    out.extend(seg(0xE1, &exif));
+    out.extend(seg(0xFE, b"secret note"));
+    out.extend(&plain[2..]);
+    out
+}
+
+#[test]
+fn metadata_is_read_in_the_worker_and_one_bad_item_costs_only_itself() {
+    let mut input = b"FILE".to_vec();
+    input.extend(jpeg_with_metadata());
+    let (code, out, _) = run(&["meta", "64"], &input);
+    assert_eq!(code, Some(0));
+    let json = String::from_utf8(out[16..].to_vec()).unwrap();
+    assert!(json.contains("SynthCam") && json.contains("secret note"), "{json}");
+
+    // Batch: good item, garbage item, truncated item.
+    let mut batch = Vec::new();
+    for item in [input.clone(), b"FILE\xFF\xD8\xFF\xE1\xFF\xFFgarbage".to_vec(), input[..60].to_vec()] {
+        batch.extend((item.len() as u32).to_le_bytes());
+        batch.extend(item);
+    }
+    let (code, out, _) = run(&["metabatch", "64"], &batch);
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out[16..]).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 3);
+    assert!(v[0]["fields"].as_array().unwrap().len() >= 2);
+
+    // A batch whose framing lies is refused, not misread.
+    assert_ne!(run(&["metabatch", "64"], b"\xFF\xFF\xFF\x00FILE").0, Some(0));
+}
+
+#[test]
+fn sanitize_strips_metadata_in_the_worker() {
+    let (code, out, _) = run(&["sanitize", "64"], &jpeg_with_metadata());
+    assert_eq!(code, Some(0));
+    let clean = &out[16..];
+    assert!(clean.starts_with(&[0xFF, 0xD8]));
+    assert!(!clean.windows(8).any(|w| w == b"SynthCam") && !clean.windows(6).any(|w| w == b"secret"));
+    assert!(image::load_from_memory(clean).is_ok());
+    // Unsupported and damaged input.
+    assert_ne!(run(&["sanitize", "64"], b"GIF89a....").0, Some(0));
+    assert_ne!(run(&["sanitize", "64"], &jpeg_with_metadata()[..100]).0, Some(0));
+}

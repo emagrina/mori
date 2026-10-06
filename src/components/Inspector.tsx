@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, formatDate, formatSize, type FileReport, type RiskLevel } from "../api";
+import { api, CATEGORY_LABEL, formatDate, formatSize, plural, type FileMeta, type FileReport, type MetaField, type RiskLevel } from "../api";
 import { Icon } from "./Icon";
 
 const LEVEL: Record<RiskLevel, string> = { high: "High attention", attention: "Attention", info: "Info" };
@@ -8,7 +8,7 @@ const LEVEL: Record<RiskLevel, string> = { high: "High attention", attention: "A
  * Factual file report: real type, extension check, risk indicators,
  * permissions. Mori reports what it observed — never "safe" or "virus".
  */
-export function Inspector({ id, onClose }: { id: string; onClose: () => void }) {
+export function Inspector({ id, onClose, onNotice }: { id: string; onClose: () => void; onNotice?: (msg: string) => void }) {
   const [report, setReport] = useState<FileReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -91,6 +91,8 @@ export function Inspector({ id, onClose }: { id: string; onClose: () => void }) 
               </ul>
             </section>
           )}
+
+          {r.kind === "file" && <MetadataSection id={id} onNotice={onNotice} />}
 
           {r.kind === "link" && (
             <section>
@@ -193,5 +195,134 @@ export function Inspector({ id, onClose }: { id: string; onClose: () => void }) 
         </div>
       )}
     </aside>
+  );
+}
+
+/** Embedded metadata, read by the sandboxed worker. */
+function MetadataSection({ id, onNotice }: { id: string; onNotice?: (msg: string) => void }) {
+  const [meta, setMeta] = useState<FileMeta | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setMeta(null);
+    setFailed(null);
+    setAll(false);
+    setConfirm(false);
+    setResult(null);
+    api.fileMetadata(id).then(
+      (m) => alive && setMeta(m),
+      (e) => alive && setFailed(String(e)),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+
+  const createCopy = async () => {
+    setBusy(true);
+    const [o] = await api.sanitizeCopies([id]).catch((e) => [{ id, name: "", newName: null, error: String(e) }]);
+    setBusy(false);
+    setConfirm(false);
+    if (o?.newName) {
+      setResult({ ok: true, text: `Created “${o.newName}” next to the original. The original was not changed.` });
+      onNotice?.(`Sanitized copy created: “${o.newName}”`);
+    } else setResult({ ok: false, text: `No copy was made: ${o?.error ?? "unknown error"}.` });
+  };
+
+  if (failed) {
+    return (
+      <section>
+        <h3>Metadata</h3>
+        <p className="muted small">{failed}</p>
+      </section>
+    );
+  }
+  if (!meta) {
+    return (
+      <section>
+        <h3>Metadata</h3>
+        <div className="dot-spinner" />
+      </section>
+    );
+  }
+  const sensitive = meta.fields.filter((f) => f.sensitive);
+  const groups = [...new Set(meta.fields.map((f) => f.group))];
+  return (
+    <section>
+      <h3>Metadata</h3>
+      {meta.fields.length === 0 && !meta.gps ? (
+        <p className="muted small">No embedded metadata found{meta.container !== "Unknown" ? ` in this ${meta.container} file` : ""}.</p>
+      ) : (
+        <>
+          {meta.categories.length > 0 ? (
+            <p className="meta-contains">
+              Contains: {meta.categories.map((c) => CATEGORY_LABEL[c]).join(" · ")}
+            </p>
+          ) : (
+            <p className="muted small">No location, people, device, software, comment or ID fields.</p>
+          )}
+          {meta.gps && (
+            <dl>
+              <dt>Position</dt>
+              <dd className="mono">
+                {meta.gps[0].toFixed(5)}, {meta.gps[1].toFixed(5)}
+              </dd>
+            </dl>
+          )}
+          {!all && sensitive.length > 0 && <FieldList fields={sensitive.slice(0, 10)} />}
+          {all &&
+            groups.map((g) => (
+              <div key={g} className="meta-group">
+                <div className="meta-group-name">{g}</div>
+                <FieldList fields={meta.fields.filter((f) => f.group === g)} />
+              </div>
+            ))}
+          <button className="link-btn" onClick={() => setAll(!all)}>
+            {all ? "Show sensitive fields only" : `Show all metadata (${plural(meta.fields.length, "field")})`}
+          </button>
+          {meta.partial && <p className="muted small">Some metadata was damaged or past a size limit; the list may be incomplete.</p>}
+        </>
+      )}
+      {meta.sanitizable && meta.categories.length > 0 && !confirm && (
+        <button className="btn small meta-sanitize" onClick={() => setConfirm(true)} disabled={busy}>
+          Create Sanitized Copy…
+        </button>
+      )}
+      {confirm && (
+        <div className="confirm-box">
+          <p>
+            Mori will write a <strong>new file</strong> next to this one with the same image and no metadata (orientation is kept). The original is
+            not changed.
+          </p>
+          <div className="dialog-actions">
+            <button className="btn small" onClick={() => setConfirm(false)} disabled={busy}>
+              Cancel
+            </button>
+            <button className="btn small primary" onClick={createCopy} disabled={busy}>
+              {busy ? "Creating…" : "Create Copy"}
+            </button>
+          </div>
+        </div>
+      )}
+      {result && <p className={`small ${result.ok ? "muted" : "attn"}`}>{result.text}</p>}
+    </section>
+  );
+}
+
+function FieldList({ fields }: { fields: MetaField[] }) {
+  return (
+    <dl className="meta-fields">
+      {fields.map((f, i) => (
+        <div key={i} className={f.sensitive ? "sensitive" : ""}>
+          <dt title={f.sensitive ? CATEGORY_LABEL[f.sensitive] : undefined}>{f.name}</dt>
+          <dd className="wrap">{f.value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

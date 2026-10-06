@@ -10,6 +10,9 @@ mod filetype;
 mod heif;
 mod index;
 mod inspect;
+mod jobs;
+mod metadata;
+mod metascan;
 #[cfg(target_os = "macos")]
 mod pdf;
 mod policy;
@@ -17,6 +20,7 @@ mod privacy;
 mod probe;
 mod protocol;
 mod risk;
+mod sanitize;
 mod secure;
 mod similar;
 mod thumbs;
@@ -90,6 +94,10 @@ pub struct AppState {
     pub decoded: AtomicU64,
     /// Drives connected while Mori runs, announced to the UI: key → (mount, label).
     connected: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// Sensitive Metadata scan results (memory only).
+    meta_scan: Mutex<Option<metascan::Store>>,
+    meta_running: AtomicBool,
+    meta_job: Arc<jobs::Control>,
 }
 
 type SimilarReply = (u64, std::sync::mpsc::Sender<Result<similar::Capture, similar::CaptureError>>);
@@ -191,6 +199,12 @@ impl AppState {
                 is_link: false,
             });
         }
+        if id.starts_with('m') {
+            let store = self.meta_scan.lock().unwrap_or_else(PoisonError::into_inner);
+            let (root, rel, ext, name) =
+                store.as_ref().ok_or("The scan was cleared.")?.locate(id).ok_or("Unknown file")?;
+            return Ok(Located { root, rel, ext, name, is_dir: false, is_link: false });
+        }
         if id.starts_with('x') {
             let store = self.analysis.lock().unwrap_or_else(PoisonError::into_inner);
             let store = store.as_ref().ok_or("The analysis was cleared.")?;
@@ -227,6 +241,9 @@ impl AppState {
         }
         if let Some(s) = self.similar.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
             v.extend(s.roots.iter().cloned());
+        }
+        if let Some(s) = self.meta_scan.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            v.extend(s.roots().cloned());
         }
         v
     }
@@ -1425,6 +1442,20 @@ struct AnalysisEvent {
     message: Option<String>,
 }
 
+/// The chosen analysis locations, with their private folders as boundaries.
+fn analysis_roots(app: &AppHandle, state: &AppState, locations: &[String]) -> Vec<dupes::Root> {
+    let mut roots: Vec<dupes::Root> = Vec::new();
+    for key in locations.iter().take(32) {
+        if let Some((canon, label)) = location_path(app, state, key) {
+            if !roots.iter().any(|r| r.canon == canon) {
+                let private = state.privacy.boundaries(&canon);
+                roots.push(dupes::Root { canon, label, private });
+            }
+        }
+    }
+    roots
+}
+
 #[tauri::command]
 fn analysis_start(
     app: AppHandle,
@@ -1436,15 +1467,7 @@ fn analysis_start(
     if state.analysis_running.swap(true, Ordering::SeqCst) {
         return Err("An analysis is already running.".into());
     }
-    let mut roots: Vec<dupes::Root> = Vec::new();
-    for key in locations.iter().take(32) {
-        if let Some((canon, label)) = location_path(&app, &state, key) {
-            if !roots.iter().any(|r| r.canon == canon) {
-                let private = state.privacy.boundaries(&canon);
-                roots.push(dupes::Root { canon, label, private });
-            }
-        }
-    }
+    let roots = analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.analysis_running.store(false, Ordering::SeqCst);
         return Err("Choose at least one available location.".into());
@@ -1707,15 +1730,7 @@ fn similar_start(
     if state.similar_running.swap(true, Ordering::SeqCst) {
         return Err("An analysis is already running.".into());
     }
-    let mut roots: Vec<dupes::Root> = Vec::new();
-    for key in locations.iter().take(32) {
-        if let Some((canon, label)) = location_path(&app, &state, key) {
-            if !roots.iter().any(|r| r.canon == canon) {
-                let private = state.privacy.boundaries(&canon);
-                roots.push(dupes::Root { canon, label, private });
-            }
-        }
-    }
+    let roots = analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.similar_running.store(false, Ordering::SeqCst);
         return Err("Choose at least one available location.".into());
@@ -2346,6 +2361,9 @@ fn main() {
                 safe_mode: AtomicBool::new(false),
                 decoded: AtomicU64::new(0),
                 connected: Mutex::new(HashMap::new()),
+                meta_scan: Mutex::new(None),
+                meta_running: AtomicBool::new(false),
+                meta_job: Arc::new(jobs::Control::default()),
                 read_only: AtomicBool::new(
                     fs::read(data_dir_for_video.join("settings.json"))
                         .ok()
@@ -2373,6 +2391,7 @@ fn main() {
             build_window(app)?;
             if cfg!(debug_assertions) {
                 debug_similar_autorun(app.handle());
+                metascan::debug_autorun(app.handle());
                 debug_privacy(app.handle());
             }
             Ok(())
@@ -2425,7 +2444,15 @@ fn main() {
             pdf_info,
             archive_listing,
             open_drive_safely,
-            set_drive_previews
+            set_drive_previews,
+            metascan::file_metadata,
+            metascan::meta_start,
+            metascan::meta_pause,
+            metascan::meta_cancel,
+            metascan::meta_clear,
+            metascan::meta_results,
+            metascan::meta_places,
+            metascan::sanitize_copies
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mori");
