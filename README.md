@@ -203,6 +203,12 @@ These have been discussed for Mori but **are not in the code yet**:
 - HEIC / HEIF previews on Windows and Linux (macOS only for now).
 - Apple Live Photos playback (Still / Live / Loop modes). Live Photos are recognised as pairs by the analyzers only.
 - Matching heavily cropped images, or videos where a large part was cut.
+- **PDF preview, new-drive detection, and Undo for Trash** are macOS-only. On Windows/Linux, PDFs show the file report, and trashed items are restored from the system Trash.
+- **Sanitized copies** of HEIC/AVIF images and of videos or audio: there is no safe lossless rewrite yet, so no option is offered for them.
+- **Pause/resume** for Exact Duplicates and Similar Media (they can be cancelled). Sensitive Metadata and Media Health can be paused.
+- **Apple burst identifiers** (MakerNote BurstUUID). Bursts are recognised from capture times among Similar Media groups only.
+- **Secure Overwrite** works only on spinning hard disks with in-place file systems, which a modern Mac (APFS on SSD) is not. There, the option is shown disabled with the reason.
+- **Map tiles.** The map shows bundled world outlines only, by design: no map service is ever contacted.
 
 ## Philosophy
 
