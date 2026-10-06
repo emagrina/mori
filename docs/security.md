@@ -135,6 +135,23 @@ The worker still receives only bytes, never a path. The same resource limits (di
   - Worker failures are reported precisely: unsupported, damaged data, safety limits, timeout or crash.
   - Every check is isolated with `catch_unwind`, and decodes count toward Safe Inspection Mode's "Media decoded".
 
+## Organization and sessions
+
+- **Where records live.** Favorites and tags are records in Mori's app data, keyed per volume like private folders. Nothing is written into files, extended attributes or metadata. Tag names are filtered of control and bidi characters and capped in length.
+- **Temporary session** (`AppState.temp`). While it is on:
+  - index caches are not saved;
+  - thumbnails go to the in-memory cache only;
+  - Similar Media uses no fingerprint cache;
+  - the folder isn't remembered;
+  - every command that changes Mori's records (private, protected, favorites, tags, screenshot corrections, drive previews) refuses with an explanation.
+  - Verified on the real app with a debug-only hook: no file in app data or the cache changed during a temporary session.
+  - The video blocklist (opaque hashes, no paths) is still kept, because it protects the web view.
+- **Forget This Drive.** It deletes only through `remove_app_path`, which refuses anything not strictly inside Mori's own data or cache directory (tested).
+  - What is removed: index caches whose recorded root is on the volume, the per-volume thumbnail folder, and the volume's records in every store.
+  - Verified on the real app: the drive's files were identical before and after.
+  - Similar-media fingerprints are content-addressed and can't be attributed to a drive; Clear Cache removes them.
+  - Thumbnails made before this version sit in the old shared layout until Clear Cache.
+
 ## Mutation policy
 
 - **One gate.** All changes to the user's files go through `fileops`, whose mutating functions (`move_to_trash`, `rename_no_replace`, and later operations) take a `&Policy` and call `policy.check` first.

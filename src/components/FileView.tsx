@@ -161,6 +161,11 @@ export function FileView(p: Props) {
                   <Icon name="shield" size={11} />
                 </span>
               )}
+              {e.favorite && (
+                <span className="private-mark" title="Favorite">
+                  <Icon name="star" size={11} />
+                </span>
+              )}
               {e.link && <span className="link-target truncate">→ {e.link}</span>}
               {e.private && (
                 <span className="private-mark" title={PRIVATE_HINT}>
@@ -202,6 +207,11 @@ export function FileView(p: Props) {
                 {e.flagged && (
                   <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
                     <Icon name="warning" size={11} />{" "}
+                  </span>
+                )}
+                {e.favorite && (
+                  <span className="private-mark" title="Favorite">
+                    <Icon name="star" size={10} />{" "}
                   </span>
                 )}
                 {e.name}

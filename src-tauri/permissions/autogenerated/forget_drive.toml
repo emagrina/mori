@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-forget-drive"
+description = "Enables the forget_drive command without any pre-configured scope."
+commands.allow = ["forget_drive"]
+
+[[permission]]
+identifier = "deny-forget-drive"
+description = "Denies the forget_drive command without any pre-configured scope."
+commands.deny = ["forget_drive"]

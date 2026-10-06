@@ -3737,3 +3737,77 @@ button.size-row:hover {
 .treemap-section .fineprint {
   margin: 8px 0 0;
 }
+
+/* ----------------------------------------------------- tags & favorites */
+
+.side-heading.with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 6px;
+}
+
+.tag-pick {
+  margin-top: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tag-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-control);
+  text-align: left;
+  font-size: 13px;
+}
+
+.tag-option > .truncate {
+  flex: 1;
+  min-width: 0;
+}
+
+button.tag-option:hover {
+  background: var(--hover);
+}
+
+.tag-option .check-box {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.tag-option.all .check-box {
+  background: var(--text);
+  color: var(--bg-content);
+  border-color: var(--text);
+}
+
+.tag-option .dash {
+  width: 7px;
+  height: 2px;
+  background: var(--text);
+}
+
+.tag-option.create {
+  color: var(--text-2);
+}
+
+.tag-option.editing {
+  gap: 6px;
+}
+
+.text-input.slim {
+  margin: 0;
+  height: 28px;
+  flex: 1;
+}

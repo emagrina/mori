@@ -100,7 +100,9 @@ fn sniff_file(file: &mut File, ext: &str) -> Detected {
 /// Files outside the browsed folder (analyzer results elsewhere) never get
 /// their thumbnails written to disk.
 fn volatile(state: &AppState, canon: &std::path::Path) -> bool {
-    state.root_canon().is_none_or(|root| !canon.starts_with(root))
+    // A temporary session writes nothing: thumbnails stay in memory.
+    state.temp.load(std::sync::atomic::Ordering::SeqCst)
+        || state.root_canon().is_none_or(|root| !canon.starts_with(root))
 }
 
 /// Safe Inspection Mode: no automatic decoding of files under the browsed
@@ -120,7 +122,7 @@ fn thumbnail(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
     if gated(state, &canon, explicit) {
         return status(StatusCode::FORBIDDEN);
     }
-    let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, THUMB_SIZE);
+    let stem = crate::thumbs::stem(&state.thumb_dir_for(&canon), &canon, &meta, THUMB_SIZE);
     let mem = volatile(state, &canon);
     if mem {
         match state.volatile_thumbs.get(&stem) {
@@ -173,7 +175,8 @@ fn preview(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
     if gated(state, &canon, explicit) {
         return status(StatusCode::FORBIDDEN);
     }
-    let key = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, PREVIEW_SIZE).to_string_lossy().into_owned();
+    let key =
+        crate::thumbs::stem(&state.thumb_dir_for(&canon), &canon, &meta, PREVIEW_SIZE).to_string_lossy().into_owned();
     if let Some(hit) = state.previews.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
         return hit;
     }
@@ -301,7 +304,7 @@ pub fn store_frame(state: &AppState, id: &str, png: Vec<u8>, frame: Option<u32>,
         Some(k) => (FRAME_SIZE, frame_tag(k)),
         None => (THUMB_SIZE, THUMB_SIZE),
     };
-    let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, tag);
+    let stem = crate::thumbs::stem(&state.thumb_dir_for(&canon), &canon, &meta, tag);
     let mem = volatile(state, &canon);
     let result = if png.is_empty() || png.len() > 16 * 1024 * 1024 {
         None
@@ -328,7 +331,7 @@ fn frame(state: &AppState, rest: &str, explicit: bool) -> Response<Vec<u8>> {
     if gated(state, &canon, explicit) {
         return status(StatusCode::FORBIDDEN);
     }
-    let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, frame_tag(k));
+    let stem = crate::thumbs::stem(&state.thumb_dir_for(&canon), &canon, &meta, frame_tag(k));
     if volatile(state, &canon) {
         return match state.volatile_thumbs.get(&stem) {
             Some(Some((bytes, mime))) => ok(bytes, mime, true),
@@ -356,7 +359,8 @@ fn pdf_page(state: &AppState, rest: &str, explicit: bool) -> Response<Vec<u8>> {
     if gated(state, &canon, explicit) {
         return status(StatusCode::FORBIDDEN);
     }
-    let key = format!("{}#p{page}", crate::thumbs::stem(&state.thumb_dir, &canon, &meta, size).to_string_lossy());
+    let key =
+        format!("{}#p{page}", crate::thumbs::stem(&state.thumb_dir_for(&canon), &canon, &meta, size).to_string_lossy());
     if let Some(hit) = state.previews.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
         return hit;
     }

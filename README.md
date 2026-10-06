@@ -105,6 +105,30 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 ![Storage](docs/images/phase5/storage.jpg)
 ![Media Health](docs/images/phase5/media-health.jpg)
 
+### Organization
+
+- **Favorites** (files and folders): *Add to Favorites* in the menu, or press `F`. They're listed under Favorites in the sidebar.
+- **Tags**: *Tags…* in the menu, for one item or a selection. Items can have several tags.
+  - Every tag appears in the sidebar with its count.
+  - **Manage Tags** lets you search, rename and delete them. Deleting a tag never touches the tagged files.
+  - Favorites and tags live in Mori's app data only. Files and their metadata are never modified.
+  - Like private folders, they are stored per volume, so they survive remounts.
+- **Browse Without Indexing…** (More menu) opens a folder as a **temporary session**.
+  - No index cache, no thumbnails on disk, no fingerprints, no remembered folder, no records. Thumbnails stay in memory.
+  - Changes to private/protected/favorite/tag/screenshot records are refused during the session.
+  - *End* (sidebar chip) or opening another folder ends it, and nothing is left behind. There is no temporary area to clean up: nothing is written in the first place.
+- **Forget This Drive…** removes everything Mori stores about the current drive (all its index caches, its thumbnails, and its private, protected, favorite, tag and screenshot records), then closes it.
+  - **Nothing on the drive is deleted or changed.** Deletion is limited to Mori's own app directories by a guard.
+  - Tag names are kept.
+- **Clear Session Data…** forgets what this session holds in memory: analysis results, folders picked for analysis, recent locations and search. It is distinct from:
+  - *Clear Cache* (thumbnails and indexes);
+  - *Forget This Drive* (Mori's records about a drive);
+  - deleting files, which none of these do.
+
+![Favorites](docs/images/phase6/favorites.jpg)
+![Tags](docs/images/phase6/tags.jpg)
+![Forget This Drive](docs/images/phase6/forget-drive.jpg)
+
 ### Private folders
 
 Right-click a folder and choose **Make Private** to create a visibility boundary inside Mori. The folder stays where it is and opens normally, but its contents are no longer surfaced from outside it:
@@ -285,6 +309,7 @@ Mori stores nothing on the browsed drive. It changes your files only when you re
 | "Not duplicates" decisions | `…/app.mori.viewer/similar-dismissed.bin` | `%APPDATA%\app.mori.viewer\similar-dismissed.bin` |
 | Private folders | `…/app.mori.viewer/private-folders.json` | `%APPDATA%\app.mori.viewer\private-folders.json` |
 | Protected folders | `…/app.mori.viewer/protected-folders.json` | `%APPDATA%\app.mori.viewer\protected-folders.json` |
+| Favorites, tags | `…/app.mori.viewer/favorites.json`, `tags.json` | `%APPDATA%\app.mori.viewer\favorites.json`, `tags.json` |
 | Screenshot corrections | `…/app.mori.viewer/capture-not.json`, `capture-yes.json` | `%APPDATA%\app.mori.viewer\capture-*.json` |
 | Known drives (Safe Inspection Mode) | `…/app.mori.viewer/drives.json` | `%APPDATA%\app.mori.viewer\drives.json` |
 

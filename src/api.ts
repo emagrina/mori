@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
 export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
+/** What a library view shows: a kind, Favorites, or one tag. */
+export type ViewKind = KindFilter | "favorites" | `tag:${number}`;
 export type ViewMode = "gallery" | "grid" | "list";
 export type SortKey = "name" | "modified" | "created" | "size" | "type";
 export type Scope = "folder" | "library";
@@ -32,6 +34,9 @@ export interface Entry {
   flagged?: boolean;
   /** 1 = screenshot, 2 = screen recording (Mori's guess, correctable). */
   capture?: number;
+  favorite?: boolean;
+  /** Local tag ids (names from `api.tagsList`). */
+  tags?: number[];
 }
 
 export interface Status {
@@ -45,6 +50,14 @@ export interface Status {
   safeMode: boolean;
   /** Media decoded since this folder was opened. */
   decoded: number;
+  /** Temporary session: nothing about this folder is saved. */
+  temporary: boolean;
+}
+
+export interface TagInfo {
+  id: number;
+  name: string;
+  count: number;
 }
 
 export interface InitInfo {
@@ -131,7 +144,7 @@ export interface Query {
   /** Folder id ("" = root). */
   folder: string;
   scope: Scope;
-  kind: KindFilter;
+  kind: ViewKind;
   search: string;
   sort: SortKey;
   desc: boolean;
@@ -582,6 +595,20 @@ export const api = {
   openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
   /** "Generate previews" for the current drive (or back to metadata only). */
   setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** Only Mori's records change; files are never touched. */
+  setFavorite: (ids: string[], on: boolean) => invoke<void>("set_favorite", { ids, on }),
+  tagsList: () => invoke<TagInfo[]>("tags_list"),
+  /** Adds (or removes) the tag named `name`, creating it if needed. Never writes into the files. */
+  tagItems: (ids: string[], name: string, on: boolean) => invoke<number>("tag_items", { ids, name, on }),
+  tagRename: (id: number, name: string) => invoke<void>("tag_rename", { id, name }),
+  tagDelete: (id: number) => invoke<void>("tag_delete", { id }),
+  /** Browse without indexing: nothing about the folder is written to disk. */
+  openTemporary: () => invoke<Status>("open_temporary"),
+  endTemporary: () => invoke<Status>("end_temporary"),
+  /** Removes Mori's knowledge of the current drive. Nothing on the drive is changed. */
+  forgetDrive: () => invoke<{ drive: string; indexes: number }>("forget_drive"),
+  /** Clears in-memory results of this session. Files, caches and records are kept. */
+  clearSessionData: () => invoke<void>("clear_session_data"),
   /** From the index: nothing is read from disk. `folder` = folder id ("" = drive). */
   storageReport: (folder: string) => invoke<StorageReport>("storage_report", { folder }),
   /** Index candidates, each re-checked on disk. */
