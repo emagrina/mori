@@ -26,6 +26,7 @@ import { FileView } from "./components/FileView";
 import { Inspector } from "./components/Inspector";
 import { Icon, Logo, type IconName } from "./components/Icon";
 import { ModalFrame } from "./components/Modal";
+import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
 import { Preview } from "./components/Preview";
 import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
 
@@ -102,7 +103,7 @@ export default function App() {
   /** Item shown in the inspector panel. */
   const [inspectId, setInspectId] = useState<string | null>(null);
   const [readOnly, setReadOnlyState] = useState(false);
-  const [mode, setMode] = useState<"browse" | "analyzer" | "similar">("browse");
+  const [mode, setMode] = useState<"browse" | "analyzer" | "similar" | "metadata" | "places">("browse");
   /** Bumped when files are trashed from the browser, so analyzer results refresh. */
   const [analysisVersion, setAnalysisVersion] = useState(0);
   // Small anchored menus: sort options and the sidebar overflow ("more") menu.
@@ -581,6 +582,14 @@ export default function App() {
             <Icon name="gallery" />
             <span>Similar Media</span>
           </button>
+          <button className={`side-item ${mode === "metadata" ? "on" : ""}`} onClick={() => setMode("metadata")} title="Location, people, device and other revealing metadata">
+            <Icon name="tag" />
+            <span>Sensitive Metadata</span>
+          </button>
+          <button className={`side-item ${mode === "places" ? "on" : ""}`} onClick={() => setMode("places")} title="Where photos and videos were taken (offline map)">
+            <Icon name="pin" />
+            <span>Places</span>
+          </button>
           {topFolders.length > 0 && <div className="side-heading">Folders</div>}
           <FolderTree
             roots={topFolders}
@@ -810,6 +819,13 @@ export default function App() {
       </main>
 
       <Analyzer active={mode === "analyzer"} version={analysisVersion} onToast={flash} onSwitch={() => setMode("similar")} />
+      <MetadataAnalyzer
+        active={mode === "metadata" || mode === "places"}
+        view={mode === "places" ? "map" : "list"}
+        onToast={flash}
+        onInfo={setInspectId}
+        onSwitch={(to) => setMode(to === "map" ? "places" : "metadata")}
+      />
       <SimilarAnalyzer active={mode === "similar"} version={analysisVersion} onToast={flash} onSwitch={() => setMode("analyzer")} />
 
       {previewId && previewIndex >= 0 && (
@@ -946,7 +962,7 @@ export default function App() {
         <RenameDialog entry={dialog.entry} onCancel={() => setDialog(null)} onDone={(id, name) => renamed(dialog.entry, id, name)} />
       )}
 
-      {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} />}
+      {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} onNotice={(m) => flash(m, 3000)} />}
 
       {newDrive && (
         <ModalFrame onCancel={() => setNewDrive(null)}>

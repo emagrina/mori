@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-meta-start"
+description = "Enables the meta_start command without any pre-configured scope."
+commands.allow = ["meta_start"]
+
+[[permission]]
+identifier = "deny-meta-start"
+description = "Denies the meta_start command without any pre-configured scope."
+commands.deny = ["meta_start"]

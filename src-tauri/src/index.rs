@@ -248,6 +248,14 @@ impl Index {
         self.build_lookup();
     }
 
+    /// A file Mori itself created (a sanitized copy), so views update without a rescan.
+    pub fn add_file(&mut self, e: Entry) {
+        if !self.by_id.contains_key(&e.id) {
+            self.files.push(e);
+            self.build_lookup();
+        }
+    }
+
     /// Apply a rename of `old` → `new` (file or folder, including its contents).
     pub fn rename_path(&mut self, old: &str, new: &str) {
         let new_name = new.rsplit('/').next().unwrap_or(new).to_owned();

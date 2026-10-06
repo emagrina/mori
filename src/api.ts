@@ -201,6 +201,82 @@ export interface ArchiveListing {
   findings: Finding[];
 }
 
+export type MetaCategory = "location" | "person" | "device" | "software" | "comment" | "identifier";
+
+export interface MetaField {
+  group: string;
+  name: string;
+  value: string;
+  sensitive?: MetaCategory;
+}
+
+export interface FileMeta {
+  container: string;
+  fields: MetaField[];
+  gps?: [number, number];
+  orientation?: number;
+  partial: boolean;
+  categories: MetaCategory[];
+  sanitizable: boolean;
+}
+
+export interface MetaProgress {
+  stage: "collecting" | "reading";
+  done: number;
+  total: number;
+  found: number;
+  failed: number;
+  paused: boolean;
+}
+
+export interface MetaHit {
+  id: string;
+  name: string;
+  path: string;
+  location: string;
+  drive: string;
+  size: number;
+  modified: number;
+  created: number | null;
+  kind: Kind;
+  ext: string;
+  categories: MetaCategory[];
+  gps: [number, number] | null;
+  fields: MetaField[];
+  sanitizable: boolean;
+}
+
+export interface MetaView {
+  locations: LocationInfo[];
+  stats: { scanned: number; withSensitive: number; failed: number; unreadable: number; places: number };
+  counts: Partial<Record<MetaCategory, number>>;
+  total: number;
+  hits: MetaHit[];
+}
+
+export interface Places {
+  ids: string[];
+  names: string[];
+  /** Flat [lat, lon, lat, lon, …]. */
+  coords: number[];
+}
+
+export interface SanitizeOutcome {
+  id: string;
+  name: string;
+  newName: string | null;
+  error: string | null;
+}
+
+export const CATEGORY_LABEL: Record<MetaCategory, string> = {
+  location: "Location",
+  person: "People & authors",
+  device: "Device",
+  software: "Software",
+  comment: "Comments & descriptions",
+  identifier: "Unique IDs",
+};
+
 export interface ConnectedDrive {
   key: string;
   label: string;
@@ -438,6 +514,16 @@ export const api = {
   openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
   /** "Generate previews" for the current drive (or back to metadata only). */
   setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** Read by the sandboxed worker. */
+  fileMetadata: (id: string) => invoke<FileMeta>("file_metadata", { id }),
+  metaStart: (locations: string[], recursive: boolean) => invoke<void>("meta_start", { locations, recursive }),
+  metaPause: (paused: boolean) => invoke<void>("meta_pause", { paused }),
+  metaCancel: () => invoke<void>("meta_cancel"),
+  metaClear: () => invoke<void>("meta_clear"),
+  metaResults: (category: MetaCategory | null, offset: number, limit: number) => invoke<MetaView | null>("meta_results", { category, offset, limit }),
+  metaPlaces: () => invoke<Places | null>("meta_places"),
+  /** New files next to the originals; originals are never modified. */
+  sanitizeCopies: (ids: string[]) => invoke<SanitizeOutcome[]>("sanitize_copies", { ids }),
 };
 
 /**

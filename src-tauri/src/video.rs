@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 /// Largest `moov` box we're willing to hand to the worker.
-const MAX_MOOV: u64 = 48 * 1024 * 1024;
+pub(crate) const MAX_MOOV: u64 = 48 * 1024 * 1024;
 /// How much of a WebM file the worker sees (headers live at the start).
 const WEBM_HEAD: u64 = 2 * 1024 * 1024;
 /// UI silence (no liveness ping) that counts as a hung web content process.
@@ -91,7 +91,7 @@ fn codec_allowed(container: Detected, codec: &str) -> bool {
 
 /// Walk top-level MP4 box headers (8/16 bytes each, nothing else is read)
 /// to find the `moov` box, which may sit at the very end of the file.
-fn find_moov(file: &mut File, len: u64) -> Option<(u64, u64)> {
+pub(crate) fn find_moov(file: &mut File, len: u64) -> Option<(u64, u64)> {
     let mut pos = 0u64;
     for _ in 0..4096 {
         if pos.checked_add(8)? > len {

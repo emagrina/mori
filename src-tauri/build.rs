@@ -49,6 +49,14 @@ const COMMANDS: &[&str] = &[
     "archive_listing",
     "open_drive_safely",
     "set_drive_previews",
+    "file_metadata",
+    "meta_start",
+    "meta_pause",
+    "meta_cancel",
+    "meta_clear",
+    "meta_results",
+    "meta_places",
+    "sanitize_copies",
 ];
 
 fn main() {
