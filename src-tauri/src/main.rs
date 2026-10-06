@@ -60,6 +60,25 @@ pub struct AppState {
     cleanup_cancel: Arc<AtomicBool>,
     /// Folders the user picked for analysis in this session (explicit consent).
     custom_locations: Mutex<Vec<PathBuf>>,
+    /// Similar-media analysis (memory only; fingerprints are cached separately).
+    similar: Mutex<Option<SimilarStore>>,
+    similar_running: AtomicBool,
+    similar_cancel: Arc<AtomicBool>,
+    /// The one pending video-frame request to the webview: (token, reply).
+    similar_capture: Mutex<Option<SimilarReply>>,
+    similar_token: AtomicU64,
+}
+
+type SimilarReply = (u64, std::sync::mpsc::Sender<Result<similar::Capture, similar::CaptureError>>);
+
+struct SimilarStore {
+    /// Registered as soon as the file list is known, so the webview can load
+    /// videos by id while they are being sampled.
+    roots: Vec<PathBuf>,
+    files: Vec<dupes::FileRec>,
+    /// Opaque ids ("y" + 16 hex) → index into `files`.
+    ids: HashMap<String, usize>,
+    result: Option<similar::SimilarAnalysis>,
 }
 
 struct AnalysisStore {
@@ -125,8 +144,22 @@ impl AppState {
         self.index_dir().join(format!("{h:016x}.json"))
     }
 
-    /// Resolve a browser id (16 hex) or an analyzer id ("x" + 16 hex).
+    /// Resolve a browser id (16 hex), an exact-duplicate id ("x" + 16 hex) or
+    /// a similar-media id ("y" + 16 hex).
     pub fn locate(&self, id: &str) -> Result<Located, String> {
+        if id.starts_with('y') {
+            let store = self.similar.lock().unwrap_or_else(PoisonError::into_inner);
+            let store = store.as_ref().ok_or("The analysis was cleared.")?;
+            let &i = store.ids.get(id).ok_or("Unknown file")?;
+            let f = &store.files[i];
+            return Ok(Located {
+                root: store.roots[f.root].clone(),
+                rel: f.rel.clone(),
+                ext: f.ext.clone(),
+                name: f.name.clone(),
+                is_dir: false,
+            });
+        }
         if id.starts_with('x') {
             let store = self.analysis.lock().unwrap_or_else(PoisonError::into_inner);
             let store = store.as_ref().ok_or("The analysis was cleared.")?;
@@ -158,6 +191,9 @@ impl AppState {
         let mut v: Vec<PathBuf> = self.root_canon().into_iter().collect();
         if let Some(s) = self.analysis.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
             v.extend(s.analysis.roots.iter().map(|r| r.canon.clone()));
+        }
+        if let Some(s) = self.similar.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            v.extend(s.roots.iter().cloned());
         }
         v
     }
@@ -496,7 +532,7 @@ fn clear_cache(app: AppHandle, state: State<'_, AppState>) -> Result<(), String>
     state.scan_gen.fetch_add(1, Ordering::SeqCst); // cancel any running scan
     state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
     state.volatile_thumbs.clear();
-    for dir in [&state.thumb_dir, &state.index_dir()] {
+    for dir in [&state.thumb_dir, &state.index_dir(), &state.similar_dir()] {
         if dir.exists() {
             fs::remove_dir_all(dir).map_err(|_| "Could not clear the cache")?;
         }
@@ -803,38 +839,39 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
         if !removed_rels.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&removed_rels));
         }
-        forget_in_analysis(&state, &removed_abs);
+        forget_removed(&state, &removed_abs);
         out
     })
     .await
     .map_err(|_| "The operation failed.".to_string())
 }
 
-/// Drop trashed files (or files inside trashed folders) from the analysis.
-fn forget_in_analysis(state: &AppState, removed: &[PathBuf]) {
+/// Drop removed files (or files inside removed folders) from both analyses.
+fn forget_removed(state: &AppState, removed: &[PathBuf]) {
     if removed.is_empty() {
         return;
     }
-    let mut guard = state.analysis.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(store) = guard.as_mut() else { return };
-    let a = &mut store.analysis;
-    let gone: HashSet<usize> = a
-        .files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            let abs = a.roots[f.root].canon.join(&f.rel);
-            removed.iter().any(|r| abs == *r || abs.starts_with(r))
-        })
-        .map(|(i, _)| i)
-        .collect();
-    dupes::forget(a, &gone);
+    let hit = |abs: PathBuf| removed.iter().any(|r| abs == *r || abs.starts_with(r));
+    if let Some(store) = state.analysis.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+        let a = &mut store.analysis;
+        let gone: HashSet<usize> =
+            (0..a.files.len()).filter(|&i| hit(a.roots[a.files[i].root].canon.join(&a.files[i].rel))).collect();
+        dupes::forget(a, &gone);
+    }
+    if let Some(r) =
+        state.similar.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|s| s.result.as_mut())
+    {
+        let a = &r.analysis;
+        let gone: HashSet<usize> =
+            (0..a.files.len()).filter(|&i| hit(a.roots[a.files[i].root].canon.join(&a.files[i].rel))).collect();
+        similar::forget(r, &gone);
+    }
 }
 
 /// Rename a file or folder in the browser. Never overwrites an existing item.
 #[tauri::command]
 fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: String) -> Result<String, String> {
-    if id.starts_with('x') {
+    if id.starts_with('x') || id.starts_with('y') {
         return Err("Rename items from the browser.".into());
     }
     fileops::validate_name(&name)?;
@@ -1171,10 +1208,9 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
             let a = &store.analysis;
             let removed_abs: Vec<PathBuf> =
                 outcome.removed.iter().map(|&i| a.roots[a.files[i].root].canon.join(&a.files[i].rel)).collect();
-            let gone: HashSet<usize> = outcome.removed.iter().copied().collect();
-            dupes::forget(&mut store.analysis, &gone);
             (outcome, removed_abs)
         };
+        forget_removed(&state, &removed_abs);
         let rels: Vec<String> = removed_abs.iter().filter_map(|p| browser_rel(&state, p)).collect();
         if !rels.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&rels));
@@ -1188,6 +1224,426 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
 #[tauri::command]
 fn analysis_cleanup_cancel(state: State<'_, AppState>) {
     state.cleanup_cancel.store(true, Ordering::SeqCst);
+}
+
+// ----------------------------------------------------------- similar media
+
+fn similar_id(root: &Path, rel: &str) -> String {
+    format!("y{:016x}", thumbs::fnv(format!("{}\u{0}{rel}", root.to_string_lossy()).as_bytes()))
+}
+
+impl AppState {
+    fn similar_dir(&self) -> PathBuf {
+        self.thumb_dir.parent().map_or_else(|| self.thumb_dir.join("similar"), |p| p.join("similar"))
+    }
+    fn dismissed_file(&self) -> PathBuf {
+        self.data_dir.join("similar-dismissed.bin")
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CaptureRequest {
+    token: u64,
+    id: String,
+    /// Seconds; empty = the standard sample positions.
+    times: Vec<f64>,
+}
+
+#[tauri::command]
+fn similar_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    locations: Vec<String>,
+    photos: bool,
+    videos: bool,
+    recursive: bool,
+    sensitivity: similar::Sensitivity,
+) -> Result<(), String> {
+    if !photos && !videos {
+        return Err("Choose photos, videos or both.".into());
+    }
+    if state.similar_running.swap(true, Ordering::SeqCst) {
+        return Err("An analysis is already running.".into());
+    }
+    let mut roots: Vec<dupes::Root> = Vec::new();
+    for key in locations.iter().take(32) {
+        if let Some((canon, label)) = location_path(&app, &state, key) {
+            if !roots.iter().any(|r| r.canon == canon) {
+                roots.push(dupes::Root { canon, label });
+            }
+        }
+    }
+    if roots.is_empty() {
+        state.similar_running.store(false, Ordering::SeqCst);
+        return Err("Choose at least one available location.".into());
+    }
+    launch_similar(app, &state, roots, photos, videos, recursive, sensitivity);
+    Ok(())
+}
+
+fn launch_similar(
+    app: AppHandle,
+    state: &AppState,
+    roots: Vec<dupes::Root>,
+    photos: bool,
+    videos: bool,
+    recursive: bool,
+    sensitivity: similar::Sensitivity,
+) {
+    // A new analysis replaces the previous one.
+    *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    state.volatile_thumbs.clear();
+    state.similar_cancel.store(false, Ordering::SeqCst);
+    let cancel = state.similar_cancel.clone();
+    let spec = similar::Spec { roots, photos, videos, recursive, sensitivity };
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let state = app2.state::<AppState>();
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            // Photos: the sandboxed worker, never this process.
+            let decode = |bytes: Vec<u8>| {
+                worker::run(worker::Op::Fingerprint, 64, bytes, Duration::from_secs(25))
+                    .ok()
+                    .map(|o| (o.width, o.height, o.bytes))
+            };
+            let roots_seen: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+            let mut registered = |roots: &[dupes::Root], files: &[dupes::FileRec]| {
+                let canon: Vec<PathBuf> = roots.iter().map(|r| r.canon.clone()).collect();
+                let ids = files.iter().enumerate().map(|(i, f)| (similar_id(&canon[f.root], &f.rel), i)).collect();
+                *roots_seen.lock().unwrap() = canon.clone();
+                *state.similar.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(SimilarStore { roots: canon, files: files.to_vec(), ids, result: None });
+            };
+            // Videos: the webview decodes sampled frames through Mori's guarded
+            // video path (probe, blocklist, watchdog) and sends raw pixels back.
+            let mut capture = |_: usize, f: &dupes::FileRec, times: &[f64]| {
+                let Some(root) = roots_seen.lock().unwrap().get(f.root).cloned() else {
+                    return Err(similar::CaptureError::Unavailable);
+                };
+                let token = state.similar_token.fetch_add(1, Ordering::SeqCst) + 1;
+                let (tx, rx) = std::sync::mpsc::channel();
+                *state.similar_capture.lock().unwrap_or_else(PoisonError::into_inner) = Some((token, tx));
+                let _ = app2.emit(
+                    "similar-capture",
+                    CaptureRequest { token, id: similar_id(&root, &f.rel), times: times.to_vec() },
+                );
+                let deadline = std::time::Instant::now() + Duration::from_secs(40 + 2 * times.len() as u64);
+                loop {
+                    if cancel.load(Ordering::Relaxed) || std::time::Instant::now() > deadline {
+                        *state.similar_capture.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                        return Err(similar::CaptureError::Unavailable);
+                    }
+                    if let Ok(r) = rx.recv_timeout(Duration::from_millis(200)) {
+                        return r;
+                    }
+                }
+            };
+            let dismissed = similar::load_dismissed(&state.dismissed_file());
+            let mut env = similar::Env {
+                cache_dir: Some(state.similar_dir()),
+                decode: &decode,
+                capture: &mut capture,
+                registered: &mut registered,
+                dismissed: &dismissed,
+            };
+            similar::analyze(spec, &mut env, &cancel, &mut |p| {
+                let _ = app2.emit("similar-progress", p);
+            })
+        }));
+        let event = match res {
+            Ok(Ok(result)) => {
+                if let Some(store) = state.similar.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+                    store.result = Some(result);
+                }
+                AnalysisEvent { status: "done", message: None }
+            }
+            Ok(Err(dupes::Cancelled)) => {
+                *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                AnalysisEvent { status: "cancelled", message: None }
+            }
+            Err(_) => {
+                *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                AnalysisEvent { status: "failed", message: Some("The analysis stopped unexpectedly.".into()) }
+            }
+        };
+        *state.similar_capture.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        state.similar_running.store(false, Ordering::SeqCst);
+        let _ = app2.emit("similar-done", event);
+    });
+}
+
+/// Debug builds only: `MORI_DEBUG_SIMILAR=<folder>` runs a Similar Media
+/// analysis on that folder at launch (real worker, real webview sampling)
+/// and prints the groups, for testing without UI automation.
+fn debug_similar_autorun(app: &AppHandle) {
+    let Some(dir) = std::env::var_os("MORI_DEBUG_SIMILAR").map(PathBuf::from) else { return };
+    let Ok(canon) = fs::canonicalize(dir) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(4));
+        let state = app.state::<AppState>();
+        state.similar_running.store(true, Ordering::SeqCst);
+        let t = std::time::Instant::now();
+        let root = dupes::Root { canon, label: "Debug".into() };
+        launch_similar(app.clone(), &state, vec![root], true, true, true, similar::Sensitivity::Balanced);
+        while state.similar_running.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(r) = guard.as_ref().and_then(|s| s.result.as_ref()) else {
+            eprintln!("mori: DEBUG similar: no result");
+            return;
+        };
+        eprintln!("mori: DEBUG similar done in {:.1?}: {:?}", t.elapsed(), r.stats);
+        for (g, m) in r.analysis.groups.iter().zip(&r.meta) {
+            let names: Vec<String> = g
+                .members
+                .iter()
+                .zip(&m.members)
+                .map(|(mem, mm)| {
+                    format!(
+                        "{} {}%{}",
+                        r.analysis.files[mem.files[0]].rel,
+                        mm.similarity,
+                        if mm.exact { " exact" } else { "" }
+                    )
+                })
+                .collect();
+            eprintln!("mori: DEBUG group video={} {}% :: {}", m.video, m.similarity, names.join(" | "));
+        }
+    });
+}
+
+#[tauri::command]
+fn similar_cancel(state: State<'_, AppState>) {
+    state.similar_cancel.store(true, Ordering::SeqCst);
+}
+
+/// Sampled frames from the webview for a pending capture request. Body: raw
+/// 64×64 grayscale planes; everything else arrives in fixed headers and is
+/// validated here (sizes, ranges). An empty body means "could not decode".
+#[tauri::command]
+fn similar_frames(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) {
+    let h = |k: &str| request.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let Some(token) = h("mori-token").and_then(|t| t.parse::<u64>().ok()) else { return };
+    let Some((pending, tx)) = state.similar_capture.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+        return;
+    };
+    if pending != token {
+        // A late answer to an earlier request: keep waiting for the current one.
+        *state.similar_capture.lock().unwrap_or_else(PoisonError::into_inner) = Some((pending, tx));
+        return;
+    }
+    let num = |k: &str, max: u64| h(k).and_then(|v| v.parse::<u64>().ok()).filter(|v| *v <= max);
+    let text = |k: &str| {
+        h(k).map(|v| v.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').take(24).collect::<String>())
+            .unwrap_or_default()
+    };
+    let planes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        _ => Vec::new(),
+    };
+    let result = match (num("mori-width", 20_000), num("mori-height", 20_000), num("mori-duration", 48 * 3600 * 1000)) {
+        (Some(w), Some(hh), Some(d))
+            if !planes.is_empty() && planes.len() % similar::PLANE == 0 && planes.len() <= 64 * similar::PLANE =>
+        {
+            Ok(similar::Capture {
+                width: w as u32,
+                height: hh as u32,
+                duration_ms: d as u32,
+                container: text("mori-container"),
+                codec: text("mori-codec"),
+                planes,
+            })
+        }
+        _ => Err(similar::CaptureError::Failed),
+    };
+    let _ = tx.send(result);
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimFile {
+    id: String,
+    name: String,
+    path: String,
+    location: String,
+    drive: String,
+    size: u64,
+    modified: i64,
+    created: Option<i64>,
+    kind: index::Kind,
+    ext: String,
+    #[serde(flatten)]
+    media: similar::MediaInfo,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimMember {
+    files: Vec<SimFile>,
+    similarity: u8,
+    exact: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimGroup {
+    index: usize,
+    video: bool,
+    similarity: u8,
+    /// Bytes recovered if every copy except the suggested one goes to Trash.
+    recoverable: u64,
+    members: Vec<SimMember>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimView {
+    locations: Vec<LocationInfo>,
+    stats: similar::SimStats,
+    groups: Vec<SimGroup>,
+}
+
+#[tauri::command]
+fn similar_results(app: AppHandle, state: State<'_, AppState>) -> Option<SimView> {
+    let guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
+    let r = guard.as_ref()?.result.as_ref()?;
+    let a = &r.analysis;
+    let drives: Vec<String> = a.roots.iter().map(|x| drive_of(&x.canon)).collect();
+    let file = |i: usize| {
+        let f = &a.files[i];
+        SimFile {
+            id: similar_id(&a.roots[f.root].canon, &f.rel),
+            name: secure::display_safe(&f.name),
+            path: secure::display_safe(&f.rel),
+            location: a.roots[f.root].label.clone(),
+            drive: drives[f.root].clone(),
+            size: f.size,
+            modified: f.modified,
+            created: f.created,
+            kind: f.kind,
+            ext: secure::display_safe(&f.ext),
+            media: r.media.get(&i).cloned().unwrap_or_default(),
+        }
+    };
+    Some(SimView {
+        locations: a
+            .roots
+            .iter()
+            .map(|x| LocationInfo {
+                key: String::new(),
+                label: x.label.clone(),
+                path: pretty_path(&app, &x.canon),
+                drive: drive_of(&x.canon),
+            })
+            .collect(),
+        stats: r.stats.clone(),
+        groups: a
+            .groups
+            .iter()
+            .zip(&r.meta)
+            .enumerate()
+            .map(|(gi, (g, m))| SimGroup {
+                index: gi,
+                video: m.video,
+                similarity: m.similarity,
+                recoverable: g.members[1..].iter().flat_map(|mem| &mem.files).map(|&f| a.files[f].size).sum(),
+                members: g
+                    .members
+                    .iter()
+                    .zip(&m.members)
+                    .map(|(mem, mm)| SimMember {
+                        files: mem.files.iter().map(|&f| file(f)).collect(),
+                        similarity: mm.similarity,
+                        exact: mm.exact,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+/// "Not duplicates": forget the group (or one member) and remember the
+/// decision locally by content identity, so it isn't suggested again.
+#[tauri::command]
+fn similar_dismiss(state: State<'_, AppState>, group: usize, member: Option<usize>) -> Result<(), String> {
+    let pairs = {
+        let mut guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
+        let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or("The analysis was cleared.")?;
+        similar::dismiss(r, group, member)
+    };
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let path = state.dismissed_file();
+    let mut set = similar::load_dismissed(&path);
+    set.extend(pairs);
+    similar::save_dismissed(&path, &set).map_err(|_| "Could not save the decision.".to_string())
+}
+
+#[tauri::command]
+fn similar_dismissed_count(state: State<'_, AppState>) -> usize {
+    similar::load_dismissed(&state.dismissed_file()).len()
+}
+
+#[tauri::command]
+fn similar_forget_decisions(state: State<'_, AppState>) {
+    let _ = fs::remove_file(state.dismissed_file());
+}
+
+#[tauri::command]
+fn similar_clear(state: State<'_, AppState>) {
+    state.similar_cancel.store(true, Ordering::SeqCst);
+    *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.volatile_thumbs.clear();
+}
+
+/// Same rules as exact duplicates (shared `dupes::execute`): validated plan,
+/// at least one copy kept, kept copies re-checked first, OS Trash only.
+#[tauri::command]
+async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<dupes::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.cleanup_cancel.store(false, Ordering::SeqCst);
+        let cancel = state.cleanup_cancel.clone();
+        let (outcome, removed_abs) = {
+            let mut guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
+            let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or("The analysis was cleared.")?;
+            let app2 = app.clone();
+            let thumb_state = app.state::<AppState>();
+            let outcome = dupes::execute(
+                &r.analysis,
+                &plan,
+                &mut |root, rel| {
+                    let (path, meta) = fileops::confined_item(root, rel)?;
+                    if !meta.is_file() {
+                        return Err("not a regular file".into());
+                    }
+                    invalidate_thumbs(&thumb_state, &path, &meta);
+                    fileops::move_to_trash(&path)
+                },
+                &cancel,
+                &mut |done, total| {
+                    let _ = app2.emit("cleanup-progress", CleanupProgress { done, total });
+                },
+            )?;
+            let a = &r.analysis;
+            let removed_abs: Vec<PathBuf> =
+                outcome.removed.iter().map(|&i| a.roots[a.files[i].root].canon.join(&a.files[i].rel)).collect();
+            (outcome, removed_abs)
+        };
+        forget_removed(&state, &removed_abs);
+        let rels: Vec<String> = removed_abs.iter().filter_map(|p| browser_rel(&state, p)).collect();
+        if !rels.is_empty() {
+            apply_index_change(&app, |idx| idx.remove_paths(&rels));
+        }
+        Ok(outcome)
+    })
+    .await
+    .map_err(|_| "The cleanup stopped unexpectedly.".to_string())?
 }
 
 /// Spawn the OS opener directly (absolute binary, argument array, no shell).
@@ -1341,6 +1797,10 @@ fn build_window(app: &tauri::App) -> tauri::Result<()> {
         .inner_size(1280.0, 820.0)
         .min_inner_size(760.0, 480.0)
         .disable_drag_drop_handler()
+        // Keep the page running when the window is in the background, so a
+        // Similar Media analysis (videos are sampled by the webview) and
+        // thumbnail capture don't stall while the user works in other apps.
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         // The webview may only ever show Mori's own bundled UI.
         .on_navigation(|url| {
             let s = url.as_str();
@@ -1432,6 +1892,11 @@ fn main() {
                 analysis_cancel: Arc::new(AtomicBool::new(false)),
                 cleanup_cancel: Arc::new(AtomicBool::new(false)),
                 custom_locations: Mutex::new(Vec::new()),
+                similar: Mutex::new(None),
+                similar_running: AtomicBool::new(false),
+                similar_cancel: Arc::new(AtomicBool::new(false)),
+                similar_capture: Mutex::new(None),
+                similar_token: AtomicU64::new(0),
             });
             spawn_media_watchdog(app.handle().clone());
             // Debug builds only: MORI_DEBUG_FREEZE_AT=<secs> wedges the page's JS
@@ -1449,6 +1914,9 @@ fn main() {
                 }
             }
             build_window(app)?;
+            if cfg!(debug_assertions) {
+                debug_similar_autorun(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1482,7 +1950,16 @@ fn main() {
             analysis_results,
             analysis_clear,
             analysis_cleanup,
-            analysis_cleanup_cancel
+            analysis_cleanup_cancel,
+            similar_start,
+            similar_cancel,
+            similar_frames,
+            similar_results,
+            similar_dismiss,
+            similar_dismissed_count,
+            similar_forget_decisions,
+            similar_clear,
+            similar_cleanup
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mori");

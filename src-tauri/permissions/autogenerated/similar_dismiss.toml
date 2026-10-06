@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-dismiss"
+description = "Enables the similar_dismiss command without any pre-configured scope."
+commands.allow = ["similar_dismiss"]
+
+[[permission]]
+identifier = "deny-similar-dismiss"
+description = "Denies the similar_dismiss command without any pre-configured scope."
+commands.deny = ["similar_dismiss"]

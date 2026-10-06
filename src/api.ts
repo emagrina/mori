@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other";
 export type KindFilter = "all" | Exclude<Kind, "folder">;
@@ -208,6 +209,67 @@ export interface CleanupOutcome {
   cancelled: boolean;
 }
 
+// ------------------------------------------------------------ similar media
+
+export type Sensitivity = "strict" | "balanced" | "broad";
+export type SimStage = "collecting" | "photos" | "videos" | "comparing" | "done";
+
+export interface SimProgress {
+  stage: SimStage;
+  photosTotal: number;
+  photosDone: number;
+  videosTotal: number;
+  videosDone: number;
+  compareTotal: number;
+  compareDone: number;
+  groups: number;
+}
+
+export interface SimFile extends DupFile {
+  width: number;
+  height: number;
+  durationMs: number | null;
+  container: string | null;
+  codec: string | null;
+  exif: boolean;
+}
+
+export interface SimMember {
+  files: SimFile[];
+  /** Estimated similarity to the suggested copy (0–99); 100 only when the bytes are verified identical. */
+  similarity: number;
+  exact: boolean;
+}
+
+export interface SimGroup {
+  index: number;
+  video: boolean;
+  similarity: number;
+  recoverable: number;
+  /** Member 0 is Mori's suggested copy to keep. */
+  members: SimMember[];
+}
+
+export interface SimStats {
+  photos: number;
+  videos: number;
+  unanalyzable: number;
+  uninformative: number;
+  cached: number;
+  hashComparisons: number;
+  verified: number;
+  matches: number;
+  dismissed: number;
+  livePairs: number;
+  elapsedMs: number;
+}
+
+export interface SimView {
+  locations: LocationInfo[];
+  stats: SimStats;
+  groups: SimGroup[];
+}
+
 export const api = {
   init: () => invoke<InitInfo>("init"),
   updateSettings: (s: Settings) => invoke<void>("update_settings", { ...s }),
@@ -238,6 +300,16 @@ export const api = {
   analysisClear: () => invoke<void>("analysis_clear"),
   analysisCleanup: (plan: PlanItem[]) => invoke<CleanupOutcome>("analysis_cleanup", { plan }),
   analysisCleanupCancel: () => invoke<void>("analysis_cleanup_cancel"),
+  similarStart: (locations: string[], photos: boolean, videos: boolean, recursive: boolean, sensitivity: Sensitivity) =>
+    invoke<void>("similar_start", { locations, photos, videos, recursive, sensitivity }),
+  similarCancel: () => invoke<void>("similar_cancel"),
+  similarResults: () => invoke<SimView | null>("similar_results"),
+  /** "Not duplicates": the whole group, or one member. Remembered locally by content identity. */
+  similarDismiss: (group: number, member: number | null) => invoke<void>("similar_dismiss", { group, member }),
+  similarDismissedCount: () => invoke<number>("similar_dismissed_count"),
+  similarForgetDecisions: () => invoke<void>("similar_forget_decisions"),
+  similarClear: () => invoke<void>("similar_clear"),
+  similarCleanup: (plan: PlanItem[]) => invoke<CleanupOutcome>("similar_cleanup", { plan }),
 };
 
 /**
@@ -357,7 +429,8 @@ export function requestThumb(e: Entry, onDone: (url: string | null) => void): ()
 
 // --------------------------------------------------- video frame capture
 
-type Capture = { e: Entry; done: (ok: boolean) => void };
+/** One webview decoding job: a thumbnail frame or similarity samples. */
+type Capture = { run: (signal: AbortSignal) => Promise<boolean>; done: (ok: boolean) => void; urgent?: boolean };
 const captures: Capture[] = [];
 let capturing: AbortController | null = null;
 let previewOpen = false;
@@ -369,8 +442,12 @@ export function setPreviewOpen(open: boolean) {
   else pumpCaptures();
 }
 
-function enqueueCapture(e: Entry, done: (ok: boolean) => void): () => void {
-  const c: Capture = { e, done };
+function enqueueCapture(e: Entry, done: (ok: boolean) => void, urgent = false): () => void {
+  return enqueue({ run: (signal) => captureVideoThumb(e, signal), done }, urgent);
+}
+
+function enqueue(c: Capture, urgent: boolean): () => void {
+  c.urgent = urgent;
   captures.push(c);
   pumpCaptures();
   return () => {
@@ -381,10 +458,19 @@ function enqueueCapture(e: Entry, done: (ok: boolean) => void): () => void {
 
 function pumpCaptures() {
   if (capturing || previewOpen || !captures.length) return;
-  const job = captures.pop()!;
+  // Newest first (tiles currently on screen), but analyzer requests before thumbnails.
+  let at = captures.length - 1;
+  for (let i = captures.length - 1; i >= 0; i--) {
+    if (captures[i].urgent) {
+      at = i;
+      break;
+    }
+  }
+  const job = captures.splice(at, 1)[0];
   const ctrl = new AbortController();
   capturing = ctrl;
-  captureVideoThumb(job.e, ctrl.signal)
+  job
+    .run(ctrl.signal)
     .catch(() => false)
     .then((ok) => {
       capturing = null;
@@ -392,6 +478,146 @@ function pumpCaptures() {
       else job.done(ok);
       pumpCaptures();
     });
+}
+
+// ---------------------------------------------- similarity frame sampling
+
+const SAMPLES = 12;
+const SIDE = 64;
+
+/**
+ * Answer the analyzer's requests for sampled video frames. Frames are decoded
+ * by the (sandboxed) system webview through the same guarded path as previews
+ * (probe, blocklist, media session watchdog), reduced to 64×64 grayscale here,
+ * and sent to Rust as raw pixels. One request at a time; paused during previews.
+ */
+export function startSimilarCaptureService(): () => void {
+  const un = listen<{ token: number; id: string; times: number[] }>("similar-capture", ({ payload }) => {
+    enqueue(
+      {
+        run: async (signal) => {
+          const r = await sampleVideo(payload.id, payload.times, signal).catch(() => null);
+          if (signal.aborted) return false; // retried after the preview closes
+          const headers: Record<string, string> = { "mori-token": String(payload.token) };
+          if (r) {
+            Object.assign(headers, {
+              "mori-width": String(r.width),
+              "mori-height": String(r.height),
+              "mori-duration": String(r.durationMs),
+              "mori-container": r.container,
+              "mori-codec": r.codec,
+            });
+          }
+          await invoke("similar_frames", r ? r.planes : new Uint8Array(0), { headers }).catch(() => {});
+          return true;
+        },
+        done: () => {},
+      },
+      true,
+    );
+  });
+  return () => {
+    un.then((f) => f());
+  };
+}
+
+async function sampleVideo(id: string, times: number[], signal: AbortSignal) {
+  const info = await api.inspect(id).catch(() => null);
+  if (signal.aborted || info?.preview !== "video" || !info.video) return null;
+  const end = await beginMediaSession(id).catch(() => null);
+  if (!end) return null;
+  try {
+    const r = await grabSamples(mediaUrl(id), times, signal);
+    return r && { ...r, container: info.video.container, codec: info.video.videoCodec ?? "" };
+  } finally {
+    end();
+  }
+}
+
+/** Seek to each time and keep a 64×64 grayscale copy of the frame. */
+function grabSamples(src: string, times: number[], signal: AbortSignal) {
+  return new Promise<{ width: number; height: number; durationMs: number; planes: Uint8Array } | null>((resolve) => {
+    const v = document.createElement("video");
+    let finished = false;
+    const finish = (r: { width: number; height: number; durationMs: number; planes: Uint8Array } | null) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+      v.remove();
+      resolve(r);
+    };
+    const onAbort = () => finish(null);
+    signal.addEventListener("abort", onAbort);
+    const timer = setTimeout(() => finish(null), 30000 + times.length * 1500);
+    const big = document.createElement("canvas");
+    big.width = big.height = 256;
+    const small = document.createElement("canvas");
+    small.width = small.height = SIDE;
+    const bctx = big.getContext("2d", { willReadFrequently: false })!;
+    const sctx = small.getContext("2d", { willReadFrequently: true })!;
+    bctx.imageSmoothingQuality = sctx.imageSmoothingQuality = "high";
+    const nextFrame = () =>
+      new Promise<void>((r) => {
+        const rvfc = (v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }).requestVideoFrameCallback;
+        let called = false;
+        const once = () => {
+          if (!called) {
+            called = true;
+            r();
+          }
+        };
+        if (rvfc) rvfc.call(v, once);
+        setTimeout(once, 400);
+      });
+    const seek = (t: number) =>
+      new Promise<boolean>((r) => {
+        const to = setTimeout(() => r(false), 5000);
+        v.onseeked = () => {
+          clearTimeout(to);
+          r(true);
+        };
+        v.currentTime = t;
+      });
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    v.crossOrigin = "anonymous";
+    v.style.cssText = "position:fixed;left:-9999px;top:0;width:4px;height:4px;opacity:0;pointer-events:none";
+    v.onerror = () => finish(null);
+    v.onloadedmetadata = async () => {
+      const d = v.duration;
+      if (!isFinite(d) || d <= 0 || !v.videoWidth || !v.videoHeight) return finish(null);
+      const at = times.length ? times : Array.from({ length: SAMPLES }, (_, k) => (d * (k + 0.5)) / SAMPLES);
+      const planes = new Uint8Array(at.length * SIDE * SIDE);
+      for (let k = 0; k < at.length; k++) {
+        if (finished) return;
+        if (!(await seek(Math.min(Math.max(at[k], 0), Math.max(0, d - 0.05))))) return finish(null);
+        await nextFrame();
+        try {
+          bctx.clearRect(0, 0, 256, 256);
+          bctx.drawImage(v, 0, 0, 256, 256);
+          sctx.drawImage(big, 0, 0, SIDE, SIDE);
+          const px = sctx.getImageData(0, 0, SIDE, SIDE).data;
+          let painted = false;
+          for (let i = 0; i < SIDE * SIDE; i++) {
+            const a = px[i * 4 + 3];
+            painted ||= a > 0;
+            planes[k * SIDE * SIDE + i] = Math.round(0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]);
+          }
+          if (!painted) return finish(null);
+        } catch {
+          return finish(null);
+        }
+      }
+      finish({ width: v.videoWidth, height: v.videoHeight, durationMs: Math.round(d * 1000), planes });
+    };
+    document.body.appendChild(v);
+    v.src = src;
+  });
 }
 
 /**
@@ -521,6 +747,12 @@ export const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndex
 export const isMac = navigator.userAgent.includes("Mac");
 
 export const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+export const formatDuration = (ms: number | null) => {
+  if (ms === null) return "—";
+  const s = Math.round(ms / 1000);
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
 
 /** Display entry for an analyzer file (the preview and thumbnails work by id). */
 export const dupEntry = (f: DupFile): Entry => ({ id: f.id, name: f.name, path: f.path, ext: f.ext, kind: f.kind, size: f.size, modified: f.modified, created: f.created });

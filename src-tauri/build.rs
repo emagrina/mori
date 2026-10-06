@@ -32,6 +32,15 @@ const COMMANDS: &[&str] = &[
     "analysis_clear",
     "analysis_cleanup",
     "analysis_cleanup_cancel",
+    "similar_start",
+    "similar_cancel",
+    "similar_frames",
+    "similar_results",
+    "similar_dismiss",
+    "similar_dismissed_count",
+    "similar_forget_decisions",
+    "similar_clear",
+    "similar_cleanup",
 ];
 
 fn main() {

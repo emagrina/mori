@@ -7,6 +7,7 @@ import {
   plural,
   resetThumbs,
   setPreviewOpen,
+  startSimilarCaptureService,
   type Entry,
   type InitInfo,
   type KindFilter,
@@ -23,6 +24,7 @@ import { FileView } from "./components/FileView";
 import { Icon, Logo, type IconName } from "./components/Icon";
 import { ModalFrame } from "./components/Modal";
 import { Preview } from "./components/Preview";
+import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
 
 interface Location {
   scope: Scope;
@@ -84,7 +86,7 @@ export default function App() {
   /** `targets`: what the menu's actions apply to (the whole selection when right-clicking inside it). */
   const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry; targets: Entry[] } | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
-  const [mode, setMode] = useState<"browse" | "analyzer">("browse");
+  const [mode, setMode] = useState<"browse" | "analyzer" | "similar">("browse");
   /** Bumped when files are trashed from the browser, so analyzer results refresh. */
   const [analysisVersion, setAnalysisVersion] = useState(0);
   // Small anchored menus: sort options and the sidebar overflow ("more") menu.
@@ -95,6 +97,9 @@ export default function App() {
   const settingsLoaded = useRef(false);
 
   // ------------------------------------------------------------- startup
+
+  // The Similar Media analyzer asks the webview for sampled video frames.
+  useEffect(() => startSimilarCaptureService(), []);
 
   useEffect(() => {
     api.init().then((i) => {
@@ -472,10 +477,14 @@ export default function App() {
               <span className="count">{count(f.kind)?.toLocaleString()}</span>
             </button>
           ))}
-          <div className="side-heading">Tools</div>
-          <button className={`side-item ${!browsing ? "on" : ""}`} onClick={() => setMode("analyzer")}>
+          <div className="side-heading">Analyze</div>
+          <button className={`side-item ${mode === "analyzer" ? "on" : ""}`} onClick={() => setMode("analyzer")} title="Exact byte-identical files">
             <Icon name="duplicate" />
-            <span>Find Duplicates</span>
+            <span>Duplicates</span>
+          </button>
+          <button className={`side-item ${mode === "similar" ? "on" : ""}`} onClick={() => setMode("similar")} title="Visually similar photos and videos">
+            <Icon name="gallery" />
+            <span>Similar Media</span>
           </button>
           {topFolders.length > 0 && <div className="side-heading">Folders</div>}
           <FolderTree
@@ -669,7 +678,8 @@ export default function App() {
         )}
       </main>
 
-      <Analyzer active={!browsing} version={analysisVersion} onToast={flash} />
+      <Analyzer active={mode === "analyzer"} version={analysisVersion} onToast={flash} onSwitch={() => setMode("similar")} />
+      <SimilarAnalyzer active={mode === "similar"} version={analysisVersion} onToast={flash} onSwitch={() => setMode("analyzer")} />
 
       {previewId && previewIndex >= 0 && (
         <Preview

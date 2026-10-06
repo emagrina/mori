@@ -38,6 +38,15 @@
     "allow-analysis-results",
     "allow-analysis-clear",
     "allow-analysis-cleanup",
-    "allow-analysis-cleanup-cancel"
+    "allow-analysis-cleanup-cancel",
+    "allow-similar-start",
+    "allow-similar-cancel",
+    "allow-similar-frames",
+    "allow-similar-results",
+    "allow-similar-dismiss",
+    "allow-similar-dismissed-count",
+    "allow-similar-forget-decisions",
+    "allow-similar-clear",
+    "allow-similar-cleanup"
   ]
 }

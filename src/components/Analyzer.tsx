@@ -64,7 +64,17 @@ const LOCATION_ICON: Record<string, IconName> = {
 const keyOf = (m: DupMember) => m.files[0].id;
 const PAGE = 60;
 
-export function Analyzer({ active, version, onToast }: { active: boolean; version: number; onToast: (msg: string, ms?: number) => void }) {
+export function Analyzer({
+  active,
+  version,
+  onToast,
+  onSwitch,
+}: {
+  active: boolean;
+  version: number;
+  onToast: (msg: string, ms?: number) => void;
+  onSwitch: () => void;
+}) {
   const [phase, setPhase] = useState<Phase>("setup");
   const [locations, setLocations] = useState<LocationInfo[]>([]);
   const [chosen, setChosen] = useState<Set<string>>(() => new Set(["library"]));
@@ -269,11 +279,11 @@ export function Analyzer({ active, version, onToast }: { active: boolean; versio
       </header>
       <div className="page-head">
         <div className="crumbs">
-          <span className="crumb">Tools</span>
+          <span className="crumb">Analyze</span>
         </div>
         <div className="title-row">
           <h1 className="page-title">
-            Find Duplicates
+            Exact Duplicates
             {phase !== "setup" && phase !== "running" && scopeNote && <span className="scope-note">in {scopeNote}</span>}
           </h1>
           {(phase === "results" || phase === "summary") && view && (
@@ -297,6 +307,7 @@ export function Analyzer({ active, version, onToast }: { active: boolean; versio
       <div className="analyzer-body">
         {phase === "setup" && (
           <Setup
+            onSwitch={onSwitch}
             locations={locations}
             chosen={chosen}
             setChosen={setChosen}
@@ -467,6 +478,7 @@ export function Analyzer({ active, version, onToast }: { active: boolean; versio
 // ------------------------------------------------------------------ setup
 
 function Setup(p: {
+  onSwitch: () => void;
   locations: LocationInfo[];
   chosen: Set<string>;
   setChosen: (s: Set<string>) => void;
@@ -480,12 +492,6 @@ function Setup(p: {
   onAddFolder: () => void;
   onStart: () => void;
 }) {
-  const toggleLoc = (key: string) => {
-    const next = new Set(p.chosen);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    p.setChosen(next);
-  };
   const toggleKind = (k: AnalysisKind) => {
     const next = new Set(p.kinds);
     if (next.has(k)) next.delete(k);
@@ -495,36 +501,14 @@ function Setup(p: {
   const ready = p.locations.some((l) => p.chosen.has(l.key));
   return (
     <div className="setup">
+      <ToolSwitch current="exact" onSwitch={p.onSwitch} />
       <p className="lead">
         Finds files whose content is byte-for-byte identical, whatever their names or dates. Nothing is changed until you review the results and confirm.
       </p>
 
       <section>
         <h3>Where to look</h3>
-        <div className="loc-list">
-          {p.locations.map((l) => (
-            <label key={l.key} className={`loc ${p.chosen.has(l.key) ? "on" : ""}`} title={l.path}>
-              <input type="checkbox" checked={p.chosen.has(l.key)} onChange={() => toggleLoc(l.key)} />
-              <Icon name={LOCATION_ICON[l.key] ?? "folder"} size={16} />
-              <span className="loc-text">
-                <span className="truncate">{l.key === "library" ? `${l.label} (current drive)` : l.label}</span>
-                <span className="truncate muted">
-                  {l.path} · {l.drive}
-                </span>
-              </span>
-              <span className="check-box" aria-hidden>
-                <Icon name="check" size={12} stroke={2.2} />
-              </span>
-            </label>
-          ))}
-          <button className="loc add" onClick={p.onAddFolder}>
-            <Icon name="folder" size={16} />
-            <span className="loc-text">
-              <span>Choose a Folder…</span>
-              <span className="muted">Only folders you pick are read</span>
-            </span>
-          </button>
-        </div>
+        <LocationList locations={p.locations} chosen={p.chosen} setChosen={p.setChosen} onAddFolder={p.onAddFolder} />
       </section>
 
       <section>
@@ -566,6 +550,75 @@ function Setup(p: {
   );
 }
 
+/** The two Analyze tools, side by side: deterministic vs estimated. */
+export function ToolSwitch({ current, onSwitch }: { current: "exact" | "similar"; onSwitch: () => void }) {
+  const tools = [
+    { key: "exact", icon: "duplicate" as IconName, title: "Exact Duplicates", text: "Find byte-identical files.", note: "Verified by content hash" },
+    {
+      key: "similar",
+      icon: "gallery" as IconName,
+      title: "Similar Photos & Videos",
+      text: "Find media that appears to contain the same visual content.",
+      note: "Estimated — always review",
+    },
+  ];
+  return (
+    <div className="tool-switch" role="tablist" aria-label="Analyze">
+      {tools.map((t) => (
+        <button
+          key={t.key}
+          role="tab"
+          aria-selected={current === t.key}
+          className={`tool-card ${current === t.key ? "on" : ""}`}
+          onClick={() => current !== t.key && onSwitch()}
+        >
+          <Icon name={t.icon} size={18} />
+          <span className="tool-text">
+            <span className="tool-title">{t.title}</span>
+            <span className="muted">{t.text}</span>
+            <span className="tool-note">{t.note}</span>
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function LocationList(p: { locations: LocationInfo[]; chosen: Set<string>; setChosen: (s: Set<string>) => void; onAddFolder: () => void }) {
+  const toggle = (key: string) => {
+    const next = new Set(p.chosen);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    p.setChosen(next);
+  };
+  return (
+    <div className="loc-list">
+      {p.locations.map((l) => (
+        <label key={l.key} className={`loc ${p.chosen.has(l.key) ? "on" : ""}`} title={l.path}>
+          <input type="checkbox" checked={p.chosen.has(l.key)} onChange={() => toggle(l.key)} />
+          <Icon name={LOCATION_ICON[l.key] ?? "folder"} size={16} />
+          <span className="loc-text">
+            <span className="truncate">{l.key === "library" ? `${l.label} (current drive)` : l.label}</span>
+            <span className="truncate muted">
+              {l.path} · {l.drive}
+            </span>
+          </span>
+          <span className="check-box" aria-hidden>
+            <Icon name="check" size={12} stroke={2.2} />
+          </span>
+        </label>
+      ))}
+      <button className="loc add" onClick={p.onAddFolder}>
+        <Icon name="folder" size={16} />
+        <span className="loc-text">
+          <span>Choose a Folder…</span>
+          <span className="muted">Only folders you pick are read</span>
+        </span>
+      </button>
+    </div>
+  );
+}
+
 function Running({ progress: p, cancelling, onCancel }: { progress: AnalysisProgress | null; cancelling: boolean; onCancel: () => void }) {
   const hashing = p && (p.stage === "fingerprinting" || p.stage === "verifying");
   const fraction = !p ? 0 : hashing && p.bytesTotal ? p.bytesDone / p.bytesTotal : p.filesTotal ? p.filesDone / p.filesTotal : 0;
@@ -602,7 +655,7 @@ function Running({ progress: p, cancelling, onCancel }: { progress: AnalysisProg
   );
 }
 
-function ProgressBar({ value, indeterminate }: { value: number; indeterminate?: boolean }) {
+export function ProgressBar({ value, indeterminate }: { value: number; indeterminate?: boolean }) {
   return (
     <div className={`progress ${indeterminate ? "indeterminate" : ""}`} role="progressbar" aria-valuenow={Math.round(value * 100)}>
       <div style={{ width: indeterminate ? undefined : `${Math.min(100, value * 100)}%` }} />
@@ -704,25 +757,32 @@ function GroupCard({
 
 // ----------------------------------------------------- final review & summary
 
-function FinalReview({
+export function FinalReview({
   plan,
   onCancel,
   onReview,
   onConfirm,
+  reviewed,
+  ignored,
+  title,
 }: {
   plan: { items: PlanItem[]; trash: DupFile[]; keep: number; bytes: number; invalid: boolean };
   onCancel: () => void;
   onReview: () => void;
   onConfirm: () => void;
+  /** Similar media: groups reviewed and groups set aside. */
+  reviewed?: number;
+  ignored?: number;
+  title?: string;
 }) {
   const drives = [...new Set(plan.trash.map((f) => f.drive))];
   return (
     <ModalFrame onCancel={onReview} wide>
-      <h2>Ready to clean</h2>
+      <h2>{title ?? "Ready to clean"}</h2>
       <dl className="facts review">
         <div>
-          <dt>Duplicate groups</dt>
-          <dd>{plan.items.length.toLocaleString()}</dd>
+          <dt>{reviewed !== undefined ? "Reviewed groups" : "Duplicate groups"}</dt>
+          <dd>{(reviewed ?? plan.items.length).toLocaleString()}</dd>
         </div>
         <div>
           <dt>Keep</dt>
@@ -732,6 +792,12 @@ function FinalReview({
           <dt>Move to Trash</dt>
           <dd>{plural(plan.trash.length, "file")}</dd>
         </div>
+        {ignored !== undefined && (
+          <div>
+            <dt>Ignored</dt>
+            <dd>{plural(ignored, "group")}</dd>
+          </div>
+        )}
         <div>
           <dt>Space recovered</dt>
           <dd>{formatSize(plan.bytes)}</dd>
@@ -769,7 +835,7 @@ function FinalReview({
   );
 }
 
-function Summary({ outcome: o, remaining, onDone }: { outcome: CleanupOutcome; remaining: number; onDone: () => void }) {
+export function Summary({ outcome: o, remaining, onDone }: { outcome: CleanupOutcome; remaining: number; onDone: () => void }) {
   return (
     <div className="analyzer-center">
       <div className="progress-card summary">

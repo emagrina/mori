@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-similar-cancel"
+description = "Enables the similar_cancel command without any pre-configured scope."
+commands.allow = ["similar_cancel"]
+
+[[permission]]
+identifier = "deny-similar-cancel"
+description = "Denies the similar_cancel command without any pre-configured scope."
+commands.deny = ["similar_cancel"]
