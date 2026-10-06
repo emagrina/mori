@@ -15,8 +15,11 @@ serde_json = "1"
 walkdir = "2"
 unicode-normalization = "0.1"
 blake3 = "1"
+flate2 = "1"
 trash = "5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+kamadak-exif = "0.6"
+crc32fast = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -67,7 +67,7 @@ pub struct VolumeId {
 
 impl VolumeId {
     /// Path of `canon` relative to the volume root ("" = the volume root).
-    fn rel(&self, canon: &Path) -> Option<String> {
+    pub(crate) fn rel(&self, canon: &Path) -> Option<String> {
         let r = canon.strip_prefix(&self.mount).ok()?.to_str()?;
         Some(if cfg!(windows) { r.replace('\\', "/") } else { r.to_owned() })
     }
@@ -318,6 +318,22 @@ impl Store {
         if changed {
             let _ = self.save(&data);
         }
+    }
+
+    /// Forget every record on one volume ("Forget this drive").
+    pub fn forget_volume(&self, vol: &VolumeId) -> bool {
+        let mut data = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = data.volumes.len();
+        data.volumes.retain(|v| match (&v.uuid, &vol.uuid) {
+            (Some(a), Some(b)) => a != b,
+            (None, None) => Path::new(&v.mount) != vol.mount,
+            _ => true,
+        });
+        let changed = data.volumes.len() != before;
+        if changed {
+            let _ = self.save(&data);
+        }
+        changed
     }
 
     /// After a scan of `root`: a recorded private folder that no longer

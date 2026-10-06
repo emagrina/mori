@@ -1,7 +1,9 @@
-//! The only operations through which Mori changes the filesystem:
-//! moving items to the OS Trash / Recycle Bin, and renaming without ever
-//! overwriting. Every mutation takes a `&Policy` (read-only mode, protected
-//! folders) and checks it first.
+//! The only operations through which Mori changes the filesystem: moving
+//! items to the OS Trash / Recycle Bin (and restoring them), renaming without
+//! ever overwriting, creating new files, and — only on explicit, confirmed
+//! request — deleting permanently. Every mutation takes a `&Policy`
+//! (read-only mode, protected folders) and checks it first. Symbolic links
+//! are always acted on as themselves; their targets are never touched.
 
 use crate::policy::{Op, Policy};
 use std::fs;
@@ -10,19 +12,122 @@ use std::path::{Component, Path, PathBuf};
 /// Move a file or folder to the OS Trash (macOS) / Recycle Bin (Windows) /
 /// freedesktop trash (Linux). Recoverable by the user. Never falls back to a
 /// permanent delete: if the platform refuses, the item stays where it is.
-pub fn move_to_trash(policy: &Policy, path: &Path) -> Result<(), String> {
+/// Returns where the item now is in the Trash when the platform says so
+/// (macOS), which makes Undo possible.
+pub fn move_to_trash(policy: &Policy, path: &Path) -> Result<Option<PathBuf>, String> {
     policy.check(Op::Trash, path)?;
-    #[allow(unused_mut)]
-    let mut ctx = trash::TrashContext::default();
     #[cfg(target_os = "macos")]
     {
-        use trash::macos::{DeleteMethod, TrashContextExtMacos};
-        // NSFileManager.trashItemAtURL: no AppleScript/Finder automation prompt.
-        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        macos_trash(path).map(Some)
     }
-    ctx.delete(path).map_err(|e| describe_trash_error(&e))
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::TrashContext::default().delete(path).map(|_| None).map_err(|e| describe_trash_error(&e))
+    }
 }
 
+/// NSFileManager `trashItemAtURL:resultingItemURL:error:` (no Finder
+/// automation prompt); the resulting URL is the item's place in the Trash.
+#[cfg(target_os = "macos")]
+fn macos_trash(path: &Path) -> Result<PathBuf, String> {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    if fs::symlink_metadata(path).is_err() {
+        return Err("file no longer exists".into());
+    }
+    let c = CString::new(path.as_os_str().as_bytes()).map_err(|_| "invalid path")?;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let s: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+        if s.is_null() {
+            return Err("invalid path".to_string());
+        }
+        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: s];
+        let fm: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
+        let mut out: *mut AnyObject = std::ptr::null_mut();
+        let mut err: *mut AnyObject = std::ptr::null_mut();
+        let ok: bool = msg_send![fm, trashItemAtURL: url, resultingItemURL: &mut out, error: &mut err];
+        if !ok {
+            let code: isize = if err.is_null() { 0 } else { msg_send![err, code] };
+            // NSFileWriteNoPermissionError = 513, NSFileNoSuchFileError = 4.
+            return Err(match code {
+                513 | 257 => "permission denied".into(),
+                4 => "file no longer exists".into(),
+                _ => "the system Trash refused the item".into(),
+            });
+        }
+        if out.is_null() {
+            return Ok(PathBuf::new());
+        }
+        let p: *mut AnyObject = msg_send![out, path];
+        let cs: *const std::ffi::c_char =
+            if p.is_null() { std::ptr::null() } else { msg_send![p, fileSystemRepresentation] };
+        if cs.is_null() {
+            return Ok(PathBuf::new());
+        }
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(CStr::from_ptr(cs).to_bytes().to_vec())))
+    })
+}
+
+/// Put an item Mori moved to the Trash back where it was. Refuses if the
+/// original place is taken (never overwrites) or the item is no longer in
+/// the Trash.
+pub fn restore_from_trash(policy: &Policy, trashed: &Path, original: &Path) -> Result<(), String> {
+    policy.check(Op::Restore, original)?;
+    fs::symlink_metadata(trashed).map_err(|_| "it is no longer in the Trash".to_string())?;
+    if fs::symlink_metadata(original).is_ok() {
+        return Err("something with the same name is already there".into());
+    }
+    let parent = original.parent().ok_or("invalid path")?;
+    if !fs::symlink_metadata(parent).is_ok_and(|m| m.is_dir()) {
+        return Err("its folder no longer exists".into());
+    }
+    platform_rename_excl(trashed, original).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "something with the same name is already there".to_string()
+        } else {
+            "the item couldn't be moved back".to_string()
+        }
+    })
+}
+
+/// Delete permanently — no Trash, not recoverable by Mori. Only on explicit,
+/// confirmed request. A link is removed as itself (its target is never
+/// touched); a folder is removed with everything in it without following
+/// any link inside. Returns the bytes freed (link and folder entries count 0).
+pub fn delete_permanently(policy: &Policy, path: &Path) -> Result<u64, String> {
+    policy.check(Op::Delete, path)?;
+    let meta = fs::symlink_metadata(path).map_err(|_| "file no longer exists".to_string())?;
+    let ft = meta.file_type();
+    if ft.is_symlink() || ft.is_file() {
+        fs::remove_file(path).map_err(|e| io_reason(&e))?;
+        return Ok(if ft.is_file() { meta.len() } else { 0 });
+    }
+    if !ft.is_dir() {
+        return Err("not a regular file or folder".into());
+    }
+    let mut bytes = 0;
+    for e in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
+        if e.file_type().is_file() {
+            bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    // std's remove_dir_all never follows symlinks (it unlinks them) and
+    // guards against symlink races on unix.
+    fs::remove_dir_all(path).map_err(|e| io_reason(&e))?;
+    Ok(bytes)
+}
+
+fn io_reason(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+        std::io::ErrorKind::NotFound => "file no longer exists".into(),
+        _ => "the item couldn't be deleted".into(),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn describe_trash_error(e: &trash::Error) -> String {
     let s = e.to_string();
     if s.contains("ermission") {
@@ -31,6 +136,75 @@ fn describe_trash_error(e: &trash::Error) -> String {
         "file no longer exists".into()
     } else {
         "the system Trash refused the item".into()
+    }
+}
+
+/// Create a new file `name` in the canonical folder `dir` with `bytes`.
+/// Never replaces anything: fails if the name exists (even as a dangling
+/// symlink), and never follows a symlink in place of the folder or the file.
+/// Returns `Ok(false)` when the name is taken, so the caller can pick another.
+pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Result<bool, String> {
+    validate_name(name)?;
+    let target = dir.join(name);
+    policy.check(Op::Create, &target)?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let cdir = CString::new(dir.as_os_str().as_bytes()).map_err(|_| "invalid folder")?;
+        let cname = CString::new(name.as_bytes()).map_err(|_| "invalid name")?;
+        let dfd = unsafe {
+            libc::open(cdir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        };
+        if dfd < 0 {
+            return Err("the folder can't be opened".into());
+        }
+        let fd = unsafe {
+            libc::openat(
+                dfd,
+                cname.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o644 as libc::c_uint,
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(dfd) };
+        if fd < 0 {
+            return match err.kind() {
+                std::io::ErrorKind::AlreadyExists => Ok(false),
+                std::io::ErrorKind::PermissionDenied => Err("permission denied".into()),
+                _ => Err("the file couldn't be created".into()),
+            };
+        }
+        let mut f = unsafe { fs::File::from_raw_fd(fd) };
+        if f.write_all(bytes).and_then(|_| f.sync_all()).is_err() {
+            drop(f);
+            // Our own partial file: remove it rather than leave a broken copy.
+            let _ = fs::remove_file(&target);
+            return Err("writing the file failed (disk full?)".into());
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let meta = fs::symlink_metadata(dir).map_err(|_| "the folder can't be opened")?;
+        if !meta.is_dir() {
+            return Err("the folder can't be opened".into());
+        }
+        let mut f = match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(_) => return Err("the file couldn't be created".into()),
+        };
+        if f.write_all(bytes).and_then(|_| f.sync_all()).is_err() {
+            drop(f);
+            let _ = fs::remove_file(&target);
+            return Err("writing the file failed (disk full?)".into());
+        }
+        Ok(true)
     }
 }
 
@@ -212,6 +386,62 @@ mod tests {
         assert_eq!(rename_no_replace(&ro, &d.join("a.txt"), &d.join("c.txt")).unwrap_err(), crate::policy::READ_ONLY);
         rename_no_replace(&p, &d.join("a.txt"), &d.join("c.txt")).unwrap();
         assert!(d.join("c.txt").exists() && !d.join("a.txt").exists());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permanent_delete_never_follows_links_and_obeys_the_policy() {
+        let d = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-delete-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("Album/Sub")).unwrap();
+        fs::create_dir_all(d.join("Elsewhere")).unwrap();
+        fs::write(d.join("Elsewhere/precious.txt"), b"keep").unwrap();
+        fs::write(d.join("Album/a.jpg"), vec![1u8; 1000]).unwrap();
+        std::os::unix::fs::symlink(d.join("Elsewhere"), d.join("Album/Sub/to-elsewhere")).unwrap();
+        std::os::unix::fs::symlink(d.join("Elsewhere/precious.txt"), d.join("link.txt")).unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        // A link: only the link goes.
+        assert_eq!(delete_permanently(&p, &d.join("link.txt")).unwrap(), 0);
+        assert!(fs::symlink_metadata(d.join("link.txt")).is_err());
+        assert_eq!(fs::read(d.join("Elsewhere/precious.txt")).unwrap(), b"keep");
+        // Read-only and protected folders refuse.
+        let ro = Policy { read_only: true, protected: &store };
+        assert!(delete_permanently(&ro, &d.join("Album")).is_err());
+        store.set(&d.join("Album/Sub"), 0, true).unwrap();
+        assert!(delete_permanently(&p, &d.join("Album")).is_err(), "a protected folder inside");
+        store.set(&d.join("Album/Sub"), 0, false).unwrap();
+        // A folder with a link to elsewhere inside: the link's target survives.
+        assert_eq!(delete_permanently(&p, &d.join("Album")).unwrap(), 1000);
+        assert!(!d.join("Album").exists());
+        assert_eq!(fs::read(d.join("Elsewhere/precious.txt")).unwrap(), b"keep");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_new_never_replaces_or_follows_links() {
+        let d = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("real")).unwrap();
+        fs::write(d.join("taken.jpg"), b"original").unwrap();
+        let outside = d.join("outside.txt");
+        std::os::unix::fs::symlink(&outside, d.join("link.jpg")).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("dirlink")).unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        assert_eq!(create_new(&p, &d, "taken.jpg", b"new"), Ok(false));
+        assert_eq!(fs::read(d.join("taken.jpg")).unwrap(), b"original");
+        assert_eq!(create_new(&p, &d, "link.jpg", b"new"), Ok(false), "a dangling link counts as taken");
+        assert!(!outside.exists(), "the link target was never created");
+        assert!(create_new(&p, &d.join("dirlink"), "x.jpg", b"new").is_err(), "a linked folder is refused");
+        assert!(create_new(&p, &d, "../escape.jpg", b"new").is_err());
+        assert_eq!(create_new(&p, &d, "fresh.jpg", b"new"), Ok(true));
+        assert_eq!(fs::read(d.join("fresh.jpg")).unwrap(), b"new");
+        let ro = Policy { read_only: true, protected: &store };
+        assert_eq!(create_new(&ro, &d, "other.jpg", b"x").unwrap_err(), crate::policy::READ_ONLY);
+        assert!(!d.join("other.jpg").exists());
         fs::remove_dir_all(&d).unwrap();
     }
 

@@ -1,20 +1,34 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod archive;
+mod capture;
+mod drives;
 mod dupes;
 mod fileops;
 mod filetype;
+mod health;
 #[cfg(target_os = "macos")]
 mod heif;
+mod history;
 mod index;
 mod inspect;
+mod jobs;
+mod metadata;
+mod metascan;
+mod overwrite;
+#[cfg(target_os = "macos")]
+mod pdf;
 mod policy;
 mod privacy;
 mod probe;
 mod protocol;
 mod risk;
+mod sanitize;
 mod secure;
 mod similar;
+mod storage;
+mod tags;
 mod thumbs;
 mod video;
 mod worker;
@@ -78,6 +92,33 @@ pub struct AppState {
     protected: privacy::Store,
     /// Read-only Mode: every filesystem mutation is refused (policy.rs).
     read_only: AtomicBool,
+    /// Drives Mori knows about (Safe Inspection Mode settings).
+    drives: drives::Store,
+    /// The browsed root is in Safe Inspection Mode: no automatic decoding.
+    pub safe_mode: AtomicBool,
+    /// Media decoded since the current root was opened.
+    pub decoded: AtomicU64,
+    /// Drives connected while Mori runs, announced to the UI: key → (mount, label).
+    connected: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// Favorites (files and folders), per volume like private folders.
+    favorites: privacy::Store,
+    /// Local tags (names in Mori's app data, never in the files).
+    tags: tags::Store,
+    /// Temporary session: nothing about the browsed folder is written to disk.
+    pub temp: AtomicBool,
+    /// Screenshot corrections: never one / always one (per volume, like private folders).
+    capture_not: privacy::Store,
+    capture_yes: privacy::Store,
+    /// Undo history of file operations (this session, memory only).
+    history: history::History,
+    /// Media Health results (memory only).
+    health: Mutex<Option<health::Store>>,
+    health_running: AtomicBool,
+    health_job: Arc<jobs::Control>,
+    /// Sensitive Metadata scan results (memory only).
+    meta_scan: Mutex<Option<metascan::Store>>,
+    meta_running: AtomicBool,
+    meta_job: Arc<jobs::Control>,
 }
 
 type SimilarReply = (u64, std::sync::mpsc::Sender<Result<similar::Capture, similar::CaptureError>>);
@@ -153,6 +194,22 @@ impl AppState {
         self.index.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
+    /// Thumbnails are kept per volume, so "Forget this drive" can remove
+    /// exactly that drive's thumbnails.
+    pub fn thumb_dir_for(&self, canon: &Path) -> PathBuf {
+        let key = drives::key_of(&privacy::volume_of(canon));
+        self.thumb_dir.join(format!("v{:016x}", thumbs::fnv(key.as_bytes())))
+    }
+
+    /// Changes to Mori's own records are refused in a temporary session.
+    fn persistent(&self) -> Result<(), String> {
+        if self.temp.load(Ordering::SeqCst) {
+            Err("Not available in a temporary session: Mori isn't saving anything about this folder.".into())
+        } else {
+            Ok(())
+        }
+    }
+
     fn index_dir(&self) -> PathBuf {
         self.data_dir.join("index-v2")
     }
@@ -178,6 +235,12 @@ impl AppState {
                 is_dir: false,
                 is_link: false,
             });
+        }
+        if id.starts_with('m') {
+            let store = self.meta_scan.lock().unwrap_or_else(PoisonError::into_inner);
+            let (root, rel, ext, name) =
+                store.as_ref().ok_or("The scan was cleared.")?.locate(id).ok_or("Unknown file")?;
+            return Ok(Located { root, rel, ext, name, is_dir: false, is_link: false });
         }
         if id.starts_with('x') {
             let store = self.analysis.lock().unwrap_or_else(PoisonError::into_inner);
@@ -215,6 +278,9 @@ impl AppState {
         }
         if let Some(s) = self.similar.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
             v.extend(s.roots.iter().cloned());
+        }
+        if let Some(s) = self.meta_scan.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            v.extend(s.roots().cloned());
         }
         v
     }
@@ -364,6 +430,12 @@ struct Status {
     scan_count: usize,
     file_count: usize,
     scanned_at: i64,
+    /// Safe Inspection Mode for this drive (no automatic decoding).
+    safe_mode: bool,
+    /// Media decoded since this root was opened.
+    decoded: u64,
+    /// A temporary session: nothing about this folder is saved.
+    temporary: bool,
 }
 
 fn status(state: &AppState) -> Status {
@@ -376,6 +448,9 @@ fn status(state: &AppState) -> Status {
         scan_count: state.scan_count.load(Ordering::SeqCst),
         file_count: idx.files.len(),
         scanned_at: idx.scanned_at,
+        safe_mode: state.safe_mode.load(Ordering::SeqCst),
+        decoded: state.decoded.load(Ordering::Relaxed),
+        temporary: state.temp.load(Ordering::SeqCst),
     }
 }
 
@@ -390,6 +465,8 @@ fn publish_index(app: &AppHandle, mut idx: Index) {
     if let Some(root) = state.root_canon() {
         idx.apply_boundaries(&state.privacy.boundaries(&root));
         idx.apply_protection(&state.protected.boundaries(&root), state.protected.covering(&root).is_some());
+        idx.apply_capture(&state.capture_not.boundaries(&root), &state.capture_yes.boundaries(&root));
+        idx.apply_org(&state.favorites.boundaries(&root), &state.tags.for_root(&root));
     }
     *state.index.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(idx);
     let _ = app.emit("index-changed", ());
@@ -442,13 +519,15 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         if cancelled() {
             return;
         }
-        if index::save(&state.index_file(&root), &idx).is_err() {
-            debug_log!("mori: could not save index");
+        if !state.temp.load(Ordering::SeqCst) {
+            if index::save(&state.index_file(&root), &idx).is_err() {
+                debug_log!("mori: could not save index");
+            }
+            // Private folders moved or renamed outside Mori: follow them by inode.
+            let dirs: Vec<(&str, u64)> = idx.dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
+            state.privacy.reconcile(&root, &dirs);
+            state.protected.reconcile(&root, &dirs);
         }
-        // Private folders moved or renamed outside Mori: follow them by inode.
-        let dirs: Vec<(&str, u64)> = idx.dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
-        state.privacy.reconcile(&root, &dirs);
-        state.protected.reconcile(&root, &dirs);
         publish_index(&app, idx);
         state.scanning.store(false, Ordering::SeqCst);
         emit_status(&app);
@@ -464,6 +543,8 @@ fn open_root(app: &AppHandle, root: &Path) -> Result<(), String> {
     let name =
         canon.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| secure::plain_path(&canon));
     *state.root.write().unwrap_or_else(PoisonError::into_inner) = Some(RootInfo { canon: canon.clone(), name });
+    state.safe_mode.store(state.drives.safe_for(&canon), Ordering::SeqCst);
+    state.decoded.store(0, Ordering::SeqCst);
     state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
     let cached = index::load(&state.index_file(&canon), &canon).unwrap_or_default();
     publish_index(app, cached);
@@ -564,6 +645,7 @@ async fn choose_root(app: AppHandle) -> Result<Status, String> {
         return Err("cancelled".into());
     };
     let path = picked.into_path().map_err(|_| "That folder can't be opened")?;
+    app.state::<AppState>().temp.store(false, Ordering::SeqCst);
     open_root(&app, &path)?;
     let state = app.state::<AppState>();
     let canon = state.root_canon().unwrap();
@@ -660,6 +742,8 @@ struct Inspection {
     mismatch: bool,
     /// Container/codec details for videos.
     video: Option<video::VideoInfo>,
+    /// Automatic previews are off (Safe Inspection Mode).
+    previews_off: bool,
 }
 
 /// Decide how (and whether) a file may be previewed, from its magic bytes.
@@ -674,18 +758,27 @@ async fn inspect(state: State<'_, AppState>, id: String) -> Result<Inspection, S
         Some(expected) => !expected.contains(&detected),
         None => detected.is_image() || detected.is_video() || detected == Detected::Executable,
     };
+    let ft = filetype::detect(&head, meta.len());
     let preview = if detected.is_image() {
         "image"
     } else if video.as_ref().is_some_and(|v| v.status == video::VideoStatus::Playable) {
         "video"
     } else if detected == Detected::Text {
         "text"
+    } else if detected == Detected::Pdf && cfg!(target_os = "macos") {
+        "pdf"
+    } else if matches!(ft.id, "zip" | "tar" | "gzip" | "jar" | "ooxml" | "odf" | "epub") {
+        "archive"
+    } else if protocol::audio_mime(&head, meta.len()).is_some() {
+        "audio"
     } else {
         "none"
     };
+    let previews_off =
+        state.safe_mode.load(Ordering::SeqCst) && state.root_canon().is_some_and(|r| canon.starts_with(r));
     // A file whose content contradicts its name is suspicious: never hand it to another app.
     let can_open = !mismatch && secure::may_open_externally(&ext, detected);
-    Ok(Inspection { detected, preview, can_open, mismatch, video })
+    Ok(Inspection { detected, preview, can_open, mismatch, video, previews_off })
 }
 
 /// Begin the (single) active media session for a video about to be loaded by
@@ -768,19 +861,23 @@ async fn store_frame(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result
     let Some(id) = request.headers().get("mori-id").and_then(|v| v.to_str().ok()).map(str::to_owned) else {
         return Ok(false);
     };
+    let frame = request.headers().get("mori-frame").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u32>().ok());
+    let explicit = request.headers().get("mori-explicit").is_some();
     let tauri::ipc::InvokeBody::Raw(body) = request.body() else { return Ok(false) };
     let body = body.clone();
     // The worker can take seconds; never block the async runtime or the UI thread.
-    tauri::async_runtime::spawn_blocking(move || protocol::store_frame(&app.state::<AppState>(), &id, body))
-        .await
-        .map_err(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        protocol::store_frame(&app.state::<AppState>(), &id, body, frame, explicit)
+    })
+    .await
+    .map_err(|_| ())
 }
 
 // ------------------------------------------------------- file management
 
 /// Remove a file's cached thumbnails (it is about to disappear or change name).
 fn invalidate_thumbs(state: &AppState, canon: &Path, meta: &fs::Metadata) {
-    let stem = thumbs::stem(&state.thumb_dir, canon, meta, protocol::THUMB_SIZE);
+    let stem = thumbs::stem(&state.thumb_dir_for(canon), canon, meta, protocol::THUMB_SIZE);
     for ext in ["jpg", "png", "none"] {
         let _ = fs::remove_file(stem.with_extension(ext));
     }
@@ -791,7 +888,7 @@ fn apply_index_change(app: &AppHandle, change: impl FnOnce(&mut Index)) {
     let state = app.state::<AppState>();
     let mut idx = (*state.index()).clone();
     change(&mut idx);
-    if let Some(root) = state.root_canon() {
+    if let Some(root) = state.root_canon().filter(|_| !state.temp.load(Ordering::SeqCst)) {
         if index::save(&state.index_file(&root), &idx).is_err() {
             debug_log!("mori: could not save index");
         }
@@ -858,6 +955,7 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
         let mut out = TrashResult { trashed: Vec::new(), bytes: 0, failed: Vec::new() };
         let mut removed_rels = Vec::new();
         let mut removed_abs = Vec::new();
+        let mut changes = Vec::new();
         for id in ids.iter().take(100_000) {
             let loc = match state.locate(id) {
                 Ok(l) => l,
@@ -883,12 +981,13 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
                 invalidate_thumbs(&state, &path, &meta);
             }
             match fileops::move_to_trash(&state.policy(), &path) {
-                Ok(()) => {
+                Ok(trashed) => {
                     out.trashed.push(id.clone());
                     out.bytes += bytes;
                     if let Some(rel) = browser_rel(&state, &path) {
                         removed_rels.push(rel);
                     }
+                    changes.push(history::Change::Trashed { original: path.clone(), trashed });
                     removed_abs.push(path);
                 }
                 Err(e) => out.failed.push(dupes::Failure { path: shown, reason: e }),
@@ -898,10 +997,25 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
             apply_index_change(&app, |idx| idx.remove_paths(&removed_rels));
         }
         forget_removed(&state, &removed_abs);
+        state.history.record(trash_label(&changes), changes);
         out
     })
     .await
     .map_err(|_| "The operation failed.".to_string())
+}
+
+fn trash_label(changes: &[history::Change]) -> String {
+    match changes {
+        [history::Change::Trashed { original, .. }] => {
+            format!(
+                "Moved “{}” to Trash",
+                secure::display_safe(
+                    &original.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                )
+            )
+        }
+        c => format!("Moved {} items to Trash", c.len()),
+    }
 }
 
 /// Drop removed files (or files inside removed folders) from both analyses.
@@ -944,9 +1058,21 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
         invalidate_thumbs(&state, &path, &meta);
     }
     fileops::rename_no_replace(&state.policy(), &path, &target)?;
+    state.history.record(
+        format!(
+            "Renamed “{}” to “{}”",
+            secure::display_safe(&path.file_name().unwrap_or_default().to_string_lossy()),
+            secure::display_safe(&target.file_name().unwrap_or_default().to_string_lossy())
+        ),
+        vec![history::Change::Renamed { from: path.clone(), to: target.clone() }],
+    );
     if meta.is_dir() {
         // A private folder (or one containing private folders) keeps its privacy.
         state.privacy.renamed(&path, &target);
+        state.capture_not.renamed(&path, &target);
+        state.capture_yes.renamed(&path, &target);
+        state.favorites.renamed(&path, &target);
+        state.tags.renamed(&path, &target);
     }
     let old_rel = loc.rel.clone();
     let new_rel = match old_rel.rsplit_once('/') {
@@ -982,7 +1108,8 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
                 let head = secure::read_head(&mut f, secure::SNIFF_LEN);
                 let detected = secure::sniff(&head, &loc.ext);
                 let _ = std::io::Seek::rewind(&mut f);
-                ctx.decode_failed = thumbs::is_miss(&thumbs::stem(&state.thumb_dir, &canon, &m, protocol::THUMB_SIZE));
+                ctx.decode_failed =
+                    thumbs::is_miss(&thumbs::stem(&state.thumb_dir_for(&canon), &canon, &m, protocol::THUMB_SIZE));
                 if detected.is_video() {
                     let status = state.video_info(&canon, &m, detected).status;
                     ctx.media_blocked = status == video::VideoStatus::Blocked;
@@ -1004,6 +1131,879 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
     .map_err(|_| "The report failed.".to_string())?
 }
 
+// ---------------------------------------------------- operations, undo
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanEntry {
+    id: String,
+    name: String,
+    path: String,
+    kind: &'static str,
+    bytes: u64,
+    files: u64,
+    /// Refused (by the mutation policy or because it's gone), with the reason.
+    blocked: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationPlan {
+    op: String,
+    entries: Vec<PlanEntry>,
+    total_bytes: u64,
+    total_files: u64,
+    blocked: usize,
+    /// Large or folder deletions must be confirmed by typing DELETE.
+    needs_typed_confirm: bool,
+    /// `None`: Secure Overwrite is meaningful here; otherwise why it isn't.
+    overwrite_unavailable: Option<String>,
+}
+
+const TYPED_CONFIRM_ITEMS: usize = 25;
+const TYPED_CONFIRM_FILES: u64 = 100;
+const TYPED_CONFIRM_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn plan(state: &AppState, op: &str, ids: &[String]) -> Result<(OperationPlan, Vec<PathBuf>), String> {
+    let pop = match op {
+        "trash" => policy::Op::Trash,
+        "delete" | "overwrite" => policy::Op::Delete,
+        _ => return Err("Unknown operation".into()),
+    };
+    let policy = state.policy();
+    let idx = state.index();
+    let mut entries = Vec::new();
+    let mut paths = Vec::new();
+    let mut vols: HashMap<String, Option<String>> = HashMap::new();
+    for id in ids.iter().take(100_000) {
+        let Ok(loc) = state.locate(id) else { continue };
+        let shown = secure::display_safe(&loc.rel);
+        let name = secure::display_safe(&loc.name);
+        let (path, meta) = match fileops::confined_item(&loc.root, &loc.rel) {
+            Ok(v) => v,
+            Err(e) => {
+                entries.push(PlanEntry {
+                    id: id.clone(),
+                    name,
+                    path: shown,
+                    kind: "file",
+                    bytes: 0,
+                    files: 0,
+                    blocked: Some(e),
+                    note: None,
+                });
+                paths.push(PathBuf::new());
+                continue;
+            }
+        };
+        let ft = meta.file_type();
+        let (kind, bytes, files) = if ft.is_symlink() {
+            ("link", 0, 0)
+        } else if ft.is_dir() {
+            let prefix = format!("{}/", loc.rel);
+            let (b, n) =
+                idx.files.iter().filter(|e| e.path.starts_with(&prefix)).fold((0, 0), |(b, n), e| (b + e.size, n + 1));
+            ("folder", b, n)
+        } else {
+            ("file", meta.len(), 1)
+        };
+        let mut blocked = policy.check(pop, &path).err();
+        if blocked.is_none() && op == "overwrite" {
+            blocked = policy.check(policy::Op::Overwrite, &path).err();
+        }
+        let note = (kind == "link")
+            .then(|| "Only the link itself is removed; what it points to is never touched.".to_string());
+        let vol = drives::key_of(&privacy::volume_of(&path));
+        vols.entry(vol).or_insert_with(|| overwrite::eligibility(&path).err());
+        entries.push(PlanEntry { id: id.clone(), name, path: shown, kind, bytes, files, blocked, note });
+        paths.push(path);
+    }
+    let ok = || entries.iter().filter(|e| e.blocked.is_none());
+    let total_bytes = ok().map(|e| e.bytes).sum();
+    let total_files = ok().map(|e| e.files).sum();
+    let blocked = entries.iter().filter(|e| e.blocked.is_some()).count();
+    let needs_typed_confirm = op != "trash"
+        && (entries.len() > TYPED_CONFIRM_ITEMS
+            || total_files > TYPED_CONFIRM_FILES
+            || total_bytes > TYPED_CONFIRM_BYTES
+            || ok().any(|e| e.kind == "folder"));
+    let overwrite_unavailable =
+        if vols.is_empty() { Some("Nothing to overwrite.".to_string()) } else { vols.into_values().flatten().next() };
+    Ok((
+        OperationPlan {
+            op: op.to_owned(),
+            entries,
+            total_bytes,
+            total_files,
+            blocked,
+            needs_typed_confirm,
+            overwrite_unavailable,
+        },
+        paths,
+    ))
+}
+
+/// A dry run: what an operation would do to each item, and what the
+/// mutation policy refuses — nothing is changed.
+#[tauri::command]
+async fn plan_operation(app: AppHandle, op: String, ids: Vec<String>) -> Result<OperationPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || plan(&app.state::<AppState>(), &op, &ids).map(|p| p.0))
+        .await
+        .map_err(|_| "The plan couldn't be made.".to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteResult {
+    deleted: Vec<String>,
+    bytes: u64,
+    failed: Vec<dupes::Failure>,
+}
+
+/// Delete permanently (no Trash), optionally overwriting file contents first
+/// where that is meaningful. Re-plans and re-checks everything here; large
+/// batches and folders require the typed confirmation "DELETE".
+#[tauri::command]
+async fn delete_items(
+    app: AppHandle,
+    ids: Vec<String>,
+    overwrite: bool,
+    confirm: String,
+) -> Result<DeleteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (plan, paths) = plan(&state, if overwrite { "overwrite" } else { "delete" }, &ids)?;
+        if plan.needs_typed_confirm && confirm != "DELETE" {
+            return Err("Type DELETE to confirm this permanent deletion.".into());
+        }
+        if overwrite {
+            if let Some(why) = &plan.overwrite_unavailable {
+                return Err(format!("Secure Overwrite isn't available here: {why}"));
+            }
+        }
+        let policy = state.policy();
+        let mut out = DeleteResult { deleted: Vec::new(), bytes: 0, failed: Vec::new() };
+        let mut rels = Vec::new();
+        let mut gone = Vec::new();
+        let mut changes = Vec::new();
+        for (e, path) in plan.entries.iter().zip(paths) {
+            if let Some(b) = &e.blocked {
+                out.failed.push(dupes::Failure { path: e.path.clone(), reason: b.clone() });
+                continue;
+            }
+            if let Ok(m) = fs::symlink_metadata(&path) {
+                if m.is_file() {
+                    invalidate_thumbs(&state, &path, &m);
+                }
+            }
+            let r = if overwrite && e.kind != "link" {
+                overwrite_tree(&policy, &path)
+            } else {
+                fileops::delete_permanently(&policy, &path)
+            };
+            match r {
+                Ok(b) => {
+                    out.deleted.push(e.id.clone());
+                    out.bytes += b;
+                    if let Some(rel) = browser_rel(&state, &path) {
+                        rels.push(rel);
+                    }
+                    changes.push(history::Change::Deleted { path: path.clone() });
+                    gone.push(path);
+                }
+                Err(reason) => out.failed.push(dupes::Failure { path: e.path.clone(), reason }),
+            }
+        }
+        if !rels.is_empty() {
+            apply_index_change(&app, |idx| idx.remove_paths(&rels));
+        }
+        forget_removed(&state, &gone);
+        let n = changes.len();
+        state.history.record(
+            format!(
+                "{} {n} item{} permanently",
+                if overwrite { "Overwrote and deleted" } else { "Deleted" },
+                if n == 1 { "" } else { "s" }
+            ),
+            changes,
+        );
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "The deletion stopped unexpectedly.".to_string())?
+}
+
+/// Overwrite every regular file under `path` (never through a link), then
+/// remove what remains (folders, links).
+fn overwrite_tree(policy: &policy::Policy, path: &Path) -> Result<u64, String> {
+    let meta = fs::symlink_metadata(path).map_err(|_| "file no longer exists".to_string())?;
+    if meta.is_file() {
+        return overwrite::overwrite_and_delete(policy, path);
+    }
+    let mut bytes = 0;
+    for e in walkdir::WalkDir::new(path).follow_links(false).into_iter() {
+        let e = e.map_err(|_| "a folder couldn't be read".to_string())?;
+        if e.file_type().is_file() {
+            bytes += overwrite::overwrite_and_delete(policy, e.path())?;
+        }
+    }
+    fileops::delete_permanently(policy, path)?;
+    Ok(bytes)
+}
+
+#[tauri::command]
+fn history_list(state: State<'_, AppState>) -> Vec<history::RecordView> {
+    state.history.list()
+}
+
+/// Undo one operation (`None` = the most recent one that can be undone).
+#[tauri::command]
+async fn history_undo(app: AppHandle, id: Option<u64>) -> Result<history::UndoOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let id = id.or_else(|| state.history.last_undoable()).ok_or("Nothing to undo.")?;
+        let out = state.history.undo(id, &state.policy())?;
+        // Restored or renamed items: let the index pick them up.
+        if out.touched.iter().any(|p| state.root_canon().is_some_and(|r| p.starts_with(r))) {
+            start_scan(&app);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "Undo failed.".to_string())?
+}
+
+// ------------------------------------------------------- favorites, tags
+
+/// Canonical paths of browser items (files and folders, never through a link).
+fn browser_paths(state: &AppState, ids: &[String]) -> Result<Vec<PathBuf>, String> {
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let idx = state.index();
+    ids.iter()
+        .take(10_000)
+        .map(|id| {
+            let e = idx.get(id).ok_or("Unknown item")?;
+            if e.kind == index::Kind::Link
+                || Path::new(&e.path).components().any(|c| !matches!(c, Component::Normal(_)))
+            {
+                return Err("Links can't be tagged".to_string());
+            }
+            Ok(root.join(&e.path))
+        })
+        .collect()
+}
+
+/// Add or remove items from Favorites. Only Mori's records change.
+#[tauri::command]
+fn set_favorite(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>, on: bool) -> Result<(), String> {
+    state.persistent()?;
+    for p in browser_paths(&state, &ids)? {
+        state.favorites.set(&p, 0, on)?;
+    }
+    publish_index(&app, (*state.index()).clone());
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TagInfo {
+    id: u32,
+    name: String,
+    /// Items with this tag on the browsed drive (outside private folders).
+    count: usize,
+}
+
+#[tauri::command]
+fn tags_list(state: State<'_, AppState>) -> Vec<TagInfo> {
+    let idx = state.index();
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for e in idx.files.iter().chain(idx.dirs.iter()).filter(|e| e.visible_from("")) {
+        for t in &e.tags {
+            *counts.entry(*t).or_default() += 1;
+        }
+    }
+    state
+        .tags
+        .list()
+        .into_iter()
+        .map(|t| TagInfo {
+            count: counts.get(&t.id).copied().unwrap_or(0),
+            id: t.id,
+            name: secure::display_safe(&t.name),
+        })
+        .collect()
+}
+
+/// Add (`on`) or remove the tag called `name` on items. Never touches the files.
+#[tauri::command]
+fn tag_items(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    name: String,
+    on: bool,
+) -> Result<u32, String> {
+    state.persistent()?;
+    let paths = browser_paths(&state, &ids)?;
+    let id = state.tags.ensure(&name)?;
+    state.tags.assign(&paths, id, on)?;
+    publish_index(&app, (*state.index()).clone());
+    Ok(id)
+}
+
+#[tauri::command]
+fn tag_rename(app: AppHandle, state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
+    state.persistent()?;
+    state.tags.rename(id, &name)?;
+    publish_index(&app, (*state.index()).clone());
+    Ok(())
+}
+
+/// Delete a tag everywhere (the tagged files are not touched).
+#[tauri::command]
+fn tag_delete(app: AppHandle, state: State<'_, AppState>, id: u32) -> Result<(), String> {
+    state.persistent()?;
+    state.tags.delete(id)?;
+    publish_index(&app, (*state.index()).clone());
+    Ok(())
+}
+
+// --------------------------------------------- sessions and forgetting
+
+/// Browse a folder without leaving anything behind: no index cache, no
+/// thumbnails on disk, no remembered folder, no records. Everything stays
+/// in memory and is gone when another folder is opened or Mori quits.
+#[tauri::command]
+async fn open_temporary(app: AppHandle) -> Result<Status, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().set_title("Browse without indexing").blocking_pick_folder().ok_or("cancelled")?;
+    let path = picked.into_path().map_err(|_| "That folder can't be opened")?;
+    let state = app.state::<AppState>();
+    state.temp.store(true, Ordering::SeqCst);
+    state.volatile_thumbs.clear();
+    open_root(&app, &path)?;
+    Ok(status(&state))
+}
+
+/// Leave a temporary session and go back to the last saved folder.
+#[tauri::command]
+fn end_temporary(app: AppHandle, state: State<'_, AppState>) -> Result<Status, String> {
+    if !state.temp.swap(false, Ordering::SeqCst) {
+        return Ok(status(&state));
+    }
+    state.volatile_thumbs.clear();
+    state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    let saved = read_settings(&state).root.map(PathBuf::from);
+    match saved {
+        Some(p) if open_root(&app, &p).is_ok() => {}
+        _ => {
+            *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+            publish_index(&app, Index::default());
+        }
+    }
+    Ok(status(&state))
+}
+
+/// Remove a file or folder Mori created in its own app directories. Refuses
+/// anything else, so nothing on a user's drive can ever be deleted here.
+fn remove_app_path(state: &AppState, p: &Path) {
+    let cache = state.thumb_dir.parent().unwrap_or(&state.thumb_dir);
+    if !inside_app_dirs(p, &state.data_dir, cache) {
+        return;
+    }
+    if p.is_dir() {
+        let _ = fs::remove_dir_all(p);
+    } else {
+        let _ = fs::remove_file(p);
+    }
+}
+
+/// Strictly inside one of Mori's own directories (never the directory
+/// itself, never through `..`).
+fn inside_app_dirs(p: &Path, data: &Path, cache: &Path) -> bool {
+    !p.components().any(|c| matches!(c, Component::ParentDir))
+        && [data, cache].iter().any(|d| p.starts_with(d) && p != *d && d.components().count() > 2)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Forgotten {
+    drive: String,
+    indexes: usize,
+}
+
+/// "Forget this drive": remove everything Mori knows about the current
+/// drive — its index caches, thumbnails, and its private, protected,
+/// favorite, tag and screenshot records — then close it. Nothing on the
+/// drive itself is read for this or changed.
+#[tauri::command]
+fn forget_drive(app: AppHandle, state: State<'_, AppState>) -> Result<Forgotten, String> {
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let forgotten = forget_data(&state, &root);
+    clear_session(&state);
+    *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+    write_settings(&state, |s| s.root = None)?;
+    publish_index(&app, Index::default());
+    emit_status(&app);
+    Ok(forgotten)
+}
+
+/// Remove Mori's own data about the volume holding `root`.
+fn forget_data(state: &AppState, root: &Path) -> Forgotten {
+    let vol = privacy::volume_of(root);
+    let drive = drive_of(root);
+    state.scan_gen.fetch_add(1, Ordering::SeqCst);
+    // Index caches of any folder on this volume (the cache records its root).
+    let mut indexes = 0;
+    if let Ok(rd) = fs::read_dir(state.index_dir()) {
+        for f in rd.flatten() {
+            let p = f.path();
+            let on_volume = fs::read(&p)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| v.get("root").and_then(|r| r.as_str()).map(PathBuf::from))
+                .is_some_and(|r| {
+                    r.starts_with(&vol.mount) && drives::key_of(&privacy::volume_of(&r)) == drives::key_of(&vol)
+                });
+            if on_volume {
+                remove_app_path(state, &p);
+                indexes += 1;
+            }
+        }
+    }
+    remove_app_path(state, &state.thumb_dir_for(root));
+    for store in [&state.privacy, &state.protected, &state.favorites, &state.capture_not, &state.capture_yes] {
+        store.forget_volume(&vol);
+    }
+    state.tags.forget_volume(&vol);
+    state.drives.forget(&drives::key_of(&vol));
+    Forgotten { drive, indexes }
+}
+
+/// Debug builds only: `MORI_DEBUG_OPS=<scratch folder>` builds a small tree
+/// in that folder and exercises the operation commands end to end (plan,
+/// typed confirmation, overwrite refusal, Trash and Undo, permanent delete).
+fn debug_ops(app: &AppHandle) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(dir) = std::env::var_os("MORI_DEBUG_OPS").map(PathBuf::from) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Album/Keep")).unwrap();
+        fs::write(dir.join("Album/a.jpg"), vec![1u8; 2000]).unwrap();
+        fs::write(dir.join("Album/Keep/b.jpg"), vec![2u8; 3000]).unwrap();
+        fs::write(dir.join("loose.txt"), b"loose").unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        open_root(&app, &dir).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        while state.scanning.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let id = |rel: &str| index::id_str(index::id_for(rel));
+        state.protected.set(&dir.join("Album/Keep"), 0, true).unwrap();
+        let (p, _) = plan(&state, "delete", &[id("Album"), id("loose.txt")]).unwrap();
+        eprintln!(
+            "mori: DEBUG ops plan: entries={} blocked={:?} typed={} overwrite={:?}",
+            p.entries.len(),
+            p.entries.iter().map(|e| (e.path.clone(), e.blocked.clone())).collect::<Vec<_>>(),
+            p.needs_typed_confirm,
+            p.overwrite_unavailable
+        );
+        state.protected.set(&dir.join("Album/Keep"), 0, false).unwrap();
+        let no_confirm =
+            tauri::async_runtime::block_on(delete_items(app.clone(), vec![id("Album")], false, String::new()));
+        let overwrite =
+            tauri::async_runtime::block_on(delete_items(app.clone(), vec![id("loose.txt")], true, String::new()));
+        eprintln!(
+            "mori: DEBUG ops refusals: no-confirm={:?} overwrite={:?} album-still-there={}",
+            no_confirm.err(),
+            overwrite.err(),
+            dir.join("Album/a.jpg").exists()
+        );
+        let t = tauri::async_runtime::block_on(trash_items(app.clone(), vec![id("loose.txt")])).unwrap();
+        let gone = !dir.join("loose.txt").exists();
+        let u = tauri::async_runtime::block_on(history_undo(app.clone(), None));
+        eprintln!(
+            "mori: DEBUG ops trash+undo: trashed={} gone={gone} undo={:?} back={}",
+            t.trashed.len(),
+            u.map(|o| (o.restored, o.failed)),
+            fs::read(dir.join("loose.txt")).is_ok_and(|b| b == b"loose")
+        );
+        let d = tauri::async_runtime::block_on(delete_items(app.clone(), vec![id("Album")], false, "DELETE".into()))
+            .unwrap();
+        let hist = state.history.list();
+        eprintln!(
+            "mori: DEBUG ops delete: deleted={} bytes={} album-gone={} history={:?}",
+            d.deleted.len(),
+            d.bytes,
+            !dir.join("Album").exists(),
+            hist.iter().map(|h| (h.label.clone(), h.undoable, h.note.clone())).collect::<Vec<_>>()
+        );
+        eprintln!("mori: DEBUG ops done");
+    });
+}
+
+/// Debug builds only: `MORI_DEBUG_ORG=<folder>` checks on the real app that a
+/// temporary session writes nothing, and that forgetting the folder's drive
+/// removes only Mori's data (the folder itself is compared before and after).
+/// Settings are never written.
+fn debug_org(app: &AppHandle) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(dir) = std::env::var_os("MORI_DEBUG_ORG").map(PathBuf::from) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let snap = |base: &Path| -> std::collections::BTreeMap<String, (u64, u128)> {
+            walkdir::WalkDir::new(base)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.file_type().is_file())
+                .filter_map(|e| {
+                    let m = e.metadata().ok()?;
+                    Some((e.path().to_string_lossy().into_owned(), (m.len(), dupes::mtime_ns(&m))))
+                })
+                .collect()
+        };
+        let cache = state.thumb_dir.parent().unwrap_or(&state.thumb_dir).to_path_buf();
+        let wait_scan = || {
+            std::thread::sleep(Duration::from_millis(300));
+            while state.scanning.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        std::thread::sleep(Duration::from_secs(2));
+        wait_scan();
+        let canon = fs::canonicalize(&dir).unwrap();
+        let _ = fs::remove_file(state.index_file(&canon));
+        let (data0, cache0, drive0) = (snap(&state.data_dir), snap(&cache), snap(&canon));
+        state.temp.store(true, Ordering::SeqCst);
+        open_root(&app, &canon).unwrap();
+        wait_scan();
+        let files = state.index().files.len();
+        let refused = state.persistent().is_err();
+        let (data1, cache1) = (snap(&state.data_dir), snap(&cache));
+        let diff = |a: &std::collections::BTreeMap<String, (u64, u128)>,
+                    b: &std::collections::BTreeMap<String, (u64, u128)>| {
+            b.iter().filter(|(k, v)| a.get(*k) != Some(v)).map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        };
+        eprintln!("mori: DEBUG org temp: indexed {files} files; app-data changes={:?} cache changes={:?} records-refused={refused}", diff(&data0, &data1), diff(&cache0, &cache1));
+        state.temp.store(false, Ordering::SeqCst);
+        open_root(&app, &canon).unwrap();
+        wait_scan();
+        let saved = state.index_file(&canon).exists();
+        let first = state.index().files.first().map(|e| canon.join(&e.path));
+        if let Some(f) = &first {
+            state.favorites.set(f, 0, true).unwrap();
+            let t = state.tags.ensure("debug-forget").unwrap();
+            state.tags.assign(std::slice::from_ref(f), t, true).unwrap();
+        }
+        let before_forget = (state.favorites.boundaries(&canon).len(), state.tags.for_root(&canon).len());
+        let r = forget_data(&state, &canon);
+        let after = (
+            state.favorites.boundaries(&canon).len(),
+            state.tags.for_root(&canon).len(),
+            state.index_file(&canon).exists(),
+            state.thumb_dir_for(&canon).exists(),
+        );
+        let drive1 = snap(&canon);
+        if let Some(t) = state.tags.list().iter().find(|t| t.name == "debug-forget") {
+            let _ = state.tags.delete(t.id);
+        }
+        eprintln!(
+            "mori: DEBUG org normal: index saved={saved}; before forget favorites/tags={before_forget:?}; forgot {} indexes; after (favorites, tags, index exists, thumbs exist)={after:?}; drive unchanged={}",
+            r.indexes,
+            drive0 == drive1
+        );
+        eprintln!("mori: DEBUG org done");
+    });
+}
+
+fn clear_session(state: &AppState) {
+    state.analysis_cancel.store(true, Ordering::SeqCst);
+    state.similar_cancel.store(true, Ordering::SeqCst);
+    state.meta_job.cancel();
+    state.health_job.cancel();
+    *state.analysis.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *state.meta_scan.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *state.health.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.connected.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.history.clear();
+    state.volatile_thumbs.clear();
+    state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
+}
+
+/// "Clear Session Data": forget what this session holds in memory — analysis
+/// results, folders picked for analysis, in-memory previews. Unlike Clear
+/// Cache it keeps thumbnails and indexes; unlike Forget Drive it keeps every
+/// record; it never touches files.
+#[tauri::command]
+fn clear_session_data(state: State<'_, AppState>) {
+    clear_session(&state);
+}
+
+// ---------------------------------------------------------------- storage
+
+/// Where the space goes on the browsed drive (from the index; nothing is read).
+#[tauri::command]
+fn storage_report(state: State<'_, AppState>, folder: String) -> Result<storage::Report, String> {
+    let idx = state.index();
+    let rel = idx.folder_path(&folder).ok_or("Unknown folder")?.to_owned();
+    Ok(storage::report(&idx, &rel))
+}
+
+/// Folders without files, each re-checked on disk (hidden items count).
+#[tauri::command]
+async fn empty_folders(app: AppHandle) -> Result<Vec<storage::EmptyFolder>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let root = state.root_canon().ok_or("No folder selected")?;
+        Ok(storage::empty_folders(&state.index(), &root))
+    })
+    .await
+    .map_err(|_| "The check failed.".to_string())?
+}
+
+/// Move the chosen empty folders to the Trash, re-verifying each on disk
+/// right before (never a permanent delete; protected folders are refused by
+/// the mutation policy).
+#[tauri::command]
+async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut out = TrashResult { trashed: Vec::new(), bytes: 0, failed: Vec::new() };
+        let mut removed = Vec::new();
+        let mut changes = Vec::new();
+        for id in ids.iter().take(10_000) {
+            let Ok(loc) = state.locate(id) else { continue };
+            let shown = secure::display_safe(&loc.rel);
+            if !loc.is_dir {
+                out.failed.push(dupes::Failure { path: shown, reason: "not a folder".into() });
+                continue;
+            }
+            let path = match fileops::confined_item(&loc.root, &loc.rel) {
+                Ok((p, m)) if m.is_dir() => p,
+                Ok(_) => {
+                    out.failed.push(dupes::Failure { path: shown, reason: "not a folder".into() });
+                    continue;
+                }
+                Err(e) => {
+                    out.failed.push(dupes::Failure { path: shown, reason: e });
+                    continue;
+                }
+            };
+            if let Err(e) = storage::verify_empty(&path) {
+                out.failed.push(dupes::Failure { path: shown, reason: format!("no longer empty: {e}") });
+                continue;
+            }
+            match fileops::move_to_trash(&state.policy(), &path) {
+                Ok(trashed) => {
+                    out.trashed.push(id.clone());
+                    removed.push(loc.rel.clone());
+                    changes.push(history::Change::Trashed { original: path.clone(), trashed });
+                }
+                Err(e) => out.failed.push(dupes::Failure { path: shown, reason: e }),
+            }
+        }
+        if !removed.is_empty() {
+            apply_index_change(&app, |idx| idx.remove_paths(&removed));
+        }
+        state.history.record(
+            format!("Moved {} empty folder{} to Trash", changes.len(), if changes.len() == 1 { "" } else { "s" }),
+            changes,
+        );
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "The operation failed.".to_string())?
+}
+
+// ------------------------------------------- screenshots and recordings
+
+/// Correct the screenshot / screen-recording guess for one file:
+/// "auto" (Mori's guess), "not" or "yes". Only Mori's view changes.
+#[tauri::command]
+fn set_capture_override(app: AppHandle, state: State<'_, AppState>, id: String, mode: String) -> Result<(), String> {
+    state.persistent()?;
+    let loc = state.locate(&id)?;
+    if loc.is_dir || loc.is_link || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Only files in the browsed folder can be corrected.".into());
+    }
+    let path = loc.root.join(&loc.rel);
+    let (not, yes) = match mode.as_str() {
+        "auto" => (false, false),
+        "not" => (true, false),
+        "yes" => (false, true),
+        _ => return Err("Unknown choice".into()),
+    };
+    state.capture_not.set(&path, 0, not)?;
+    state.capture_yes.set(&path, 0, yes)?;
+    let idx = (*state.index()).clone();
+    publish_index(&app, idx);
+    Ok(())
+}
+
+// ------------------------------------------------- PDFs and archives
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PdfInfo {
+    pages: u32,
+    encrypted: bool,
+    locked: bool,
+    title: Option<String>,
+    author: Option<String>,
+    creator: Option<String>,
+    producer: Option<String>,
+    subject: Option<String>,
+    /// Present in the document (never run by Mori).
+    javascript: bool,
+    open_action: bool,
+    embedded_files: bool,
+    forms: bool,
+}
+
+/// Facts about a PDF, read by the sandboxed worker (macOS CoreGraphics).
+#[tauri::command]
+async fn pdf_info(app: AppHandle, id: String, explicit: bool) -> Result<PdfInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (mut file, meta, canon, ext) = state.open_by_id(&id)?;
+        if !explicit
+            && state.safe_mode.load(Ordering::SeqCst)
+            && state.root_canon().is_some_and(|r| canon.starts_with(r))
+        {
+            return Err("Previews are off for this drive (Safe Inspection Mode).".to_string());
+        }
+        let head = secure::read_head(&mut file, secure::SNIFF_LEN);
+        if secure::sniff(&head, &ext) != Detected::Pdf {
+            return Err("Not a PDF".into());
+        }
+        let _ = std::io::Seek::rewind(&mut file);
+        let bytes =
+            secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| "This PDF is too large to inspect.")?;
+        let out = worker::run(worker::Op::PdfInfo, 64, bytes, Duration::from_secs(15))
+            .map_err(|_| "This PDF could not be read safely.")?;
+        let text = String::from_utf8_lossy(&out.bytes);
+        let mut info = PdfInfo::default();
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = secure::display_safe(v);
+            match k {
+                "pages" => info.pages = v.parse().unwrap_or(0),
+                "encrypted" => info.encrypted = v == "true",
+                "locked" => info.locked = v == "true",
+                "title" => info.title = Some(v),
+                "author" => info.author = Some(v),
+                "creator" => info.creator = Some(v),
+                "producer" => info.producer = Some(v),
+                "subject" => info.subject = Some(v),
+                "javascript" => info.javascript = v == "true",
+                "openaction" => info.open_action = v == "true",
+                "embedded" => info.embedded_files = v == "true",
+                "forms" => info.forms = v == "true",
+                _ => {}
+            }
+        }
+        Ok(info)
+    })
+    .await
+    .map_err(|_| "The PDF could not be read.".to_string())?
+}
+
+/// List an archive's contents without extracting anything (archive.rs).
+#[tauri::command]
+async fn archive_listing(app: AppHandle, id: String) -> Result<archive::Listing, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (mut file, meta, _, _) = state.open_by_id(&id)?;
+        let head = secure::read_head(&mut file, filetype::HEAD_LEN);
+        let kind = filetype::detect(&head, meta.len()).id;
+        catch_unwind(AssertUnwindSafe(|| archive::inspect(&mut file, meta.len(), kind)))
+            .unwrap_or_else(|_| Err("The archive could not be read safely.".into()))
+    })
+    .await
+    .map_err(|_| "The archive could not be read.".to_string())?
+}
+
+// ------------------------------------------------- safe inspection mode
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ConnectedDrive {
+    key: String,
+    label: String,
+    path: String,
+}
+
+/// Watch for volumes mounted while Mori runs. Drives present at launch and
+/// drives Mori already knows are never announced.
+fn watch_drives(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut seen: HashSet<PathBuf> = drives::mounted().into_iter().collect();
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+            let now: HashSet<PathBuf> = drives::mounted().into_iter().collect();
+            let state = app.state::<AppState>();
+            for path in now.difference(&seen) {
+                let vol = privacy::volume_of(path);
+                let key = drives::key_of(&vol);
+                if state.drives.get(&key).is_some() || state.root_canon().is_some_and(|r| r.starts_with(path)) {
+                    continue;
+                }
+                let label = path.file_name().map(|n| secure::display_safe(&n.to_string_lossy())).unwrap_or_default();
+                state
+                    .connected
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key.clone(), (path.clone(), label.clone()));
+                let _ = app.emit("drive-connected", ConnectedDrive { key, label, path: secure::plain_path(path) });
+            }
+            seen = now;
+        }
+    });
+}
+
+/// Open a newly connected drive in Safe Inspection Mode: metadata only,
+/// no automatic previews until the user allows them.
+#[tauri::command]
+fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) -> Result<Status, String> {
+    let (path, label) = state
+        .connected
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+        .ok_or("That drive is no longer connected.")?;
+    state.temp.store(false, Ordering::SeqCst);
+    state.drives.set(&key, &label, false);
+    open_root(&app, &path)?;
+    write_settings(&state, |s| s.root = Some(path.to_string_lossy().into_owned()))?;
+    Ok(status(&state))
+}
+
+/// Allow (or stop) automatic previews for the current drive.
+#[tauri::command]
+fn set_drive_previews(app: AppHandle, state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    state.persistent()?;
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let vol = privacy::volume_of(&root);
+    let label = vol.mount.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    state.drives.set(&drives::key_of(&vol), &label, on);
+    state.safe_mode.store(!on, Ordering::SeqCst);
+    emit_status(&app);
+    let _ = app.emit("index-changed", ());
+    Ok(())
+}
+
 // ---------------------------------------------------------- read-only mode
 
 /// Read-only Mode is enforced by the mutation policy (policy.rs), not the UI.
@@ -1020,6 +2020,7 @@ fn set_read_only(state: State<'_, AppState>, on: bool) -> Result<(), String> {
 /// folder itself is not touched. Allowed in Read-only Mode.
 #[tauri::command]
 async fn set_folder_protected(app: AppHandle, id: String, protected: bool) -> Result<(), String> {
+    app.state::<AppState>().persistent()?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         if id.starts_with('x') || id.starts_with('y') {
@@ -1047,6 +2048,7 @@ async fn set_folder_protected(app: AppHandle, id: String, protected: bool) -> Re
 /// Only Mori's own records change; the folder itself is never touched.
 #[tauri::command]
 async fn set_folder_private(app: AppHandle, id: String, private: bool) -> Result<(), String> {
+    app.state::<AppState>().persistent()?;
     tauri::async_runtime::spawn_blocking(move || set_private(&app, &id, private))
         .await
         .map_err(|_| "The operation failed.".to_string())?
@@ -1241,6 +2243,20 @@ struct AnalysisEvent {
     message: Option<String>,
 }
 
+/// The chosen analysis locations, with their private folders as boundaries.
+fn analysis_roots(app: &AppHandle, state: &AppState, locations: &[String]) -> Vec<dupes::Root> {
+    let mut roots: Vec<dupes::Root> = Vec::new();
+    for key in locations.iter().take(32) {
+        if let Some((canon, label)) = location_path(app, state, key) {
+            if !roots.iter().any(|r| r.canon == canon) {
+                let private = state.privacy.boundaries(&canon);
+                roots.push(dupes::Root { canon, label, private });
+            }
+        }
+    }
+    roots
+}
+
 #[tauri::command]
 fn analysis_start(
     app: AppHandle,
@@ -1252,15 +2268,7 @@ fn analysis_start(
     if state.analysis_running.swap(true, Ordering::SeqCst) {
         return Err("An analysis is already running.".into());
     }
-    let mut roots: Vec<dupes::Root> = Vec::new();
-    for key in locations.iter().take(32) {
-        if let Some((canon, label)) = location_path(&app, &state, key) {
-            if !roots.iter().any(|r| r.canon == canon) {
-                let private = state.privacy.boundaries(&canon);
-                roots.push(dupes::Root { canon, label, private });
-            }
-        }
-    }
+    let roots = analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.analysis_running.store(false, Ordering::SeqCst);
         return Err("Choose at least one available location.".into());
@@ -1345,6 +2353,8 @@ struct ViewGroup {
     unit_size: u64,
     recoverable: u64,
     suggested: usize,
+    /// Why the suggested copy was picked.
+    reasons: Vec<String>,
     members: Vec<ViewMember>,
 }
 
@@ -1398,6 +2408,7 @@ fn analysis_results(app: AppHandle, state: State<'_, AppState>) -> Option<Analys
                 unit_size: g.unit_size,
                 recoverable: g.recoverable(),
                 suggested: g.suggested,
+                reasons: dupes::suggest_reasons(&a.files, &a.roots, g),
                 members: g
                     .members
                     .iter()
@@ -1431,6 +2442,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
         let state = app.state::<AppState>();
         state.cleanup_cancel.store(false, Ordering::SeqCst);
         let cancel = state.cleanup_cancel.clone();
+        let mut cleaned: Vec<history::Change> = Vec::new();
         let (outcome, removed_abs) = {
             let mut guard = state.analysis.lock().unwrap_or_else(PoisonError::into_inner);
             let store = guard.as_mut().ok_or("The analysis was cleared.")?;
@@ -1445,7 +2457,9 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
                         return Err("not a regular file".into());
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
-                    fileops::move_to_trash(&thumb_state.policy(), &path)
+                    let trashed = fileops::move_to_trash(&thumb_state.policy(), &path)?;
+                    cleaned.push(history::Change::Trashed { original: path, trashed });
+                    Ok(())
                 },
                 &cancel,
                 &mut |done, total| {
@@ -1458,6 +2472,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
             (outcome, removed_abs)
         };
         forget_removed(&state, &removed_abs);
+        state.history.record(trash_label(&cleaned), cleaned);
         let rels: Vec<String> = removed_abs.iter().filter_map(|p| browser_rel(&state, p)).collect();
         if !rels.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&rels));
@@ -1523,15 +2538,7 @@ fn similar_start(
     if state.similar_running.swap(true, Ordering::SeqCst) {
         return Err("An analysis is already running.".into());
     }
-    let mut roots: Vec<dupes::Root> = Vec::new();
-    for key in locations.iter().take(32) {
-        if let Some((canon, label)) = location_path(&app, &state, key) {
-            if !roots.iter().any(|r| r.canon == canon) {
-                let private = state.privacy.boundaries(&canon);
-                roots.push(dupes::Root { canon, label, private });
-            }
-        }
-    }
+    let roots = analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.similar_running.store(false, Ordering::SeqCst);
         return Err("Choose at least one available location.".into());
@@ -1599,7 +2606,8 @@ fn launch_similar(
             };
             let dismissed = similar::load_dismissed(&state.dismissed_file());
             let mut env = similar::Env {
-                cache_dir: Some(state.similar_dir()),
+                // A temporary session leaves no fingerprints behind either.
+                cache_dir: (!state.temp.load(Ordering::SeqCst)).then(|| state.similar_dir()),
                 decode: &decode,
                 capture: &mut capture,
                 registered: &mut registered,
@@ -1610,7 +2618,24 @@ fn launch_similar(
             })
         }));
         let event = match res {
-            Ok(Ok(result)) => {
+            Ok(Ok(mut result)) => {
+                // Bursts: capture times of the grouped photos only (worker-read EXIF).
+                let wanted: Vec<(usize, PathBuf, dupes::FileRec)> = result
+                    .analysis
+                    .groups
+                    .iter()
+                    .zip(&result.meta)
+                    .filter(|(g, m)| !m.video && g.members.len() >= 3)
+                    .flat_map(|(g, _)| g.members.iter().map(|mem| mem.files[0]))
+                    .map(|f| {
+                        let rec = result.analysis.files[f].clone();
+                        (f, result.analysis.roots[rec.root].canon.clone(), rec)
+                    })
+                    .collect();
+                if !wanted.is_empty() {
+                    let times = metascan::capture_times(&wanted);
+                    similar::mark_bursts(&mut result, &times);
+                }
                 if let Some(store) = state.similar.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
                     store.result = Some(result);
                 }
@@ -1669,7 +2694,13 @@ fn debug_similar_autorun(app: &AppHandle) {
                     )
                 })
                 .collect();
-            eprintln!("mori: DEBUG group video={} {}% :: {}", m.video, m.similarity, names.join(" | "));
+            eprintln!(
+                "mori: DEBUG group video={} {}% burst={:?} :: {}",
+                m.video,
+                m.similarity,
+                m.burst,
+                names.join(" | ")
+            );
         }
     });
 }
@@ -1754,6 +2785,10 @@ struct SimGroup {
     similarity: u8,
     /// Bytes recovered if every copy except the suggested one goes to Trash.
     recoverable: u64,
+    /// Why the suggested copy (the first) is preferred.
+    reasons: Vec<String>,
+    /// Photos taken in quick succession by the same camera.
+    burst: Option<similar::Burst>,
     members: Vec<SimMember>,
 }
 
@@ -1809,6 +2844,8 @@ fn similar_results(app: AppHandle, state: State<'_, AppState>) -> Option<SimView
                 video: m.video,
                 similarity: m.similarity,
                 recoverable: g.members[1..].iter().flat_map(|mem| &mem.files).map(|&f| a.files[f].size).sum(),
+                reasons: similar::keep_reasons(r, gi),
+                burst: m.burst.clone(),
                 members: g
                     .members
                     .iter()
@@ -1868,6 +2905,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
         let state = app.state::<AppState>();
         state.cleanup_cancel.store(false, Ordering::SeqCst);
         let cancel = state.cleanup_cancel.clone();
+        let mut cleaned: Vec<history::Change> = Vec::new();
         let (outcome, removed_abs) = {
             let mut guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
             let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or("The analysis was cleared.")?;
@@ -1882,7 +2920,9 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
                         return Err("not a regular file".into());
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
-                    fileops::move_to_trash(&thumb_state.policy(), &path)
+                    let trashed = fileops::move_to_trash(&thumb_state.policy(), &path)?;
+                    cleaned.push(history::Change::Trashed { original: path, trashed });
+                    Ok(())
                 },
                 &cancel,
                 &mut |done, total| {
@@ -1895,6 +2935,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
             (outcome, removed_abs)
         };
         forget_removed(&state, &removed_abs);
+        state.history.record(trash_label(&cleaned), cleaned);
         let rels: Vec<String> = removed_abs.iter().filter_map(|p| browser_rel(&state, p)).collect();
         if !rels.is_empty() {
             apply_index_change(&app, |idx| idx.remove_paths(&rels));
@@ -2158,6 +3199,22 @@ fn main() {
                 similar_token: AtomicU64::new(0),
                 privacy: privacy::Store::load(data_dir_for_video.join("private-folders.json")),
                 protected: privacy::Store::load(data_dir_for_video.join("protected-folders.json")),
+                drives: drives::Store::load(data_dir_for_video.join("drives.json")),
+                safe_mode: AtomicBool::new(false),
+                decoded: AtomicU64::new(0),
+                connected: Mutex::new(HashMap::new()),
+                favorites: privacy::Store::load(data_dir_for_video.join("favorites.json")),
+                tags: tags::Store::load(data_dir_for_video.join("tags.json")),
+                temp: AtomicBool::new(false),
+                capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
+                capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
+                history: history::History::default(),
+                health: Mutex::new(None),
+                health_running: AtomicBool::new(false),
+                health_job: Arc::new(jobs::Control::default()),
+                meta_scan: Mutex::new(None),
+                meta_running: AtomicBool::new(false),
+                meta_job: Arc::new(jobs::Control::default()),
                 read_only: AtomicBool::new(
                     fs::read(data_dir_for_video.join("settings.json"))
                         .ok()
@@ -2167,6 +3224,7 @@ fn main() {
                 ),
             });
             spawn_media_watchdog(app.handle().clone());
+            watch_drives(app.handle().clone());
             // Debug builds only: MORI_DEBUG_FREEZE_AT=<secs> wedges the page's JS
             // for 60 s at that time, to test hang detection and recovery.
             if cfg!(debug_assertions) {
@@ -2184,6 +3242,10 @@ fn main() {
             build_window(app)?;
             if cfg!(debug_assertions) {
                 debug_similar_autorun(app.handle());
+                metascan::debug_autorun(app.handle());
+                health::debug_autorun(app.handle());
+                debug_org(app.handle());
+                debug_ops(app.handle());
                 debug_privacy(app.handle());
             }
             Ok(())
@@ -2232,7 +3294,41 @@ fn main() {
             set_folder_private,
             file_report,
             set_read_only,
-            set_folder_protected
+            set_folder_protected,
+            pdf_info,
+            archive_listing,
+            open_drive_safely,
+            set_drive_previews,
+            set_capture_override,
+            storage_report,
+            set_favorite,
+            plan_operation,
+            delete_items,
+            history_list,
+            history_undo,
+            tags_list,
+            tag_items,
+            tag_rename,
+            tag_delete,
+            open_temporary,
+            end_temporary,
+            forget_drive,
+            clear_session_data,
+            empty_folders,
+            trash_empty_folders,
+            health::health_start,
+            health::health_pause,
+            health::health_cancel,
+            health::health_clear,
+            health::health_results,
+            metascan::file_metadata,
+            metascan::meta_start,
+            metascan::meta_pause,
+            metascan::meta_cancel,
+            metascan::meta_clear,
+            metascan::meta_results,
+            metascan::meta_places,
+            metascan::sanitize_copies
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mori");
@@ -2240,6 +3336,18 @@ fn main() {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    #[test]
+    fn forgetting_only_ever_removes_inside_mori_directories() {
+        let data = Path::new("/Users/x/Library/Application Support/app.mori.viewer");
+        let cache = Path::new("/Users/x/Library/Caches/app.mori.viewer");
+        assert!(super::inside_app_dirs(&data.join("index-v2/abc.json"), data, cache));
+        assert!(super::inside_app_dirs(&cache.join("thumbs/v1234"), data, cache));
+        assert!(!super::inside_app_dirs(data, data, cache), "never the directory itself");
+        assert!(!super::inside_app_dirs(Path::new("/Volumes/Drive/photo.jpg"), data, cache));
+        assert!(!super::inside_app_dirs(&data.join("../../../../Volumes/Drive"), data, cache));
+        assert!(!super::inside_app_dirs(Path::new("/x/y"), Path::new("/x"), cache), "a too-short base never qualifies");
+    }
+
     use super::*;
 
     #[test]

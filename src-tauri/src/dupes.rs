@@ -677,6 +677,53 @@ pub fn suggest(files: &[FileRec], roots: &[Root], g: &Group) -> usize {
     g.members.iter().enumerate().min_by_key(|(_, m)| score(m)).map_or(0, |(i, _)| i)
 }
 
+/// Plain-language reasons why `suggest` picked its copy (shown in the UI).
+pub fn suggest_reasons(files: &[FileRec], roots: &[Root], g: &Group) -> Vec<String> {
+    let k = g.suggested;
+    let Some(keeper) = g.members.get(k) else { return Vec::new() };
+    if keeper.locked {
+        return vec!["Part of a Live Photo whose other half isn't duplicated, so it must stay".into()];
+    }
+    let segs = |m: &Member| {
+        let f = &files[m.files[0]];
+        format!("{}/{}", roots[f.root].label, f.rel).to_lowercase().split('/').map(str::to_owned).collect::<Vec<_>>()
+    };
+    let in_any = |m: &Member, words: &[&str]| segs(m).iter().any(|s| words.contains(&s.as_str()));
+    let copy_name = |m: &Member| {
+        let n = files[m.files[0]].name.to_lowercase();
+        n.contains(" copy")
+            || n.contains("copy of")
+            || n.contains("-copy")
+            || (1..10).any(|i| n.contains(&format!("({i})")))
+    };
+    let others: Vec<&Member> = g.members.iter().enumerate().filter(|(i, _)| *i != k).map(|(_, m)| m).collect();
+    const TEMP: &[&str] =
+        &["downloads", "download", "tmp", "temp", "cache", "caches", "trash", "recycle bin", "$recycle.bin"];
+    const OLD: &[&str] = &["backup", "backups", "old", "copies", "duplicates"];
+    const MEDIA: &[&str] = &["pictures", "photos", "videos", "movies", "dcim", "music", "documents"];
+    let mut r = Vec::new();
+    if !in_any(keeper, TEMP) && others.iter().any(|m| in_any(m, TEMP)) {
+        r.push("Other copies are in Downloads, temporary or Trash folders".to_string());
+    }
+    if !in_any(keeper, OLD) && others.iter().any(|m| in_any(m, OLD)) {
+        r.push("Other copies are in backup or “old” folders".into());
+    }
+    if !copy_name(keeper) && others.iter().any(|m| copy_name(m)) {
+        r.push("Other copies have copy-style names (“copy”, “(1)”)".into());
+    }
+    if in_any(keeper, MEDIA) && others.iter().any(|m| !in_any(m, MEDIA)) {
+        r.push("In an organised media folder".into());
+    }
+    let date = |m: &Member| files[m.files[0]].created.unwrap_or(files[m.files[0]].modified);
+    if others.iter().all(|m| date(keeper) < date(m)) {
+        r.push("Oldest copy".into());
+    }
+    if r.is_empty() {
+        r.push("The copies are identical; the one with the shortest path is suggested".into());
+    }
+    r
+}
+
 // ----------------------------------------------------------------- cleanup
 
 /// For one group: the member indexes to move to Trash; all others are kept.
@@ -1064,6 +1111,11 @@ mod tests {
         let a = run(&[&t.0], None);
         let g = &a.groups[0];
         assert_eq!(a.files[g.members[g.suggested].files[0]].rel, "Pictures/Family/IMG_1450.jpg");
+        let r = suggest_reasons(&a.files, &a.roots, g);
+        assert!(r.iter().any(|x| x.contains("Downloads")), "{r:?}");
+        assert!(r.iter().any(|x| x.contains("backup")));
+        assert!(r.iter().any(|x| x.contains("copy-style")));
+        assert!(r.iter().any(|x| x.contains("organised")));
     }
 
     #[test]
@@ -1202,7 +1254,7 @@ mod tests {
             .collect();
         let store = crate::privacy::Store::load(std::env::temp_dir().join("mori-duplab-protected.json"));
         let policy = crate::policy::Policy { read_only: false, protected: &store };
-        let mut trasher = |root: &Path, rel: &str| crate::fileops::move_to_trash(&policy, &root.join(rel));
+        let mut trasher = |root: &Path, rel: &str| crate::fileops::move_to_trash(&policy, &root.join(rel)).map(|_| ());
         let out = execute(&a, &plan, &mut trasher, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
         println!(
             "outcome: trashed {} ({} bytes), kept {}, cleaned {}, skipped {}, failures {:?}",

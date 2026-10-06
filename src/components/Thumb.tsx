@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { cachedThumb, requestThumb, type Entry } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { cachedThumb, frameUrl, requestScrubFrames, requestThumb, SCRUB_FRAMES, type Entry } from "../api";
 import { FolderGlyph, Icon } from "./Icon";
 
 /** Lazily loaded thumbnail; only mounted while its tile is on screen. */
@@ -24,9 +24,46 @@ export function Thumb({ entry, fit = "contain", iconSize = 40 }: { entry: Entry;
     };
   }, [entry.id, entry.modified, thumbable]);
 
+  // Hover scrub (videos): frames sampled earlier and re-encoded by the worker.
+  const [frame, setFrame] = useState<number | null>(null);
+  const [frames, setFrames] = useState<boolean | null>(null);
+  const hoverTimer = useRef(0);
+  const scrub =
+    entry.kind === "video" && url
+      ? {
+          onMouseEnter: () => {
+            if (frames === null) {
+              const probe = new Image();
+              probe.onload = () => setFrames(true);
+              probe.onerror = () => {
+                setFrames(false);
+                // Linger to ask for frames in the background (once per video).
+                hoverTimer.current = window.setTimeout(() => requestScrubFrames(entry, () => setFrames(true)), 700);
+              };
+              probe.src = frameUrl(entry.id, 0);
+            }
+          },
+          onMouseMove: (e: React.MouseEvent) => {
+            if (!frames) return;
+            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            setFrame(Math.min(SCRUB_FRAMES - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * SCRUB_FRAMES))));
+          },
+          onMouseLeave: () => {
+            window.clearTimeout(hoverTimer.current);
+            setFrame(null);
+          },
+        }
+      : {};
+
   if (url) {
     return (
-      <div className={`thumb ${fit}`}>
+      <div className={`thumb ${fit}`} {...scrub}>
+        {frame !== null && <img className="scrub loaded" src={frameUrl(entry.id, frame)} alt="" draggable={false} />}
+        {frame !== null && (
+          <span className="scrub-bar">
+            <span style={{ width: `${((frame + 1) / SCRUB_FRAMES) * 100}%` }} />
+          </span>
+        )}
         <img
           src={url}
           alt=""

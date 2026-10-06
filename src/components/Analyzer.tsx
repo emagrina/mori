@@ -707,6 +707,7 @@ function GroupCard({
           Keep All
         </button>
       </header>
+      <Reasons reasons={g.reasons} />
       <div className="dup-members">
         {g.members.map((m, i) => {
           const trash = marks.has(keyOf(m));
@@ -881,6 +882,16 @@ export function Summary({ outcome: o, remaining, onDone }: { outcome: CleanupOut
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Why Mori suggests keeping one copy: only differences it actually found. */
+export function Reasons({ reasons }: { reasons: string[] }) {
+  if (!reasons.length) return null;
+  return (
+    <div className="keep-reasons">
+      <span className="muted">★ Suggested because:</span> {reasons.join(" · ")}
     </div>
   );
 }

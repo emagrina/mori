@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-end-temporary"
+description = "Enables the end_temporary command without any pre-configured scope."
+commands.allow = ["end_temporary"]
+
+[[permission]]
+identifier = "deny-end-temporary"
+description = "Denies the end_temporary command without any pre-configured scope."
+commands.deny = ["end_temporary"]

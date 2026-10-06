@@ -2,7 +2,9 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
-export type KindFilter = "all" | Exclude<Kind, "folder" | "link">;
+export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
+/** What a library view shows: a kind, Favorites, or one tag. */
+export type ViewKind = KindFilter | "favorites" | `tag:${number}`;
 export type ViewMode = "gallery" | "grid" | "list";
 export type SortKey = "name" | "modified" | "created" | "size" | "type";
 export type Scope = "folder" | "library";
@@ -30,6 +32,11 @@ export interface Entry {
   link?: string;
   /** The name alone shows a high-attention pattern (see the inspector). */
   flagged?: boolean;
+  /** 1 = screenshot, 2 = screen recording (Mori's guess, correctable). */
+  capture?: number;
+  favorite?: boolean;
+  /** Local tag ids (names from `api.tagsList`). */
+  tags?: number[];
 }
 
 export interface Status {
@@ -39,6 +46,18 @@ export interface Status {
   scanCount: number;
   fileCount: number;
   scannedAt: number;
+  /** Safe Inspection Mode: nothing on this drive is decoded automatically. */
+  safeMode: boolean;
+  /** Media decoded since this folder was opened. */
+  decoded: number;
+  /** Temporary session: nothing about this folder is saved. */
+  temporary: boolean;
+}
+
+export interface TagInfo {
+  id: number;
+  name: string;
+  count: number;
 }
 
 export interface InitInfo {
@@ -125,7 +144,7 @@ export interface Query {
   /** Folder id ("" = root). */
   folder: string;
   scope: Scope;
-  kind: KindFilter;
+  kind: ViewKind;
   search: string;
   sort: SortKey;
   desc: boolean;
@@ -149,10 +168,225 @@ export interface VideoInfo {
 
 export interface Inspection {
   detected: string;
-  preview: "image" | "video" | "text" | "none";
+  preview: "image" | "video" | "text" | "pdf" | "archive" | "audio" | "none";
   canOpen: boolean;
   mismatch: boolean;
   video: VideoInfo | null;
+  /** Safe Inspection Mode: only explicit, isolated views are allowed. */
+  previewsOff: boolean;
+}
+
+export interface PdfInfo {
+  pages: number;
+  encrypted: boolean;
+  locked: boolean;
+  title: string | null;
+  author: string | null;
+  creator: string | null;
+  producer: string | null;
+  subject: string | null;
+  /** Present in the document. Mori never runs it. */
+  javascript: boolean;
+  openAction: boolean;
+  embeddedFiles: boolean;
+  forms: boolean;
+}
+
+export type ArchiveFlag = "traversal" | "absolute" | "drive-letter" | "control-chars" | "nested-archive" | "high-ratio";
+
+export interface ArchiveEntry {
+  path: string;
+  size: number;
+  compressed: number;
+  dir: boolean;
+  symlink: boolean;
+  encrypted: boolean;
+  flags: ArchiveFlag[];
+  nested?: ArchiveListing;
+}
+
+export interface ArchiveListing {
+  format: string;
+  entries: ArchiveEntry[];
+  totalEntries: number;
+  totalSize: number;
+  totalCompressed: number;
+  nestedDepth: number;
+  truncated: boolean;
+  findings: Finding[];
+}
+
+export type MetaCategory = "location" | "person" | "device" | "software" | "comment" | "identifier";
+
+export interface MetaField {
+  group: string;
+  name: string;
+  value: string;
+  sensitive?: MetaCategory;
+}
+
+export interface FileMeta {
+  container: string;
+  fields: MetaField[];
+  gps?: [number, number];
+  orientation?: number;
+  partial: boolean;
+  categories: MetaCategory[];
+  sanitizable: boolean;
+}
+
+export interface MetaProgress {
+  stage: "collecting" | "reading";
+  done: number;
+  total: number;
+  found: number;
+  failed: number;
+  paused: boolean;
+}
+
+export interface MetaHit {
+  id: string;
+  name: string;
+  path: string;
+  location: string;
+  drive: string;
+  size: number;
+  modified: number;
+  created: number | null;
+  kind: Kind;
+  ext: string;
+  categories: MetaCategory[];
+  gps: [number, number] | null;
+  fields: MetaField[];
+  sanitizable: boolean;
+}
+
+export interface MetaView {
+  locations: LocationInfo[];
+  stats: { scanned: number; withSensitive: number; failed: number; unreadable: number; places: number };
+  counts: Partial<Record<MetaCategory, number>>;
+  total: number;
+  hits: MetaHit[];
+}
+
+export interface Places {
+  ids: string[];
+  names: string[];
+  /** Flat [lat, lon, lat, lon, …]. */
+  coords: number[];
+}
+
+export interface SanitizeOutcome {
+  id: string;
+  name: string;
+  newName: string | null;
+  error: string | null;
+}
+
+export const CATEGORY_LABEL: Record<MetaCategory, string> = {
+  location: "Location",
+  person: "People & authors",
+  device: "Device",
+  software: "Software",
+  comment: "Comments & descriptions",
+  identifier: "Unique IDs",
+};
+
+export interface StorageBucket {
+  key: string;
+  bytes: number;
+  count: number;
+}
+
+export interface StorageTile {
+  kind: "folder" | "file" | "files" | "private";
+  id: string;
+  name: string;
+  bytes: number;
+  files: number;
+}
+
+export interface StorageReport {
+  totalBytes: number;
+  totalFiles: number;
+  byKind: StorageBucket[];
+  byYear: StorageBucket[];
+  largestFiles: Entry[];
+  largestVideos: Entry[];
+  largestImages: Entry[];
+  largestFolders: { id: string; name: string; path: string; bytes: number; files: number }[];
+  folder: string;
+  folderBytes: number;
+  tiles: StorageTile[];
+  privateFolders: number;
+}
+
+export interface EmptyFolder {
+  id: string;
+  name: string;
+  path: string;
+  nested: number;
+  protected: boolean;
+  /** What the on-disk check found ("" = empty). */
+  note: string;
+}
+
+export type HealthCategory = "risk" | "broken" | "unsupported" | "failed";
+
+export interface HealthItem extends Entry {
+  category: HealthCategory;
+  reason: string;
+}
+
+export interface HealthView {
+  checked: number;
+  counts: Partial<Record<HealthCategory, number>>;
+  total: number;
+  items: HealthItem[];
+}
+
+export interface HealthProgress {
+  done: number;
+  total: number;
+  found: number;
+  paused: boolean;
+}
+
+export interface PlanEntry {
+  id: string;
+  name: string;
+  path: string;
+  kind: "file" | "folder" | "link";
+  bytes: number;
+  files: number;
+  blocked: string | null;
+  note: string | null;
+}
+
+export interface OperationPlan {
+  op: "trash" | "delete" | "overwrite";
+  entries: PlanEntry[];
+  totalBytes: number;
+  totalFiles: number;
+  blocked: number;
+  needsTypedConfirm: boolean;
+  /** null: Secure Overwrite is meaningful here; otherwise why it isn't. */
+  overwriteUnavailable: string | null;
+}
+
+export interface HistoryRecord {
+  id: number;
+  at: number;
+  label: string;
+  undone: boolean;
+  undoable: boolean;
+  note: string | null;
+}
+
+export interface ConnectedDrive {
+  key: string;
+  label: string;
+  path: string;
 }
 
 export interface Settings {
@@ -237,6 +471,8 @@ export interface DupGroup {
   unitSize: number;
   recoverable: number;
   suggested: number;
+  /** Why the suggested copy was picked. */
+  reasons: string[];
   members: DupMember[];
 }
 
@@ -308,6 +544,10 @@ export interface SimGroup {
   video: boolean;
   similarity: number;
   recoverable: number;
+  /** Why member 0 is preferred. */
+  reasons: string[];
+  /** Photos taken in quick succession by one camera. */
+  burst: { frames: number; spanMs: number } | null;
   /** Member 0 is Mori's suggested copy to keep. */
   members: SimMember[];
 }
@@ -379,6 +619,58 @@ export const api = {
   /** Enforced by the backend mutation policy, not just the UI. */
   setReadOnly: (on: boolean) => invoke<void>("set_read_only", { on }),
   setFolderProtected: (id: string, isProtected: boolean) => invoke<void>("set_folder_protected", { id, protected: isProtected }),
+  /** Read by the sandboxed worker; active content is reported, never run. */
+  pdfInfo: (id: string, explicit: boolean) => invoke<PdfInfo>("pdf_info", { id, explicit }),
+  /** Listing only: nothing is extracted or written. */
+  archiveListing: (id: string) => invoke<ArchiveListing>("archive_listing", { id }),
+  openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
+  /** "Generate previews" for the current drive (or back to metadata only). */
+  setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** Dry run: what an operation would do, and what the policy refuses. Nothing changes. */
+  planOperation: (op: "trash" | "delete" | "overwrite", ids: string[]) => invoke<OperationPlan>("plan_operation", { op, ids }),
+  /** Permanent: no Trash. `confirm` must be "DELETE" when the plan requires typed confirmation. */
+  deleteItems: (ids: string[], overwrite: boolean, confirm: string) =>
+    invoke<{ deleted: string[]; bytes: number; failed: Failure[] }>("delete_items", { ids, overwrite, confirm }),
+  historyList: () => invoke<HistoryRecord[]>("history_list"),
+  /** `null` = the most recent operation that can be undone. */
+  historyUndo: (id: number | null) => invoke<{ restored: number; failed: string[] }>("history_undo", { id }),
+  /** Only Mori's records change; files are never touched. */
+  setFavorite: (ids: string[], on: boolean) => invoke<void>("set_favorite", { ids, on }),
+  tagsList: () => invoke<TagInfo[]>("tags_list"),
+  /** Adds (or removes) the tag named `name`, creating it if needed. Never writes into the files. */
+  tagItems: (ids: string[], name: string, on: boolean) => invoke<number>("tag_items", { ids, name, on }),
+  tagRename: (id: number, name: string) => invoke<void>("tag_rename", { id, name }),
+  tagDelete: (id: number) => invoke<void>("tag_delete", { id }),
+  /** Browse without indexing: nothing about the folder is written to disk. */
+  openTemporary: () => invoke<Status>("open_temporary"),
+  endTemporary: () => invoke<Status>("end_temporary"),
+  /** Removes Mori's knowledge of the current drive. Nothing on the drive is changed. */
+  forgetDrive: () => invoke<{ drive: string; indexes: number }>("forget_drive"),
+  /** Clears in-memory results of this session. Files, caches and records are kept. */
+  clearSessionData: () => invoke<void>("clear_session_data"),
+  /** From the index: nothing is read from disk. `folder` = folder id ("" = drive). */
+  storageReport: (folder: string) => invoke<StorageReport>("storage_report", { folder }),
+  /** Index candidates, each re-checked on disk. */
+  emptyFolders: () => invoke<EmptyFolder[]>("empty_folders"),
+  /** Re-verified right before; Trash only. */
+  trashEmptyFolders: (ids: string[]) => invoke<TrashResult>("trash_empty_folders", { ids }),
+  healthStart: () => invoke<void>("health_start"),
+  healthPause: (paused: boolean) => invoke<void>("health_pause", { paused }),
+  healthCancel: () => invoke<void>("health_cancel"),
+  healthClear: () => invoke<void>("health_clear"),
+  healthResults: (category: HealthCategory | null, offset: number, limit: number) => invoke<HealthView | null>("health_results", { category, offset, limit }),
+  /** Correct the screenshot / screen-recording guess: "auto", "not" or "yes". Only Mori's view changes. */
+  setCaptureOverride: (id: string, mode: "auto" | "not" | "yes") => invoke<void>("set_capture_override", { id, mode }),
+  /** Read by the sandboxed worker. */
+  fileMetadata: (id: string) => invoke<FileMeta>("file_metadata", { id }),
+  metaStart: (locations: string[], recursive: boolean) => invoke<void>("meta_start", { locations, recursive }),
+  metaPause: (paused: boolean) => invoke<void>("meta_pause", { paused }),
+  metaCancel: () => invoke<void>("meta_cancel"),
+  metaClear: () => invoke<void>("meta_clear"),
+  metaResults: (category: MetaCategory | null, offset: number, limit: number) => invoke<MetaView | null>("meta_results", { category, offset, limit }),
+  metaPlaces: () => invoke<Places | null>("meta_places"),
+  /** New files next to the originals; originals are never modified. */
+  sanitizeCopies: (ids: string[]) => invoke<SanitizeOutcome[]>("sanitize_copies", { ids }),
 };
 
 /**
@@ -410,13 +702,22 @@ export function startLivenessPing() {
 // ------------------------------------------------------------- mori:// URLs
 
 /** URL on Mori's own protocol. Only ids ever appear in it, never paths. */
-const moriUrl = (route: string, id: string) => convertFileSrc(`${route}/${id}`, "mori");
+const moriUrl = (route: string, id: string, iso = false) => convertFileSrc(`${iso ? "iso-" : ""}${route}/${id}`, "mori");
 
 export const thumbUrl = (id: string) => moriUrl("thumb", id);
-/** A re-encoded, size-limited copy produced by the sandboxed worker. */
-export const previewUrl = (id: string) => moriUrl("preview", id);
+/**
+ * A re-encoded, size-limited copy produced by the sandboxed worker. `iso`
+ * marks an explicit isolated-view request (allowed in Safe Inspection Mode).
+ */
+export const previewUrl = (id: string, iso = false) => moriUrl("preview", id, iso);
 /** Byte ranges of a video whose container was verified by magic bytes. */
-export const mediaUrl = (id: string) => moriUrl("media", id);
+export const mediaUrl = (id: string, iso = false) => moriUrl("media", id, iso);
+/** A PDF page rasterised by the sandboxed worker. */
+export const pdfPageUrl = (id: string, page: number, size: number, iso = false) => moriUrl("pdf", `${id}/${page}/${size}`, iso);
+/** Byte ranges of an audio file whose format was verified by magic bytes. */
+export const audioUrl = (id: string, iso = false) => moriUrl("audio", id, iso);
+/** Sampled video frame `k`, re-encoded by the sandboxed worker. */
+export const frameUrl = (id: string, k: number, iso = false) => moriUrl("frame", `${id}/${k}`, iso);
 
 // ------------------------------------------------------------- thumbnails
 
@@ -696,7 +997,7 @@ function grabSamples(src: string, times: number[], signal: AbortSignal) {
  */
 async function captureVideoThumb(e: Entry, signal: AbortSignal): Promise<boolean> {
   const info = await api.inspect(e.id).catch(() => null);
-  if (signal.aborted || info?.preview !== "video") return false;
+  if (signal.aborted || info?.preview !== "video" || info.previewsOff) return false;
   const end = await beginMediaSession(e.id).catch(() => null);
   if (!end) return false;
   let png: Uint8Array | undefined;
@@ -707,6 +1008,114 @@ async function captureVideoThumb(e: Entry, signal: AbortSignal): Promise<boolean
   }
   if (!png || signal.aborted) return false;
   return invoke<boolean>("store_frame", png, { headers: { "mori-id": e.id } }).catch(() => false);
+}
+
+/**
+ * Sample `count` evenly spaced frames of a video for the isolated view (and
+ * the filmstrip). The webview decodes them; each is re-encoded by the
+ * sandboxed worker before it can be displayed, and the page only ever shows
+ * those copies. Calls `onFrame(k)` as each one is stored. Returns how many
+ * frames were stored.
+ */
+export async function captureFrames(id: string, count: number, explicit: boolean, signal: AbortSignal, onFrame: (k: number) => void): Promise<number> {
+  const end = await beginMediaSession(id).catch(() => null);
+  if (!end) return 0;
+  let stored = 0;
+  try {
+    await grabSequence(mediaUrl(id, explicit), count, signal, async (k, png) => {
+      const headers: Record<string, string> = { "mori-id": id, "mori-frame": String(k) };
+      if (explicit) headers["mori-explicit"] = "1";
+      if (await invoke<boolean>("store_frame", png, { headers }).catch(() => false)) {
+        stored++;
+        onFrame(k);
+      }
+    });
+  } finally {
+    end();
+  }
+  return stored;
+}
+
+/** Seek through a hidden video element and hand over each frame as PNG (≤480 px). */
+function grabSequence(src: string, count: number, signal: AbortSignal, onPng: (k: number, png: Uint8Array) => Promise<void>): Promise<void> {
+  return new Promise((resolve) => {
+    const v = document.createElement("video");
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+      v.remove();
+      resolve();
+    };
+    signal.addEventListener("abort", finish);
+    const timer = setTimeout(finish, 20000 + count * 4000);
+    const seek = (t: number) =>
+      new Promise<boolean>((r) => {
+        const to = setTimeout(() => r(false), 5000);
+        v.onseeked = () => {
+          clearTimeout(to);
+          r(true);
+        };
+        v.currentTime = t;
+      });
+    const presented = () =>
+      new Promise<void>((r) => {
+        const rvfc = (v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }).requestVideoFrameCallback;
+        let called = false;
+        const once = () => {
+          if (!called) {
+            called = true;
+            r();
+          }
+        };
+        if (rvfc) rvfc.call(v, once);
+        setTimeout(once, 500);
+      });
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    v.crossOrigin = "anonymous";
+    v.style.cssText = "position:fixed;left:-9999px;top:0;width:4px;height:4px;opacity:0;pointer-events:none";
+    v.onerror = finish;
+    v.onloadedmetadata = async () => {
+      const d = v.duration;
+      if (!isFinite(d) || d <= 0 || !v.videoWidth || !v.videoHeight) return finish();
+      const scale = Math.min(1, 480 / Math.max(v.videoWidth, v.videoHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(v.videoWidth * scale));
+      c.height = Math.max(1, Math.round(v.videoHeight * scale));
+      const ctx = c.getContext("2d", { willReadFrequently: true })!;
+      for (let k = 0; k < count; k++) {
+        if (finished) return;
+        if (!(await seek(Math.min((d * (k + 0.5)) / count, Math.max(0, d - 0.05))))) return finish();
+        await presented();
+        try {
+          ctx.globalCompositeOperation = "source-over";
+          ctx.clearRect(0, 0, c.width, c.height);
+          ctx.drawImage(v, 0, 0, c.width, c.height);
+          const px = ctx.getImageData(0, 0, c.width, c.height).data;
+          let painted = false;
+          for (let i = 3; i < px.length && !painted; i += 4 * 7) painted = px[i] > 0;
+          if (!painted) continue;
+          ctx.globalCompositeOperation = "destination-over";
+          ctx.fillStyle = "#000";
+          ctx.fillRect(0, 0, c.width, c.height);
+          const blob = await new Promise<Blob | null>((r) => c.toBlob(r, "image/png"));
+          if (blob && !finished) await onPng(k, new Uint8Array(await blob.arrayBuffer()));
+        } catch {
+          return finish();
+        }
+      }
+      finish();
+    };
+    document.body.appendChild(v);
+    v.src = src;
+  });
 }
 
 /** Decode one frame in a detached, always-cleaned-up video element. */
@@ -770,6 +1179,31 @@ function grabFrame(src: string, signal: AbortSignal): Promise<Uint8Array | undef
     document.body.appendChild(v);
     v.src = src;
   });
+}
+
+/** Frames sampled for filmstrips, hover scrub and the isolated view. */
+export const SCRUB_FRAMES = 8;
+const scrubRequested = new Set<string>();
+
+/**
+ * Hover scrub: ask (once) for a video's sampled frames in the background,
+ * through the same queue as video thumbnails (never during a preview). The
+ * backend refuses them in Safe Inspection Mode.
+ */
+export function requestScrubFrames(e: Entry, onReady: () => void) {
+  if (scrubRequested.has(e.id)) return;
+  scrubRequested.add(e.id);
+  enqueue(
+    {
+      run: async (signal) => {
+        const info = await api.inspect(e.id).catch(() => null);
+        if (signal.aborted || info?.preview !== "video" || info.previewsOff) return false;
+        return (await captureFrames(e.id, SCRUB_FRAMES, false, signal, () => {})) > 0;
+      },
+      done: (ok) => ok && onReady(),
+    },
+    false,
+  );
 }
 
 export function resetThumbs() {

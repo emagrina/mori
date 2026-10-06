@@ -25,6 +25,8 @@ interface Props {
   onSort: (key: SortKey) => void;
   onSelect: (i: number) => void;
   onActivate: (i: number) => void;
+  /** Space: Mori Quick Look. */
+  onQuickLook?: (i: number) => void;
   /** Click with modifiers: Cmd/Ctrl toggles, Shift extends a range. */
   onClickItem: (i: number, mods: { toggle: boolean; range: boolean }) => void;
   onContextMenu: (e: React.MouseEvent, i: number) => void;
@@ -89,7 +91,7 @@ export function FileView(p: Props) {
     if (!p.keyboardActive) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t.tagName === "INPUT" || t.tagName === "SELECT" || t.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
       const n = p.items.length;
       if (!n) return;
       const cur = p.selected;
@@ -111,9 +113,12 @@ export function FileView(p: Props) {
       } else if (e.key === "End") {
         e.preventDefault();
         p.onSelect(n - 1);
-      } else if ((e.key === " " || e.key === "Enter") && cur >= 0) {
+      } else if (e.key === "Enter" && cur >= 0) {
         e.preventDefault();
         p.onActivate(cur);
+      } else if (e.key === " " && cur >= 0) {
+        e.preventDefault();
+        (p.onQuickLook ?? p.onActivate)(cur);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -161,6 +166,11 @@ export function FileView(p: Props) {
                   <Icon name="shield" size={11} />
                 </span>
               )}
+              {e.favorite && (
+                <span className="private-mark" title="Favorite">
+                  <Icon name="star" size={11} />
+                </span>
+              )}
               {e.link && <span className="link-target truncate">→ {e.link}</span>}
               {e.private && (
                 <span className="private-mark" title={PRIVATE_HINT}>
@@ -202,6 +212,11 @@ export function FileView(p: Props) {
                 {e.flagged && (
                   <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
                     <Icon name="warning" size={11} />{" "}
+                  </span>
+                )}
+                {e.favorite && (
+                  <span className="private-mark" title="Favorite">
+                    <Icon name="star" size={10} />{" "}
                   </span>
                 )}
                 {e.name}

@@ -13,7 +13,7 @@ use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 /// Never descend deeper than this (defends against pathological trees).
 const MAX_DEPTH: usize = 64;
 /// Longest relative path accepted into the index.
@@ -108,6 +108,22 @@ pub struct Entry {
     /// the link text alone).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub link_outside: bool,
+    /// Screenshot / screen recording as guessed by `capture.rs` during the scan.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub capture_auto: u8,
+    /// The same after the user's corrections (what views use).
+    #[serde(skip)]
+    pub capture: u8,
+    /// In the user's Favorites (stored outside the index, see `publish_index`).
+    #[serde(skip)]
+    pub favorite: bool,
+    /// Local tag ids (see `tags.rs`).
+    #[serde(skip)]
+    pub tags: Vec<u32>,
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -168,6 +184,13 @@ pub struct Item {
     /// direction-control characters). Details in the inspector.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flagged: bool,
+    /// 1 = screenshot, 2 = screen recording (a guess the user can correct).
+    #[serde(skip_serializing_if = "is_zero_u8")]
+    pub capture: u8,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub favorite: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<u32>,
 }
 
 impl From<&Entry> for Item {
@@ -186,6 +209,9 @@ impl From<&Entry> for Item {
             protected: e.protected,
             link: e.link.as_deref().map(display_safe),
             flagged: crate::risk::name_findings(&e.name).iter().any(|f| f.level == crate::risk::Level::High),
+            capture: e.capture,
+            favorite: e.favorite,
+            tags: e.tags.clone(),
         }
     }
 }
@@ -248,6 +274,14 @@ impl Index {
         self.build_lookup();
     }
 
+    /// A file Mori itself created (a sanitized copy), so views update without a rescan.
+    pub fn add_file(&mut self, e: Entry) {
+        if !self.by_id.contains_key(&e.id) {
+            self.files.push(e);
+            self.build_lookup();
+        }
+    }
+
     /// Apply a rename of `old` → `new` (file or folder, including its contents).
     pub fn rename_path(&mut self, old: &str, new: &str) {
         let new_name = new.rsplit('/').next().unwrap_or(new).to_owned();
@@ -295,6 +329,31 @@ impl Index {
     /// Mark protected folders ("Never Modify") and everything inside them.
     /// `protected` holds folders strictly below the root; `root_protected`
     /// means the root itself is inside a protected folder.
+    /// Favorites and tags (kept in their own stores, keyed by relative path).
+    pub fn apply_org(&mut self, favorites: &HashSet<String>, tags: &HashMap<String, Vec<u32>>) {
+        for e in self.files.iter_mut().chain(self.dirs.iter_mut()) {
+            e.favorite = favorites.contains(&e.path);
+            e.tags = tags.get(&e.path).cloned().unwrap_or_default();
+        }
+    }
+
+    /// User corrections: `not` = never a screenshot/recording, `yes` = one.
+    pub fn apply_capture(&mut self, not: &HashSet<String>, yes: &HashSet<String>) {
+        for e in self.files.iter_mut() {
+            e.capture = if not.contains(&e.path) {
+                crate::capture::NONE
+            } else if yes.contains(&e.path) {
+                match e.kind {
+                    Kind::Photo => crate::capture::SCREENSHOT,
+                    Kind::Video => crate::capture::RECORDING,
+                    _ => crate::capture::NONE,
+                }
+            } else {
+                e.capture_auto
+            };
+        }
+    }
+
     pub fn apply_protection(&mut self, protected: &HashSet<String>, root_protected: bool) {
         for e in self.files.iter_mut().chain(self.dirs.iter_mut()) {
             e.protected = e.kind == Kind::Folder && protected.contains(&e.path);
@@ -412,6 +471,10 @@ pub fn make_entry(path: String, name: String, is_dir: bool, meta: &fs::Metadata)
         created: millis(meta.created()),
         key,
         ino: if is_dir { crate::privacy::ino_of(meta) } else { 0 },
+        capture_auto: 0,
+        capture: 0,
+        favorite: false,
+        tags: Vec::new(),
         boundary: 0,
         private: false,
         protected: false,
@@ -468,6 +531,10 @@ pub fn scan(
             entry.size = 0;
             entry.link_outside = target.as_deref().is_none_or(|t| link_escapes(root, item.path(), t));
             entry.link = Some(target.map(|t| t.to_string_lossy().into_owned()).unwrap_or_default());
+        }
+        if ft.is_file() {
+            entry.capture_auto = crate::capture::detect(item.path(), &entry.name, entry.kind);
+            entry.capture = entry.capture_auto;
         }
         if ft.is_dir() {
             dirs.push(entry);
@@ -630,7 +697,24 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
     let tokens: Vec<String> = fold(&q.search).split_whitespace().map(String::from).collect();
     let searching = !tokens.is_empty();
     let kind = Kind::parse(&q.kind);
-    let kind_ok = |e: &Entry| kind.is_none_or(|k| e.kind == k);
+    let capture = match q.kind.as_str() {
+        "screenshot" => Some(crate::capture::SCREENSHOT),
+        "recording" => Some(crate::capture::RECORDING),
+        _ => None,
+    };
+    let favorites = q.kind == "favorites";
+    let tag: Option<u32> = q.kind.strip_prefix("tag:").and_then(|t| t.parse().ok());
+    let kind_ok = |e: &Entry| {
+        if favorites {
+            e.favorite
+        } else if let Some(t) = tag {
+            e.tags.contains(&t)
+        } else if let Some(c) = capture {
+            e.capture == c
+        } else {
+            kind.is_none_or(|k| e.kind == k)
+        }
+    };
 
     // Scope: the whole drive (library views, global search) or one folder,
     // optionally including everything beneath it. Everything comes from the
@@ -672,7 +756,14 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
     // only when no type filter is active; never in recursive (flattened) views.
     let show_dirs =
         q.scope != "library" && if searching { kind.is_none() && (drive_wide || !recursive) } else { !recursive };
-    let mut dirs: Vec<&Entry> = if show_dirs { idx.dirs.iter().filter(|e| wanted(e)).collect() } else { Vec::new() };
+    // Favorites and tags include folders (drive-wide, like the files).
+    let mut dirs: Vec<&Entry> = if favorites || tag.is_some() {
+        idx.dirs.iter().filter(|e| kind_ok(e) && wanted(e)).collect()
+    } else if show_dirs {
+        idx.dirs.iter().filter(|e| wanted(e)).collect()
+    } else {
+        Vec::new()
+    };
     let mut files: Vec<&Entry> = idx.files.iter().filter(|e| kind_ok(e) && wanted(e)).collect();
 
     let sort = q.sort.as_str();
@@ -716,6 +807,8 @@ pub struct Stats {
     pub audio: usize,
     pub other: usize,
     pub links: usize,
+    pub screenshot: usize,
+    pub recording: usize,
     pub bytes: u64,
 }
 
@@ -729,6 +822,11 @@ pub fn stats(idx: &Index) -> Stats {
     };
     for e in idx.files.iter().filter(visible) {
         s.bytes += e.size;
+        match e.capture {
+            crate::capture::SCREENSHOT => s.screenshot += 1,
+            crate::capture::RECORDING => s.recording += 1,
+            _ => {}
+        }
         match e.kind {
             Kind::Photo => s.photo += 1,
             Kind::Video => s.video += 1,
@@ -990,6 +1088,70 @@ mod tests {
         assert!(has(&lib(&idx, "photo"), "Pictures/Private/MorePrivate/deep.jpg"));
         assert_eq!(stats(&idx).files, 11);
         assert_eq!(names(&query(&idx, &Query { recursive: true, ..parent })).len(), 11);
+    }
+
+    #[test]
+    fn favorites_and_tags_filter_files_and_folders() {
+        let d = tempdir::Dir::new();
+        fs::create_dir_all(d.0.join("Trips/Rome")).unwrap();
+        fs::write(d.0.join("Trips/Rome/a.jpg"), b"x").unwrap();
+        fs::write(d.0.join("b.jpg"), b"x").unwrap();
+        let mut idx = scan_tree(&d);
+        let fav: HashSet<String> = ["Trips/Rome".to_string(), "b.jpg".to_string()].into();
+        let tags: HashMap<String, Vec<u32>> =
+            [("Trips/Rome/a.jpg".to_string(), vec![7]), ("b.jpg".to_string(), vec![7, 9])].into();
+        idx.apply_org(&fav, &tags);
+        let q = |idx: &Index, k: &str| {
+            let mut v: Vec<String> =
+                query(idx, &Query { scope: "library".into(), kind: k.into(), ..Default::default() })
+                    .items
+                    .iter()
+                    .map(|e| e.path.clone())
+                    .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(q(&idx, "favorites"), ["Trips/Rome", "b.jpg"]);
+        assert_eq!(q(&idx, "tag:7"), ["Trips/Rome/a.jpg", "b.jpg"]);
+        assert_eq!(q(&idx, "tag:9"), ["b.jpg"]);
+        assert!(q(&idx, "tag:1").is_empty());
+        // Private folders stay boundaries for these views too.
+        idx.apply_boundaries(&["Trips".to_string()].into());
+        assert_eq!(q(&idx, "tag:7"), ["b.jpg"]);
+    }
+
+    #[test]
+    fn screenshots_and_corrections() {
+        let d = tempdir::Dir::new();
+        for n in [
+            "Screenshot 2024-01-01 at 10.00.png",
+            "Screen Recording 2024.mov",
+            "beach.jpg",
+            "Screenshot of my essay.png",
+        ] {
+            fs::write(d.0.join(n), b"x").unwrap();
+        }
+        let mut idx = scan_tree(&d);
+        let q = |idx: &Index, k: &str| {
+            let mut v: Vec<String> =
+                query(idx, &Query { scope: "library".into(), kind: k.into(), ..Default::default() })
+                    .items
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(q(&idx, "screenshot"), ["Screenshot 2024-01-01 at 10.00.png", "Screenshot of my essay.png"]);
+        assert_eq!(q(&idx, "recording"), ["Screen Recording 2024.mov"]);
+        // The user corrects a false positive and marks a real screenshot.
+        let not: HashSet<String> = ["Screenshot of my essay.png".to_string()].into();
+        let yes: HashSet<String> = ["beach.jpg".to_string()].into();
+        idx.apply_capture(&not, &yes);
+        assert_eq!(q(&idx, "screenshot"), ["Screenshot 2024-01-01 at 10.00.png", "beach.jpg"]);
+        assert_eq!(stats(&idx).screenshot, 2);
+        idx.apply_capture(&HashSet::new(), &HashSet::new());
+        assert_eq!(q(&idx, "screenshot").len(), 2, "back to the guess");
     }
 
     /// Symlinks are listed and described, never followed: a link to "/" or

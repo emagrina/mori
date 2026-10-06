@@ -36,13 +36,13 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 **Nothing is executed and nothing reaches the network.**
 - The webview CSP is `default-src 'none'`, plus scripts and styles from the bundle, images and media from `mori:` only, and IPC. Prototypes are frozen, and navigation away from the bundled UI is blocked.
 - There's no `eval`, no `innerHTML`, and no file content inserted as markup. Names, paths, text and metadata are rendered as plain text, so URLs inside files are never clickable. Filenames have control and bidi-override characters replaced, so `photo\u202Egpj.exe` can't pose as a `.jpg`.
-- HTML, SVG and PDF are never rendered inside Mori.
+- HTML and SVG are never rendered inside Mori. PDFs are only ever shown as bitmaps rasterised by the sandboxed worker (see *PDFs* below).
 - *Open in system* runs only when you click it, and only for passive formats (photos, video, audio, PDF, text, Office documents). It is refused for anything whose content is executable (Mach-O, PE, ELF, `#!` scripts) or contradicts its extension. Mori launches the OS opener directly (`/usr/bin/open`, `explorer.exe`) with an argument array and never uses a shell.
 - The scanner never follows symlinks and never enters other mounted filesystems. It indexes only regular files and folders (no devices, FIFOs or sockets), stops 64 levels deep, and skips names that aren't valid Unicode.
 
 **Mori is quiet and conservative about changes.** Browsing, previews and duplicate analysis open files for reading only. Release builds log nothing. Search history is not stored.
 
-**File changes** are limited to two operations, each triggered only by an explicit user action and implemented in `src-tauri/src/fileops.rs`:
+**File changes** are limited to the operations below, each triggered only by an explicit user action and implemented in `src-tauri/src/fileops.rs` (plus `overwrite.rs`). They are always policy-checked first. The rest of this section was written for the first two; see *File operations* below for the others.
 
 - **Rename.** The new name is validated: no separators, `..`, leading dots, control or bidi characters, reserved Windows names, or trailing dots/spaces. The rename is atomic and never replaces an existing item (`renamex_np(RENAME_EXCL)` / `renameat2(RENAME_NOREPLACE)` / `MoveFileExW` without `REPLACE_EXISTING`).
 - **Move to Trash** through the OS Trash / Recycle Bin (`NSFileManager` on macOS, the shell on Windows, freedesktop trash on Linux). There is no permanent-delete code path. If the platform refuses, the item stays where it is and the failure is reported.
@@ -76,6 +76,109 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Decisions:** "Not duplicates" decisions are stored as pairs of 16-byte content identities (size plus partial BLAKE3), with no names or paths.
 - **Cleanup:** uses the same validated executor as exact duplicates (at least one copy kept, kept copies re-checked, OS Trash only, Live Photo halves together).
 - **Failures:** a file that can't be decoded or sampled is reported as "could not safely analyze" and remembered until it changes; the rest of the analysis continues.
+
+## PDFs (macOS)
+
+- **Where.** `pdf.rs` runs only inside the worker (`pdfinfo`, `pdfpage` ops). The UI receives JPEG bitmaps of pages and a short `key=value` fact list (page count, encryption, info fields, presence of JavaScript / OpenAction / embedded files / forms).
+- **Renderer.** CoreGraphics' PDF renderer draws page content only. It has no JavaScript engine and does not perform actions, follow links, open attachments or fetch anything.
+- **Sandbox.** PDF jobs use a dedicated deny-by-default profile. The only additions over pure computation are read access to system fonts and frameworks (needed to draw the standard fonts documents reference without embedding) and metadata reads under system paths. No IPC services, no IOKit, no writes, no network, no processes. `cargo test --test worker` checks both that text renders and that user files, writes, network and process creation are denied.
+- **Limits.** 160 MB input, 5,000 pages, page sizes up to 2,400 px, 25 s per page, absurd page boxes refused. Locked PDFs aren't rendered.
+
+## Archives
+
+- **Listing only.** `archive.rs` parses ZIP (central directory, ZIP64), TAR (ustar, pax and GNU long names) and gzip in the main process. Nothing is extracted or written; no entry is ever opened by another program.
+- **Why not the worker.** Parsing is bounded, memory-safe Rust over directory metadata (plus streaming inflate for gzip and nested archives, with hard byte caps). This is a deliberate deviation from worker isolation, documented here.
+- **Defences.** 200,000 entries, 128 MB central directory, 3 nesting levels, 64 MB per nested archive, 512 MB total inflation, 20 s time budget, `catch_unwind` around the whole listing. Declared sizes are never trusted for allocation.
+- **Findings.** Traversal (`../`), absolute and drive-letter paths, control characters, symlinks, encrypted entries, zip-bomb ratios, entry counts, nesting depth, and partial listings.
+
+## Metadata
+
+- **Parsing in the worker.** `metadata.rs` (EXIF via the pure-Rust `kamadak-exif`, plus Mori's own bounded readers for XMP, IPTC, MP4/QuickTime atoms, ID3v2 and FLAC) runs only in the worker, under the pure-computation sandbox.
+- **What the worker gets.**
+  - MP4/MOV: the `moov` box, located by walking box headers.
+  - Other files: the first 4 MB (scan) or 32 MB (inspector).
+  - Output is JSON; the host re-checks every string (control and bidi characters, lengths) and every coordinate.
+- **XMP is read as text.** There is no DTD, no entity definitions and no external references. Only the five XML entities and numeric references are decoded.
+- **Limits.** 1,500 fields, 400 characters per value, 2 MB XMP, MP4 nesting depth 8, 4,096 boxes per level, the exif crate's own IFD-count cap.
+- **One failure, one result.** Scans parse files in batches of 32 in one worker. If a batch's worker fails, each file is re-parsed in its own worker. Inside the worker each item is also isolated with `catch_unwind`.
+- **Sanitized copies.** `sanitize.rs` rewrites containers in the worker (no re-encoding).
+  - JPEG: only JFIF, ICC, Adobe and the image segments are kept; everything after the main image's EOI is dropped.
+  - PNG: a whitelist of image chunks.
+  - WebP: image chunks only, with the VP8X flags fixed.
+  - Verification before writing: the output must decode to the same dimensions as the original, and a fresh metadata read must find no sensitive field or position.
+  - Writing: `fileops::create_new` checks the mutation policy (`Create`), then `openat(O_CREAT|O_EXCL|O_NOFOLLOW)` under an `O_NOFOLLOW` directory handle. It never replaces anything and never writes through a symlink. The file is then read back and hashed.
+- **Map.** Land outlines are bundled (`src/assets/world.ts`, Natural Earth 1:110m, public domain). The CSP already blocks every remote origin, so even a bug couldn't load tiles.
+
+## Open in Isolation and Safe Inspection Mode
+
+- **Isolation** is a view, not a container. The `mori://iso-*` routes are explicit per-file requests. The isolated view never offers *Open in system* and never falls back to the original. Video is shown as worker-re-encoded still frames (the frames themselves are decoded by the system web view's sandboxed media engine, behind the codec probe, blocklist and watchdog).
+- **Safe Inspection Mode** is enforced in the protocol handler. For files under a drive in this mode, `thumb`, `preview`, `media`, `frame` and `pdf` requests without the `iso-` prefix return 403, and `store_frame` refuses non-explicit frames. The UI also skips video-thumbnail capture. A counter records how many media were decoded since the drive was opened.
+- **Drive detection** polls `/Volumes` every 3 s for real, browsable mount points (macOS). Drives present at launch and drives Mori already knows are not announced. Nothing on the drive is read until you choose *Inspect Safely*.
+
+## Media intelligence
+
+- **Difference view.** It is computed in the web view from the two worker-made previews (never the originals), read through Mori's protocol with CORS. Nothing new is decoded outside the existing paths.
+- **Capture times for bursts.** They are read only for photos already in Similar Media groups, through the worker metadata op (1 MB per file).
+- **Screenshot detection.** It uses file names plus, on macOS, one `getxattr(…, XATTR_NOFOLLOW)` size query per photo/video during the index scan. No content is read.
+- **Corrections.** They are stored like private folders (`capture-not.json`, `capture-yes.json`), keyed per volume.
+
+## Storage, empty folders and media health
+
+- **Storage** is pure arithmetic over the in-memory index. Private-folder contents are excluded.
+- **Empty folders.** The index hides dotfiles, so every candidate is re-walked on disk with `symlink_metadata` (no link is followed; any link makes the folder non-empty), within 32 levels and 10,000 entries.
+  - Only `.DS_Store`, `.localized`, `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `Icon\r` and small `._*` AppleDouble files count as clutter.
+  - The walk is repeated right before each move to the Trash, through `fileops::move_to_trash` and the mutation policy.
+- **Media Health.**
+  - Type and risk checks read only the head and tail.
+  - Images are decoded by the worker with the usual limits. A cached thumbnail for the same file version counts as decoded.
+  - Videos use the sandboxed container probe and the blocklist. Audio gets type checks only.
+  - Worker failures are reported precisely: unsupported, damaged data, safety limits, timeout or crash.
+  - Every check is isolated with `catch_unwind`, and decodes count toward Safe Inspection Mode's "Media decoded".
+
+## Organization and sessions
+
+- **Where records live.** Favorites and tags are records in Mori's app data, keyed per volume like private folders. Nothing is written into files, extended attributes or metadata. Tag names are filtered of control and bidi characters and capped in length.
+- **Temporary session** (`AppState.temp`). While it is on:
+  - index caches are not saved;
+  - thumbnails go to the in-memory cache only;
+  - Similar Media uses no fingerprint cache;
+  - the folder isn't remembered;
+  - every command that changes Mori's records (private, protected, favorites, tags, screenshot corrections, drive previews) refuses with an explanation.
+  - Verified on the real app with a debug-only hook: no file in app data or the cache changed during a temporary session.
+  - The video blocklist (opaque hashes, no paths) is still kept, because it protects the web view.
+- **Forget This Drive.** It deletes only through `remove_app_path`, which refuses anything not strictly inside Mori's own data or cache directory (tested).
+  - What is removed: index caches whose recorded root is on the volume, the per-volume thumbnail folder, and the volume's records in every store.
+  - Verified on the real app: the drive's files were identical before and after.
+  - Similar-media fingerprints are content-addressed and can't be attributed to a drive; Clear Cache removes them.
+  - Thumbnails made before this version sit in the old shared layout until Clear Cache.
+
+## Audio, filmstrips and scrubbing
+
+- **The `mori://audio` route** serves bounded byte ranges only for MP3, AAC/M4A, WAV, AIFF and FLAC identified by magic bytes. A PNG or an executable named `.mp3` is refused (tested).
+  - The route respects Safe Inspection Mode and the media blocklist.
+  - Playback and the waveform decode run in the system web view's media engine, inside a media session, so the existing hang/crash recovery and blocklist cover them.
+  - The waveform is decoded at 3 kHz, only for files of at most 32 MB.
+  - The isolated view doesn't play audio, because that would be the original bytes.
+- **Filmstrip and hover-scrub frames** go through the same capture path as the isolated view: the webview decodes, the worker re-encodes, and the cache stores the copies. Non-explicit requests are refused in Safe Inspection Mode.
+- **Quick Look** is Mori's own preview in a floating panel. Mori never invokes the system Quick Look or any other viewer.
+
+## File operations
+
+- **Trash.** On macOS, Mori calls NSFileManager `trashItemAtURL:resultingItemURL:` directly and keeps the resulting location (in memory, for this session) so Undo can move the item back.
+  - Undo goes through `fileops::restore_from_trash`. It checks the policy (`Restore`), then uses an exclusive rename (`renamex_np(RENAME_EXCL)`), so it never overwrites an item that took the name.
+  - Other platforms use the `trash` crate and don't offer Undo for Trash.
+- **Operation plans** (`plan_operation`) run the same confinement and policy checks as the real operation, without doing anything.
+- **Permanent delete** (`fileops::delete_permanently`).
+  - Policy `Delete`: refused for protected folders, or folders containing one.
+  - Links are unlinked, never followed.
+  - Folders are removed with std's `remove_dir_all`, which never follows symlinks.
+  - `delete_items` re-plans on the backend and requires the literal confirmation `DELETE` for folders and large batches, whatever the UI sends.
+- **Secure Overwrite** (`overwrite.rs`).
+  - Eligibility is computed from `statfs` (file system type) and IOKit "Device Characteristics → Medium Type" for the volume's device. Anything other than a confirmed rotational disk with an in-place file system is refused, with a reason.
+  - The overwrite opens with `O_NOFOLLOW`, rejects links and files with other hard links, and checks the inode didn't change between check and open.
+  - It writes one pass of PRNG data, then `fsync` + `F_FULLFSYNC`, then unlinks.
+  - Tests check that the bytes are replaced in place (read through a handle opened before), that link targets and hard-linked twins are never touched, and that the system disk (APFS/SSD) is refused.
+- **History** (`history.rs`) is in memory only. Permanent deletions are recorded as not undoable.
 
 ## Mutation policy
 

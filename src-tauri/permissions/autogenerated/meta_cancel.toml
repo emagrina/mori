@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-meta-cancel"
+description = "Enables the meta_cancel command without any pre-configured scope."
+commands.allow = ["meta_cancel"]
+
+[[permission]]
+identifier = "deny-meta-cancel"
+description = "Denies the meta_cancel command without any pre-configured scope."
+commands.deny = ["meta_cancel"]

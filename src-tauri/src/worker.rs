@@ -52,6 +52,17 @@ pub enum Op {
     Probe,
     /// Normalized grayscale miniatures of a still image for similarity analysis.
     Fingerprint,
+    /// PDF facts (pages, info fields, presence of active content) as text.
+    PdfInfo,
+    /// One PDF page rendered to a bitmap (input: u32 LE page number + PDF).
+    PdfPage,
+    /// Embedded metadata of one file as JSON (input: see `metadata::extract`).
+    Meta,
+    /// Metadata of several files (input: repeated u32 LE length + item);
+    /// a JSON array with `null` for items that failed.
+    MetaBatch,
+    /// The same image without its metadata (JPEG/PNG/WebP, see `sanitize.rs`).
+    Sanitize,
 }
 
 impl Op {
@@ -62,6 +73,11 @@ impl Op {
             Op::Frame => "frame",
             Op::Probe => "probe",
             Op::Fingerprint => "fingerprint",
+            Op::PdfInfo => "pdfinfo",
+            Op::PdfPage => "pdfpage",
+            Op::Meta => "meta",
+            Op::MetaBatch => "metabatch",
+            Op::Sanitize => "sanitize",
         }
     }
     fn parse(s: &str) -> Option<Op> {
@@ -71,6 +87,11 @@ impl Op {
             "frame" => Op::Frame,
             "probe" => Op::Probe,
             "fingerprint" => Op::Fingerprint,
+            "pdfinfo" => Op::PdfInfo,
+            "pdfpage" => Op::PdfPage,
+            "meta" => Op::Meta,
+            "metabatch" => Op::MetaBatch,
+            "sanitize" => Op::Sanitize,
             _ => return None,
         })
     }
@@ -85,6 +106,12 @@ pub enum OutFormat {
     Probe = 4,
     /// `Op::Fingerprint`: FP_VARIANTS raw FP_SIDE×FP_SIDE grayscale planes.
     Raw = 5,
+    /// `Op::PdfInfo`: plain `key=value` lines.
+    Text = 6,
+    /// `Op::Meta`/`Op::MetaBatch`: JSON.
+    Json = 7,
+    /// `Op::Sanitize`: the rewritten file.
+    Bytes = 8,
 }
 
 /// Side of the normalized grayscale miniatures made by `Op::Fingerprint`.
@@ -101,6 +128,9 @@ impl OutFormat {
             OutFormat::Gif => "image/gif",
             OutFormat::Probe => "text/plain",
             OutFormat::Raw => "application/octet-stream",
+            OutFormat::Text => "text/plain",
+            OutFormat::Json => "application/json",
+            OutFormat::Bytes => "application/octet-stream",
         }
     }
     pub fn ext(self) -> &'static str {
@@ -110,6 +140,9 @@ impl OutFormat {
             OutFormat::Gif => "gif",
             OutFormat::Probe => "txt",
             OutFormat::Raw => "bin",
+            OutFormat::Text => "txt",
+            OutFormat::Json => "json",
+            OutFormat::Bytes => "bin",
         }
     }
 }
@@ -140,9 +173,17 @@ pub fn worker_main(args: &[String]) -> ! {
     // Lock down first; refuse to touch input if the sandbox can't be applied.
     restrict_resources();
     // HEIC jobs (flag set by the host from the magic bytes) need Apple's HEVC
-    // decoder service; everything else gets the strictest profile.
-    let heif = args.iter().skip(1).take(2).any(|a| a == "heif");
-    if !enter_sandbox(heif) {
+    // decoder service; PDF jobs need to read the system fonts; everything else
+    // gets the strictest profile.
+    let extra = |flag: &str| args.iter().skip(1).take(2).any(|a| a == flag);
+    let profile = if extra("heif") {
+        Profile::Heif
+    } else if matches!(args.first().map(String::as_str), Some("pdfinfo" | "pdfpage")) || extra("pdf") {
+        Profile::Pdf
+    } else {
+        Profile::Pure
+    };
+    if !enter_sandbox(profile) {
         std::process::exit(EXIT_SANDBOX);
     }
     if args.first().map(String::as_str) == Some("selftest") {
@@ -177,6 +218,13 @@ pub fn worker_main(args: &[String]) -> ! {
         ),
         Op::Probe => probe_video(&input),
         Op::Fingerprint => fingerprint(&input),
+        Op::PdfInfo => pdf_info(&input),
+        Op::PdfPage => pdf_page(&input, max),
+        Op::Meta => meta(&input),
+        Op::MetaBatch => meta_batch(&input),
+        Op::Sanitize => crate::sanitize::sanitize(&input)
+            .map(|bytes| Output { width: 0, height: 0, format: OutFormat::Bytes, bytes })
+            .map_err(|e| if e == "unsupported" { EXIT_UNSUPPORTED } else { EXIT_DECODE }),
     };
     match result {
         Ok(out) => {
@@ -289,6 +337,69 @@ fn decode_any_still(input: &[u8], max: u32) -> Result<(DynamicImage, u32, u32), 
     let img = decode_oriented(input, format)?;
     let (w, h) = (img.width(), img.height());
     Ok((img, w, h))
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_info(input: &[u8]) -> Result<Output, i32> {
+    if !input.starts_with(b"%PDF-") {
+        return Err(EXIT_UNSUPPORTED);
+    }
+    let text = crate::pdf::info(input).ok_or(EXIT_DECODE)?;
+    let bytes: Vec<u8> = text.into_bytes().into_iter().take(16 * 1024).collect();
+    Ok(Output { width: 0, height: 0, format: OutFormat::Text, bytes })
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_page(input: &[u8], max: u32) -> Result<Output, i32> {
+    let (num, pdf) = input.split_at_checked(4).ok_or(EXIT_USAGE)?;
+    let page = u32::from_le_bytes(num.try_into().unwrap()) as usize;
+    if !pdf.starts_with(b"%PDF-") {
+        return Err(EXIT_UNSUPPORTED);
+    }
+    let rgba = crate::pdf::render(pdf, page, max).ok_or(EXIT_DECODE)?;
+    let (w, h) = (rgba.width(), rgba.height());
+    encode_still(DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(rgba).to_rgb8()), w, h)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pdf_info(_: &[u8]) -> Result<Output, i32> {
+    Err(EXIT_UNSUPPORTED)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pdf_page(_: &[u8], _: u32) -> Result<Output, i32> {
+    Err(EXIT_UNSUPPORTED)
+}
+
+const MAX_META_JSON: usize = 4 * 1024 * 1024;
+
+fn meta(input: &[u8]) -> Result<Output, i32> {
+    let m = crate::metadata::extract(input).ok_or(EXIT_UNSUPPORTED)?;
+    let bytes = serde_json::to_vec(&m).map_err(|_| EXIT_DECODE)?;
+    if bytes.len() > MAX_META_JSON {
+        return Err(EXIT_LIMITS);
+    }
+    Ok(Output { width: 0, height: 0, format: OutFormat::Json, bytes })
+}
+
+/// Each item is parsed on its own; a panic in one only nulls that item.
+fn meta_batch(input: &[u8]) -> Result<Output, i32> {
+    let mut items: Vec<Option<crate::metadata::Meta>> = Vec::new();
+    let mut i = 0;
+    while i < input.len() {
+        let len = input.get(i..i + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).ok_or(EXIT_USAGE)?;
+        let item = input.get(i + 4..i + 4 + len).ok_or(EXIT_USAGE)?;
+        items.push(std::panic::catch_unwind(|| crate::metadata::extract(item)).ok().flatten());
+        i += 4 + len;
+        if items.len() > 256 {
+            return Err(EXIT_LIMITS);
+        }
+    }
+    let bytes = serde_json::to_vec(&items).map_err(|_| EXIT_DECODE)?;
+    if bytes.len() > MAX_META_JSON {
+        return Err(EXIT_LIMITS);
+    }
+    Ok(Output { width: 0, height: 0, format: OutFormat::Json, bytes })
 }
 
 /// The fingerprint operation without a separate process: tests only.
@@ -441,15 +552,35 @@ const HEIF_PROFILE: &str = r#"(version 1)
 (deny process-info* (target others))
 (deny system-info pseudo-tty lsopen system-kext*)"#;
 
+/// PDF jobs: CoreGraphics draws the standard PDF fonts (Helvetica, Times…)
+/// that documents reference without embedding from the system font files.
+/// Reading system fonts and frameworks is all that is added; no IPC service,
+/// no IOKit, no writes, no network, no processes.
 #[cfg(target_os = "macos")]
-fn enter_sandbox(heif: bool) -> bool {
+const PDF_PROFILE: &str = r#"(version 1)
+(deny default)
+(allow file-read* (subpath "/System/Library/Fonts") (subpath "/System/Library/Frameworks") (subpath "/System/Library/PrivateFrameworks") (subpath "/Library/Fonts") (subpath "/usr/share") (subpath "/private/var/db/dyld"))
+(allow file-read-metadata (literal "/") (literal "/private") (literal "/private/var") (literal "/private/var/db") (subpath "/System") (subpath "/Library") (subpath "/usr"))
+(allow sysctl-read)"#;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Profile {
+    Pure,
+    Heif,
+    Pdf,
+}
+
+#[cfg(target_os = "macos")]
+fn enter_sandbox(profile: Profile) -> bool {
     use std::ffi::{c_char, c_int, CString};
     extern "C" {
         fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
         fn sandbox_free_error(errorbuf: *mut c_char);
     }
     const SANDBOX_NAMED: u64 = 0x0001;
-    let custom = if heif {
+    let custom = if profile == Profile::Pdf {
+        CString::new(PDF_PROFILE).ok()
+    } else if profile == Profile::Heif {
         // Mori's own app bundle (or the executable's folder outside a bundle),
         // inserted literally; refused if it contains characters that would
         // need escaping.
@@ -485,7 +616,7 @@ fn enter_sandbox(heif: bool) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn enter_sandbox(_heif: bool) -> bool {
+fn enter_sandbox(_profile: Profile) -> bool {
     // Linux: rlimits + no_new_privs (see restrict_resources); Windows: Job object
     // applied by the host. The worker still never receives a path.
     true
@@ -510,7 +641,13 @@ fn selftest() -> ! {
 pub enum WorkerError {
     /// Not a format the worker will decode.
     Unsupported,
-    /// Crashed, timed out, hit a limit or produced garbage.
+    /// The data is damaged: the decoder rejected it.
+    Decode,
+    /// Over a safety limit (dimensions, pixels, memory, input size).
+    Limits,
+    /// Took too long and was killed.
+    Timeout,
+    /// Crashed, or produced output that failed validation.
     Failed,
 }
 
@@ -594,12 +731,13 @@ pub fn run(op: Op, max: u32, input: Vec<u8>, timeout: std::time::Duration) -> Re
     };
     let _ = writer.join();
     let out = reader.join().unwrap_or_default();
-    let Some(status) = status else { return Err(WorkerError::Failed) };
-    if status.code() == Some(EXIT_UNSUPPORTED) {
-        return Err(WorkerError::Unsupported);
-    }
-    if !status.success() {
-        return Err(WorkerError::Failed);
+    let Some(status) = status else { return Err(WorkerError::Timeout) };
+    match status.code() {
+        Some(0) => {}
+        Some(EXIT_UNSUPPORTED) => return Err(WorkerError::Unsupported),
+        Some(EXIT_DECODE) => return Err(WorkerError::Decode),
+        Some(EXIT_LIMITS) => return Err(WorkerError::Limits),
+        _ => return Err(WorkerError::Failed),
     }
     parse_output(out)
 }
@@ -616,6 +754,9 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         3 => OutFormat::Gif,
         4 => OutFormat::Probe,
         5 => OutFormat::Raw,
+        6 => OutFormat::Text,
+        7 => OutFormat::Json,
+        8 => OutFormat::Bytes,
         _ => return Err(WorkerError::Failed),
     };
     // Double-check the payload really is the format the worker claimed.
@@ -625,6 +766,12 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         OutFormat::Gif => out[16..].starts_with(b"GIF8"),
         OutFormat::Probe => out.len() <= 16 + 512 && out[16..].starts_with(b"video="),
         OutFormat::Raw => out.len() == 16 + FP_LEN,
+        OutFormat::Text => {
+            out.len() <= 16 + 16 * 1024 && out[16..].starts_with(b"pages=") && std::str::from_utf8(&out[16..]).is_ok()
+        }
+        OutFormat::Json => out.len() <= 16 + MAX_META_JSON && matches!(out.get(16), Some(b'{' | b'[')),
+        // The caller checks what it asked for (see metascan.rs).
+        OutFormat::Bytes => out.len() > 16,
     };
     if !ok_magic {
         return Err(WorkerError::Failed);

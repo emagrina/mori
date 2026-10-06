@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-meta-pause"
+description = "Enables the meta_pause command without any pre-configured scope."
+commands.allow = ["meta_pause"]
+
+[[permission]]
+identifier = "deny-meta-pause"
+description = "Denies the meta_pause command without any pre-configured scope."
+commands.deny = ["meta_pause"]
