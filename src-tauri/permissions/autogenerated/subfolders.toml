@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-subfolders"
+description = "Enables the subfolders command without any pre-configured scope."
+commands.allow = ["subfolders"]
+
+[[permission]]
+identifier = "deny-subfolders"
+description = "Denies the subfolders command without any pre-configured scope."
+commands.deny = ["subfolders"]

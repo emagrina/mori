@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The only permissions Mori's UI has: listen for its own events, drag the window, and call Mori's own narrow commands. No filesystem, shell, HTTP, opener or dialog plugin APIs are exposed.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "allow-init",
+    "allow-update-settings",
+    "allow-choose-root",
+    "allow-rescan",
+    "allow-clear-cache",
+    "allow-get-status",
+    "allow-query",
+    "allow-stats",
+    "allow-subfolders",
+    "allow-inspect",
+    "allow-preview-info",
+    "allow-read-text",
+    "allow-open-file",
+    "allow-reveal-file",
+    "allow-copy-path",
+    "allow-store-frame",
+    "allow-video-session-start",
+    "allow-ui-alive",
+    "allow-video-session-end",
+    "allow-take-recovered"
+  ]
+}

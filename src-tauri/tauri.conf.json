@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Mori",
+  "version": "1.0.0",
+  "identifier": "app.mori.viewer",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "csp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' mori: http://mori.localhost",
+        "media-src": "mori: http://mori.localhost",
+        "connect-src": "ipc: http://ipc.localhost",
+        "font-src": "'none'",
+        "frame-src": "'none'",
+        "object-src": "'none'",
+        "worker-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'none'",
+        "script-src": "'self' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' mori: http://mori.localhost",
+        "media-src": "mori: http://mori.localhost",
+        "connect-src": "ipc: http://ipc.localhost ws://127.0.0.1:1420",
+        "font-src": "'none'",
+        "frame-src": "'none'",
+        "object-src": "'none'",
+        "worker-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
+    "category": "Utility",
+    "shortDescription": "Offline media browser for external drives",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

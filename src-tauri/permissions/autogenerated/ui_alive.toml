@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ui-alive"
+description = "Enables the ui_alive command without any pre-configured scope."
+commands.allow = ["ui_alive"]
+
+[[permission]]
+identifier = "deny-ui-alive"
+description = "Denies the ui_alive command without any pre-configured scope."
+commands.deny = ["ui_alive"]

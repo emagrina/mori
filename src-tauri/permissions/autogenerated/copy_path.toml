@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-copy-path"
+description = "Enables the copy_path command without any pre-configured scope."
+commands.allow = ["copy_path"]
+
+[[permission]]
+identifier = "deny-copy-path"
+description = "Denies the copy_path command without any pre-configured scope."
+commands.deny = ["copy_path"]
