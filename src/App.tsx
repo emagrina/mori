@@ -5,6 +5,7 @@ import {
   formatSize,
   isMac,
   plural,
+  PRIVATE_HINT,
   resetThumbs,
   setPreviewOpen,
   startSimilarCaptureService,
@@ -59,7 +60,10 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: "type", label: "Type" },
 ];
 
-type Dialog = { kind: "trash"; entries: Entry[]; summary: TrashSummary } | { kind: "rename"; entry: Entry };
+type Dialog =
+  | { kind: "trash"; entries: Entry[]; summary: TrashSummary }
+  | { kind: "rename"; entry: Entry }
+  | { kind: "private"; entry: Entry };
 
 const EMPTY: QueryResult = { items: [], total: 0, truncated: false, crumbs: [] };
 
@@ -289,6 +293,19 @@ export default function App() {
     selectOnly(newId);
     if (loc.scope === "folder" && loc.folder === entry.id) setLoc({ scope: "folder", folder: newId });
     flash("Renamed");
+  };
+
+  const setPrivate = async (entry: Entry, isPrivate: boolean) => {
+    setDialog(null);
+    try {
+      await api.setFolderPrivate(entry.id, isPrivate);
+      // The index is re-published with the new boundaries; refresh now.
+      setIndexVersion((v) => v + 1);
+      setAnalysisVersion((v) => v + 1);
+      flash(isPrivate ? `“${entry.name}” is now private` : `“${entry.name}” is public again`, 2500);
+    } catch (e) {
+      flash(String(e), 4000);
+    }
   };
 
   const clickItem = (i: number, { toggle, range }: { toggle: boolean; range: boolean }) => {
@@ -599,6 +616,11 @@ export default function App() {
             <h1 className="page-title" title={pageTitle}>
               {pageTitle}
               {pageNote && <span className="scope-note">{pageNote}</span>}
+              {folderScope && !(searching && searchGlobal) && result.privateScope && (
+                <span className="private-chip" title={PRIVATE_HINT}>
+                  <Icon name="lock" size={11} /> Private
+                </span>
+              )}
             </h1>
             {searching && folderScope && (
               <div className="segmented small" role="radiogroup" aria-label="Search scope">
@@ -703,6 +725,7 @@ export default function App() {
           count={menu.targets.length}
           onTrash={() => requestTrash(menu.targets)}
           onRename={() => setDialog({ kind: "rename", entry: menu.entry })}
+          onPrivacy={() => (menu.entry.private ? setPrivate(menu.entry, false) : setDialog({ kind: "private", entry: menu.entry }))}
           onPreview={() => (menu.entry.kind === "folder" ? navigate({ scope: "folder", folder: menu.entry.id }) : setPreviewId(menu.entry.id))}
           onCopy={() => copyPath(menu.entry)}
           onError={flash}
@@ -770,6 +793,9 @@ export default function App() {
 
       {dialog?.kind === "trash" && (
         <TrashDialog entries={dialog.entries} summary={dialog.summary} onCancel={() => setDialog(null)} onConfirm={() => moveToTrash(dialog.entries)} />
+      )}
+      {dialog?.kind === "private" && (
+        <PrivateDialog entry={dialog.entry} onCancel={() => setDialog(null)} onConfirm={() => setPrivate(dialog.entry, true)} />
       )}
       {dialog?.kind === "rename" && (
         <RenameDialog entry={dialog.entry} onCancel={() => setDialog(null)} onDone={(id, name) => renamed(dialog.entry, id, name)} />
@@ -862,9 +888,10 @@ function FolderTree({
           >
             <Icon name="chevron" size={12} />
           </button>
-          <button className="label" onClick={() => onOpen(f.id)} title={f.name}>
+          <button className="label" onClick={() => onOpen(f.id)} title={f.private ? `${f.name} — ${PRIVATE_HINT}` : f.name}>
             <Icon name="folder" size={15} />
             <span className="truncate">{f.name}</span>
+            {f.private && <Icon name="lock" size={11} className="private-mark" />}
           </button>
         </div>,
       );
@@ -883,6 +910,7 @@ function ContextMenu({
   onPreview,
   onCopy,
   onRename,
+  onPrivacy,
   onTrash,
   onError,
 }: {
@@ -894,6 +922,7 @@ function ContextMenu({
   onPreview: () => void;
   onCopy: () => void;
   onRename: () => void;
+  onPrivacy: () => void;
   onTrash: () => void;
   onError: (msg: string) => void;
 }) {
@@ -908,7 +937,7 @@ function ContextMenu({
       </div>
     );
   }
-  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 250) };
+  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 290) };
   return (
     <div className="menu" style={style} onContextMenu={(e) => e.preventDefault()}>
       <button onClick={onPreview}>
@@ -929,11 +958,41 @@ function ContextMenu({
       <button onClick={onRename}>
         <Icon name="rename" size={14} /> Rename…
       </button>
+      {folder && (
+        <button onClick={onPrivacy} title={entry.private ? undefined : PRIVATE_HINT}>
+          <Icon name="lock" size={14} /> {entry.private ? "Make Public" : "Make Private…"}
+        </button>
+      )}
       <div className="sep" />
       <button className="danger" onClick={onTrash}>
         <Icon name="trash" size={14} /> Move to Trash
       </button>
     </div>
+  );
+}
+
+/** Making a folder private changes what Mori shows elsewhere: confirm once. */
+function PrivateDialog({ entry, onCancel, onConfirm }: { entry: Entry; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <ModalFrame onCancel={onCancel}>
+      <div className="dialog-icon">
+        <Icon name="lock" size={20} />
+      </div>
+      <h2>Make “{entry.name}” private?</h2>
+      <p>
+        Its contents will no longer appear in global search, media categories, counts, recursive parent-folder views or analyses started from a parent
+        folder. You can still open the folder normally.
+      </p>
+      <p className="dialog-note">This only changes what Mori shows. Nothing on disk is modified, moved or encrypted.</p>
+      <div className="dialog-actions">
+        <button className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+        <button className="btn primary" onClick={onConfirm} autoFocus>
+          Make Private
+        </button>
+      </div>
+    </ModalFrame>
   );
 }
 

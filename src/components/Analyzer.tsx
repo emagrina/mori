@@ -544,7 +544,8 @@ function Setup(p: {
       </div>
       <p className="fineprint">
         Files are read locally and compared by size, then a partial fingerprint, then a full BLAKE3 hash. Media is never decoded, nothing is uploaded,
-        and results are kept only in memory until you clear them or quit Mori.
+        and results are kept only in memory until you clear them or quit Mori. Private folders inside the chosen locations are skipped; choose a
+        private folder directly to analyze it.
       </p>
     </div>
   );
