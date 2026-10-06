@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-info"
+description = "Enables the preview_info command without any pre-configured scope."
+commands.allow = ["preview_info"]
+
+[[permission]]
+identifier = "deny-preview-info"
+description = "Denies the preview_info command without any pre-configured scope."
+commands.deny = ["preview_info"]

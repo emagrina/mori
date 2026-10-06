@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-video-session-end"
+description = "Enables the video_session_end command without any pre-configured scope."
+commands.allow = ["video_session_end"]
+
+[[permission]]
+identifier = "deny-video-session-end"
+description = "Denies the video_session_end command without any pre-configured scope."
+commands.deny = ["video_session_end"]

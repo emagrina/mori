@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-store-frame"
+description = "Enables the store_frame command without any pre-configured scope."
+commands.allow = ["store_frame"]
+
+[[permission]]
+identifier = "deny-store-frame"
+description = "Denies the store_frame command without any pre-configured scope."
+commands.deny = ["store_frame"]
