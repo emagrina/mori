@@ -73,6 +73,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry } | null>(null);
+  // Small anchored menus: sort options and the sidebar overflow ("more") menu.
+  const [pop, setPop] = useState<{ kind: "sort" | "more"; x: number; y: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [indexVersion, setIndexVersion] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -247,7 +249,8 @@ export default function App() {
       }
       if (previewId) return; // the preview owns the keyboard
       if (e.key === "Escape") {
-        if (menu) setMenu(null);
+        if (pop) setPop(null);
+        else if (menu) setMenu(null);
         else if (inInput) {
           setSearch("");
           searchRef.current?.blur();
@@ -270,18 +273,21 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [previewId, menu, loc, items, goBack, navigate, activate, parentFolder]);
+  }, [previewId, menu, pop, loc, items, goBack, navigate, activate, parentFolder]);
 
   useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
+    if (!menu && !pop) return;
+    const close = () => {
+      setMenu(null);
+      setPop(null);
+    };
     window.addEventListener("click", close);
     window.addEventListener("blur", close);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("blur", close);
     };
-  }, [menu]);
+  }, [menu, pop]);
 
   // --------------------------------------------------------------- render
 
@@ -303,175 +309,170 @@ export default function App() {
   const showLocation = recursiveView || searching || !folderScope;
   const count = (k: KindFilter) => (stats ? (k === "all" ? stats.files : stats[k]) : undefined);
 
+  const openPop = (kind: "sort" | "more") => (ev: React.MouseEvent) => {
+    ev.stopPropagation();
+    const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenu(null);
+    setPop((p) => (p?.kind === kind ? null : { kind, x: kind === "sort" ? r.right : r.left, y: kind === "sort" ? r.bottom + 6 : r.top - 6 }));
+  };
+  const clearCache = () =>
+    api.clearCache().then(() => {
+      resetThumbs();
+      flash("Thumbnails and index cleared");
+    });
+  const pageTitle = searching && driveWide ? `Results for “${debounced}”` : !folderScope ? LIBRARY_TITLE[kind] : folderName;
+  const pageNote = searching && driveWide ? `in all of ${status.rootName}` : !folderScope ? `across ${status.rootName}` : searching ? `results for “${debounced}”` : "";
+  const canGoBack = history.length > 0 || !!search || (loc.scope === "folder" && !!loc.folder);
+  // Parent trail shown above the title (the current folder is the title itself).
+  const trail = folderScope && !(searching && driveWide) ? crumbs.slice(0, -1) : [];
+
   return (
     <div className={`app ${isMac ? "mac" : ""}`}>
-      <header className="topbar" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region>
-          <Logo size={20} />
-          <span data-tauri-drag-region>Mori</span>
+      <aside className="sidebar">
+        <div className="sidebar-head" data-tauri-drag-region>
+          <div className="brand" data-tauri-drag-region>
+            <Logo size={20} />
+            <span data-tauri-drag-region>Mori</span>
+          </div>
         </div>
-        <label className="search">
-          <Icon name="search" size={15} />
-          <input
-            ref={searchRef}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={searchPlaceholder}
-            title={searchPlaceholder}
-            spellCheck={false}
-            autoCorrect="off"
-            autoCapitalize="off"
+        <nav>
+          <button
+            className={`side-item ${loc.scope === "folder" && !loc.folder && !searching ? "on" : ""}`}
+            onClick={() => navigate({ scope: "folder", folder: "" })}
+            title={status.rootName}
+          >
+            <Icon name="drive" />
+            <span className="truncate">{status.rootName}</span>
+          </button>
+          <div className="side-heading">Library</div>
+          {FILTERS.filter((f) => f.kind !== "other" || (stats?.other ?? 0) > 0).map((f) => (
+            <button
+              key={f.kind}
+              className={`side-item ${loc.scope === "library" && kind === f.kind && !searching ? "on" : ""}`}
+              onClick={() => {
+                navigate({ scope: "library", folder: "" }, { keepKind: true });
+                setKind(f.kind);
+              }}
+            >
+              <Icon name={f.icon} />
+              <span>{LIBRARY_TITLE[f.kind]}</span>
+              <span className="count">{count(f.kind)?.toLocaleString()}</span>
+            </button>
+          ))}
+          {topFolders.length > 0 && <div className="side-heading">Folders</div>}
+          <FolderTree
+            roots={topFolders}
+            activeId={folderScope && !searching ? loc.folder : null}
+            ancestors={folderScope ? crumbs.slice(0, -1).map((c) => c.id) : []}
+            version={indexVersion}
+            onOpen={(id) => navigate({ scope: "folder", folder: id })}
+            onContextMenu={(e, entry) => {
+              e.preventDefault();
+              setPop(null);
+              setMenu({ x: e.clientX, y: e.clientY, entry });
+            }}
           />
-          {search ? (
-            <button className="clear" onClick={() => setSearch("")} title="Clear">
-              <Icon name="close" size={12} />
-            </button>
+        </nav>
+        <div className="side-footer">
+          {status.scanning ? (
+            <div className="scan-status">
+              <span className="dot-spinner" />
+              <span className="truncate">Scanning… {status.scanCount.toLocaleString()} files</span>
+            </div>
           ) : (
-            <kbd>{isMac ? "⌘F" : "Ctrl F"}</kbd>
+            <div className="scan-status">
+              <span className="truncate">{status.fileCount.toLocaleString()} files indexed</span>
+            </div>
           )}
-        </label>
-        <div className="segmented filters" role="tablist" aria-label="File type">
-          {FILTERS.map((f) => (
-            <button key={f.kind} className={kind === f.kind ? "on" : ""} onClick={() => setKind(f.kind)} title={f.label}>
-              <Icon name={f.icon} size={14} />
-              <span className="label">{f.label}</span>
-            </button>
-          ))}
-        </div>
-        <div className="spacer" data-tauri-drag-region />
-        <div className="segmented" aria-label="View">
-          {(["gallery", "grid", "list"] as const).map((v, i) => (
-            <button key={v} className={view === v ? "on" : ""} onClick={() => setView(v)} title={`${v[0].toUpperCase() + v.slice(1)} (${isMac ? "⌘" : "Ctrl+"}${i + 1})`}>
-              <Icon name={v} size={15} />
-            </button>
-          ))}
-        </div>
-        <div className="sort">
-          <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)} aria-label="Sort by">
-            {SORTS.map((s) => (
-              <option key={s.key} value={s.key}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <button className="icon-btn" onClick={() => setDesc((d) => !d)} title={desc ? "Descending" : "Ascending"}>
-            <Icon name={desc ? "down" : "up"} size={14} />
+          <button className="icon-btn" onClick={() => api.rescan()} disabled={status.scanning} title="Rescan" aria-label="Rescan">
+            <Icon name="refresh" size={15} />
+          </button>
+          <button className={`icon-btn ${pop?.kind === "more" ? "on" : ""}`} onClick={openPop("more")} title="More" aria-label="More">
+            <Icon name="more" size={16} />
           </button>
         </div>
-      </header>
+      </aside>
 
-      <div className="body">
-        <aside className="sidebar">
-          <nav>
-            <button
-              className={`side-item ${loc.scope === "folder" && !loc.folder && !searching ? "on" : ""}`}
-              onClick={() => navigate({ scope: "folder", folder: "" })}
-            >
-              <Icon name="drive" />
-              <span className="truncate">{status.rootName}</span>
-            </button>
-            <div className="side-heading">Library</div>
-            {FILTERS.filter((f) => f.kind !== "other" || (stats?.other ?? 0) > 0).map((f) => (
-              <button
-                key={f.kind}
-                className={`side-item ${loc.scope === "library" && kind === f.kind && !searching ? "on" : ""}`}
-                onClick={() => {
-                  navigate({ scope: "library", folder: "" }, { keepKind: true });
-                  setKind(f.kind);
-                }}
-              >
-                <Icon name={f.icon} className={`kind-${f.kind}`} />
-                <span>{LIBRARY_TITLE[f.kind]}</span>
-                <span className="count">{count(f.kind)?.toLocaleString()}</span>
+      <main className="content">
+        <header className="topbar" data-tauri-drag-region>
+          <label className="search">
+            <Icon name="search" size={15} />
+            <input
+              ref={searchRef}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={searchPlaceholder}
+              title={searchPlaceholder}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="off"
+            />
+            {search ? (
+              <button className="clear" onClick={() => setSearch("")} title="Clear" aria-label="Clear search">
+                <Icon name="close" size={11} />
               </button>
-            ))}
-            {topFolders.length > 0 && <div className="side-heading">Folders</div>}
-            {topFolders.map((f) => (
-              <button
-                key={f.id}
-                className={`side-item ${loc.scope === "folder" && !searching && crumbs[0]?.id === f.id ? "on" : ""}`}
-                onClick={() => navigate({ scope: "folder", folder: f.id })}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setMenu({ x: e.clientX, y: e.clientY, entry: f });
-                }}
-              >
-                <Icon name="folder" className="kind-folder" />
-                <span className="truncate">{f.name}</span>
-              </button>
-            ))}
-          </nav>
-          <div className="side-footer">
-            {status.scanning ? (
-              <div className="scan-status">
-                <span className="dot-spinner" />
-                Scanning drive… {status.scanCount.toLocaleString()} files
-              </div>
             ) : (
-              <div className="scan-status muted">{status.fileCount.toLocaleString()} files indexed</div>
+              <kbd>{isMac ? "⌘F" : "Ctrl F"}</kbd>
             )}
-            <div className="side-actions">
-              <button className="link" onClick={() => api.rescan()} disabled={status.scanning} title="Re-index the drive">
-                <Icon name="refresh" size={13} /> Rescan
+          </label>
+          <div className="segmented filters" role="tablist" aria-label="File type">
+            {FILTERS.map((f) => (
+              <button key={f.kind} className={kind === f.kind ? "on" : ""} onClick={() => setKind(f.kind)} title={f.label} role="tab" aria-selected={kind === f.kind}>
+                <Icon name={f.icon} size={14} />
+                <span className="label">{f.label}</span>
               </button>
-              <button className="link" onClick={chooseRoot} title="Browse a different drive or folder">
-                <Icon name="folder" size={13} /> Change…
-              </button>
-              <button
-                className="link"
-                onClick={() =>
-                  api.clearCache().then(() => {
-                    resetThumbs();
-                    flash("Thumbnails and index cleared");
-                  })
-                }
-                disabled={status.scanning}
-                title="Delete Mori's thumbnails and index (your files are not touched)"
-              >
-                Clear cache
-              </button>
-            </div>
+            ))}
           </div>
-        </aside>
+          <div className="spacer" data-tauri-drag-region />
+          <div className="icon-group" aria-label="View">
+            {(["gallery", "grid", "list"] as const).map((v, i) => (
+              <button
+                key={v}
+                className={`icon-btn ${view === v ? "on" : ""}`}
+                onClick={() => setView(v)}
+                title={`${v[0].toUpperCase() + v.slice(1)} (${isMac ? "⌘" : "Ctrl+"}${i + 1})`}
+                aria-label={v}
+                aria-pressed={view === v}
+              >
+                <Icon name={v} size={15} />
+              </button>
+            ))}
+          </div>
+          <button className={`dropdown ${pop?.kind === "sort" ? "open" : ""}`} onClick={openPop("sort")} title="Sort" aria-haspopup="menu">
+            <Icon name={desc ? "down" : "up"} size={13} />
+            <span className="sort-label">{SORTS.find((s) => s.key === sort)?.label}</span>
+            <Icon name="chevronDown" size={13} />
+          </button>
+        </header>
 
-        <main className="content">
-          <div className="location">
-            <button className="icon-btn" onClick={goBack} disabled={!history.length && !search && !(loc.scope === "folder" && loc.folder)} title="Back">
-              <Icon name="left" size={15} />
+        <div className="page-head">
+          <div className="crumbs">
+            <button className="icon-btn back" onClick={goBack} disabled={!canGoBack} title="Back" aria-label="Back">
+              <Icon name="left" size={14} />
             </button>
-            {searching && driveWide ? (
-              <div className="crumbs">
-                <span className="crumb current">Results for “{debounced}”</span>
-                <span className="scope-note">in all of {status.rootName}</span>
-              </div>
-            ) : loc.scope === "library" ? (
-              <div className="crumbs">
-                <span className="crumb current">{LIBRARY_TITLE[kind]}</span>
-                <span className="scope-note">across {status.rootName}</span>
-              </div>
-            ) : (
-              <div className="crumbs">
-                <button className={`crumb ${crumbs.length ? "" : "current"}`} onClick={() => navigate({ scope: "folder", folder: "" }, { keepKind: true })}>
+            {trail.length > 0 || (folderScope && crumbs.length > 0) ? (
+              <>
+                <button className="crumb" onClick={() => navigate({ scope: "folder", folder: "" }, { keepKind: true })}>
                   {status.rootName}
                 </button>
-                {crumbs.map((c, i) => (
+                {trail.map((c) => (
                   <span key={c.id} className="crumb-wrap">
-                    <Icon name="chevron" size={12} className="crumb-sep" />
-                    <button
-                      className={`crumb ${i === crumbs.length - 1 ? "current" : ""}`}
-                      onClick={() => navigate({ scope: "folder", folder: c.id }, { keepKind: true })}
-                    >
+                    <Icon name="chevron" size={11} className="crumb-sep" />
+                    <button className="crumb" onClick={() => navigate({ scope: "folder", folder: c.id }, { keepKind: true })}>
                       {c.name}
                     </button>
                   </span>
                 ))}
-                {searching && (
-                  <span className="scope-note">
-                    · results for “{debounced}”{recursive ? " here and in subfolders" : " in this folder"}
-                  </span>
-                )}
-              </div>
+              </>
+            ) : (
+              <span className="crumb">{folderScope && !searching ? "Drive" : status.rootName}</span>
             )}
+          </div>
+          <div className="title-row">
+            <h1 className="page-title" title={pageTitle}>
+              {pageTitle}
+              {pageNote && <span className="scope-note">{pageNote}</span>}
+            </h1>
             {searching && folderScope && (
               <div className="segmented small" role="radiogroup" aria-label="Search scope">
                 <button className={!searchGlobal ? "on" : ""} onClick={() => setSearchGlobal(false)} title={`Search only in ${folderName}`}>
@@ -491,51 +492,58 @@ export default function App() {
             )}
             <div className="item-count">
               {result.total.toLocaleString()} {result.total === 1 ? "item" : "items"}
-              {result.truncated && ` · showing first ${items.length.toLocaleString()}`}
+              {result.truncated && ` · first ${items.length.toLocaleString()}`}
             </div>
           </div>
+        </div>
 
-          {items.length ? (
-            <FileView
-              items={items}
-              view={view}
-              selected={selected}
-              locationKey={`${loc.scope}|${loc.folder}|${kind}|${debounced}|${recursiveView}|${searchGlobal}`}
-              keyboardActive={!previewId}
-              sort={sort}
-              desc={desc}
-              showLocation={showLocation}
-              baseLabel={driveWide ? status.rootName : folderName}
-              onSort={(k) => (k === sort ? setDesc((d) => !d) : (setSort(k), setDesc(false)))}
-              onSelect={(i) => setSelectedId(items[i]?.id ?? null)}
-              onActivate={activate}
-              onContextMenu={(e, i) => setMenu({ x: e.clientX, y: e.clientY, entry: items[i] })}
-            />
-          ) : (
-            <div className="empty">
-              {status.scanning && !status.fileCount ? (
-                <>
-                  <span className="dot-spinner large" />
-                  <p>Scanning {status.rootName}…</p>
-                </>
-              ) : (
-                <>
-                  <Icon name={searching ? "search" : kind === "all" ? "folder" : FILTERS.find((f) => f.kind === kind)!.icon} size={40} />
-                  <p>
-                    {searching
-                      ? `Nothing matches “${debounced}”${driveWide ? "" : recursive ? ` in ${folderName} or its subfolders` : ` in ${folderName}`}`
-                      : kind === "all"
-                        ? recursiveView
-                          ? "No files in this folder or its subfolders"
-                          : "This folder is empty"
-                        : `No ${LIBRARY_TITLE[kind].toLowerCase()} here${recursiveView ? " or in subfolders" : ""}`}
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-        </main>
-      </div>
+        {items.length ? (
+          <FileView
+            items={items}
+            view={view}
+            selected={selected}
+            locationKey={`${loc.scope}|${loc.folder}|${kind}|${debounced}|${recursiveView}|${searchGlobal}`}
+            keyboardActive={!previewId}
+            sort={sort}
+            desc={desc}
+            showLocation={showLocation}
+            baseLabel={driveWide ? status.rootName : folderName}
+            onSort={(k) => (k === sort ? setDesc((d) => !d) : (setSort(k), setDesc(false)))}
+            onSelect={(i) => setSelectedId(items[i]?.id ?? null)}
+            onActivate={activate}
+            onContextMenu={(e, i) => {
+              setPop(null);
+              setMenu({ x: e.clientX, y: e.clientY, entry: items[i] });
+            }}
+          />
+        ) : status.scanning && !status.fileCount ? (
+          <div className="empty">
+            <span className="dot-spinner large" />
+            <p>Scanning {status.rootName}…</p>
+          </div>
+        ) : searching ? (
+          <div className="empty">
+            <Logo size={64} className="mark" />
+            <h2>No files found</h2>
+            <p>
+              Nothing matches “{debounced}”{driveWide ? "" : recursive ? ` in ${folderName} or its subfolders` : ` in ${folderName}`}.
+            </p>
+          </div>
+        ) : kind === "all" ? (
+          <div className="empty">
+            <Logo size={64} className="mark" />
+            <h2>{recursiveView ? "No files here" : "This folder is empty"}</h2>
+            {recursiveView && <p>No files in this folder or its subfolders.</p>}
+          </div>
+        ) : (
+          <div className="empty">
+            <Icon name={FILTERS.find((f) => f.kind === kind)!.icon} size={34} stroke={1.3} />
+            <p>
+              No {LIBRARY_TITLE[kind].toLowerCase()} here{recursiveView ? " or in subfolders" : ""}.
+            </p>
+          </div>
+        )}
+      </main>
 
       {previewId && previewIndex >= 0 && (
         <Preview
@@ -562,9 +570,163 @@ export default function App() {
         />
       )}
 
+      {pop?.kind === "sort" && (
+        <div className="menu" style={{ top: pop.y, left: Math.max(8, pop.x - 210) }} role="menu" onClick={(e) => e.stopPropagation()}>
+          <div className="menu-label">Sort by</div>
+          {SORTS.map((o) => (
+            <button
+              key={o.key}
+              role="menuitemradio"
+              aria-checked={sort === o.key}
+              onClick={() => {
+                setSort(o.key);
+                setPop(null);
+              }}
+            >
+              {o.label}
+              {sort === o.key && <Icon name="check" size={14} className="check" />}
+            </button>
+          ))}
+          <div className="sep" />
+          {[false, true].map((d) => (
+            <button
+              key={String(d)}
+              role="menuitemradio"
+              aria-checked={desc === d}
+              onClick={() => {
+                setDesc(d);
+                setPop(null);
+              }}
+            >
+              <Icon name={d ? "down" : "up"} size={14} />
+              {d ? "Descending" : "Ascending"}
+              {desc === d && <Icon name="check" size={14} className="check" />}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {pop?.kind === "more" && (
+        <div className="menu" style={{ bottom: window.innerHeight - pop.y, left: pop.x - 8 }} role="menu" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => {
+              setPop(null);
+              chooseRoot();
+            }}
+          >
+            <Icon name="folder" size={14} /> Change Folder…
+          </button>
+          <button
+            disabled={status.scanning}
+            onClick={() => {
+              setPop(null);
+              clearCache();
+            }}
+            title="Delete Mori's thumbnails and index (your files are not touched)"
+          >
+            <Icon name="refresh" size={14} /> Clear Cache
+          </button>
+        </div>
+      )}
+
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
+}
+
+/**
+ * Expandable folder tree for the sidebar. Children come from the existing
+ * index query (`subfolders`) and are loaded only when a node is expanded.
+ */
+function FolderTree({
+  roots,
+  activeId,
+  ancestors,
+  version,
+  onOpen,
+  onContextMenu,
+}: {
+  roots: Entry[];
+  activeId: string | null;
+  ancestors: string[];
+  version: number;
+  onOpen: (id: string) => void;
+  onContextMenu: (e: React.MouseEvent, entry: Entry) => void;
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [children, setChildren] = useState<Map<string, Entry[]>>(() => new Map());
+
+  // The index changed: drop cached children (they'll reload on demand).
+  useEffect(() => setChildren(new Map()), [version]);
+
+  // Reveal the current folder: expand every ancestor.
+  const ancestorKey = ancestors.join("/");
+  useEffect(() => {
+    if (!ancestors.length) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      ancestors.forEach((id) => next.add(id));
+      return next;
+    });
+  }, [ancestorKey]);
+
+  // Load children for expanded nodes that aren't cached yet.
+  useEffect(() => {
+    let alive = true;
+    for (const id of expanded) {
+      if (children.has(id)) continue;
+      api.subfolders(id).then((kids) => alive && setChildren((m) => new Map(m).set(id, kids)));
+    }
+    return () => {
+      alive = false;
+    };
+  }, [expanded, children]);
+
+  const toggle = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const rows: React.ReactNode[] = [];
+  const INDENT = 14;
+  const walk = (nodes: Entry[], depth: number) => {
+    for (const f of nodes) {
+      const open = expanded.has(f.id);
+      const kids = children.get(f.id);
+      const leaf = kids !== undefined && kids.length === 0;
+      rows.push(
+        <div
+          key={f.id}
+          className={`tree-row ${activeId === f.id ? "on" : ""}`}
+          style={{ paddingLeft: depth * INDENT }}
+          onContextMenu={(e) => onContextMenu(e, f)}
+        >
+          {Array.from({ length: depth }, (_, k) => (
+            <span key={k} className="guide" style={{ left: 11 + k * INDENT }} />
+          ))}
+          <button
+            className={`twisty ${open && !leaf ? "open" : ""} ${leaf ? "leaf" : ""}`}
+            onClick={() => toggle(f.id)}
+            tabIndex={leaf ? -1 : 0}
+            aria-label={open ? `Collapse ${f.name}` : `Expand ${f.name}`}
+            aria-expanded={!leaf ? open : undefined}
+          >
+            <Icon name="chevron" size={12} />
+          </button>
+          <button className="label" onClick={() => onOpen(f.id)} title={f.name}>
+            <Icon name="folder" size={15} />
+            <span className="truncate">{f.name}</span>
+          </button>
+        </div>,
+      );
+      if (open && kids?.length) walk(kids, depth + 1);
+    }
+  };
+  walk(roots, 0);
+  return <div className="tree">{rows}</div>;
 }
 
 function ContextMenu({

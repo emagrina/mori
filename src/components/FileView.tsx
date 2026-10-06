@@ -25,20 +25,26 @@ interface Props {
   onContextMenu: (e: React.MouseEvent, i: number) => void;
 }
 
-const PAD = 20;
-const LIST_ROW = 30;
-const LIST_HEADER = 30;
+// Keep in sync with --pad-x in styles.css.
+const PAD = 28;
+const LIST_ROW = 36;
+const LIST_HEADER = 32;
+/** Grid card: 6px inner padding around a square thumbnail, then a two-line caption. */
+const GRID_CHROME = 12;
+const GRID_CAPTION = 48;
 
 function layout(view: ViewMode, width: number) {
   const inner = Math.max(0, width - PAD * 2);
   if (view === "list") return { cols: 1, tileW: inner, rowH: LIST_ROW, gap: 0 };
-  const min = view === "gallery" ? 240 : 128;
-  const gap = view === "gallery" ? 8 : 14;
+  const min = view === "gallery" ? 230 : 156;
+  const gap = view === "gallery" ? 6 : 10;
   const cols = Math.max(1, Math.floor((inner + gap) / (min + gap)));
   const tileW = (inner - gap * (cols - 1)) / cols;
-  const tileH = view === "gallery" ? Math.round(tileW * 0.75) : Math.round(tileW) + 42;
+  const tileH = view === "gallery" ? Math.round(tileW * 0.75) : Math.round(tileW - GRID_CHROME) + GRID_CHROME + GRID_CAPTION;
   return { cols, tileW, rowH: tileH + gap, gap };
 }
+
+const isMedia = (e: Entry) => e.kind === "photo" || e.kind === "video" || e.kind === "gif";
 
 export function FileView(p: Props) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -48,7 +54,8 @@ export function FileView(p: Props) {
   const rows = Math.ceil(p.items.length / cols);
   // In list view the sticky header occupies LIST_HEADER px of scroll space above the rows.
   const headerH = p.view === "list" ? LIST_HEADER : 0;
-  const top = p.view === "list" ? 4 : PAD;
+  // The page header above already provides the breathing room.
+  const top = p.view === "list" ? 4 : 2;
   const height = top + rows * rowH + PAD;
 
   useLayoutEffect(() => {
@@ -138,9 +145,9 @@ export function FileView(p: Props) {
       };
       if (p.view === "list") {
         tiles.push(
-          <div key={e.id} className={`row ${i % 2 ? "odd" : ""}`} {...common}>
+          <div key={e.id} className={`row ${e.kind === "folder" ? "folder" : ""}`} {...common}>
             <span className="c-name">
-              <Icon name={e.kind} size={15} className={`kind-${e.kind}`} />
+              <Icon name={e.kind} size={16} />
               <span className="truncate">{e.name}</span>
             </span>
             <span className="c-type">{typeLabel(e)}</span>
@@ -151,8 +158,8 @@ export function FileView(p: Props) {
         );
       } else if (p.view === "gallery") {
         tiles.push(
-          <div key={e.id} className="tile gallery" {...common}>
-            <Thumb entry={e} fit={e.kind === "folder" ? "contain" : "cover"} iconSize={56} />
+          <div key={e.id} className={`tile gallery ${isMedia(e) ? "" : "plain"}`} {...common}>
+            <Thumb entry={e} fit={e.kind === "folder" ? "contain" : "cover"} iconSize={e.kind === "folder" ? Math.round(tileW * 0.22) : 40} />
             <div className="caption-overlay">
               <div className="truncate">{e.name}</div>
               {p.showLocation && locationOf(e) && <div className="truncate where">{locationOf(e)}</div>}
@@ -161,15 +168,17 @@ export function FileView(p: Props) {
         );
       } else {
         tiles.push(
-          <div key={e.id} className="tile grid" {...common}>
-            <div className="frame" style={{ height: tileW }}>
-              <Thumb entry={e} iconSize={44} />
+          <div key={e.id} className={`tile grid ${e.kind === "folder" ? "folder" : ""}`} {...common}>
+            <div className="frame" style={{ height: Math.round(tileW - GRID_CHROME) }}>
+              <Thumb entry={e} fit={isMedia(e) ? "cover" : "contain"} iconSize={e.kind === "folder" ? Math.round((tileW - GRID_CHROME) * 0.27) : 36} />
             </div>
             <div className="caption">
               <div className="name truncate">{e.name}</div>
               <div className="meta truncate">
                 {e.kind === "folder"
-                  ? "Folder"
+                  ? p.showLocation && locationOf(e)
+                    ? locationOf(e)
+                    : `Folder · ${formatShortDate(e.modified)}`
                   : p.showLocation && locationOf(e)
                     ? locationOf(e)
                     : `${formatSize(e.size)} · ${formatShortDate(e.modified)}`}
@@ -196,7 +205,7 @@ export function FileView(p: Props) {
       onClick={(e) => e.target === e.currentTarget && p.onSelect(-1)}
     >
       {p.view === "list" && (
-        <div className="list-header" style={{ paddingLeft: PAD + 8, paddingRight: PAD + 8 }}>
+        <div className="list-header" style={{ paddingLeft: PAD + 10, paddingRight: PAD + 10 }}>
           {header("name", "Name", "c-name")}
           {header("type", "Type", "c-type")}
           {header("size", "Size", "c-size")}

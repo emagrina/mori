@@ -33,6 +33,33 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dims, setDims] = useState<string>("");
   const [info, setInfo] = useState<Inspection | null>(null);
+  // Chrome fades out after a moment without pointer movement, so media floats alone.
+  const [idle, setIdle] = useState(false);
+  const idleTimer = useRef(0);
+  const overChrome = useRef(false);
+  const wake = () => {
+    setIdle(false);
+    window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(() => !overChrome.current && setIdle(true), 2500);
+  };
+  useEffect(() => {
+    wake();
+    window.addEventListener("keydown", wake);
+    return () => {
+      window.removeEventListener("keydown", wake);
+      window.clearTimeout(idleTimer.current);
+    };
+  }, []);
+  const chromeHandlers = {
+    onPointerEnter: () => {
+      overChrome.current = true;
+      setIdle(false);
+    },
+    onPointerLeave: () => {
+      overChrome.current = false;
+      wake();
+    },
+  };
   const videoRef = useRef<HTMLVideoElement>(null);
   const hasPrev = index > 0;
   const hasNext = index < items.length - 1;
@@ -97,8 +124,8 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
   const openFile = () => api.openFile(entry.id).catch((e) => onError(String(e)));
 
   return (
-    <div className="preview" role="dialog" aria-label={`Preview of ${entry.name}`}>
-      <header className="preview-bar" data-tauri-drag-region>
+    <div className={`preview ${idle ? "idle" : ""}`} role="dialog" aria-label={`Preview of ${entry.name}`} onPointerMove={wake}>
+      <header className="preview-bar" data-tauri-drag-region {...chromeHandlers}>
         <button className="icon-btn" onClick={onClose} title="Close (Esc)">
           <Icon name="close" size={16} />
         </button>
@@ -170,7 +197,7 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
         )}
       </div>
 
-      <footer className="preview-info">
+      <footer className="preview-info" {...chromeHandlers}>
         <span>{typeLabel(entry)}</span>
         {dims && <span>{dims}</span>}
         <span>{formatSize(entry.size)}</span>
