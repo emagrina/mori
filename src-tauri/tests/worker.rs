@@ -74,6 +74,16 @@ fn heif_sandbox_still_denies_files_network_and_processes() {
     assert_eq!(out.trim(), "fs_denied=true write_denied=true net_denied=true spawn_denied=true");
 }
 
+/// PDF jobs may read system fonts, and nothing else of the user's.
+#[cfg(target_os = "macos")]
+#[test]
+fn pdf_sandbox_still_denies_files_network_and_processes() {
+    let (code, out, _) = run(&["selftest", "pdf"], b"");
+    assert_eq!(code, Some(0));
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out.trim(), "fs_denied=true write_denied=true net_denied=true spawn_denied=true");
+}
+
 /// Fingerprints: fixed-size grayscale miniatures plus the source size.
 #[test]
 fn fingerprints_stills_and_rejects_junk() {
@@ -194,4 +204,59 @@ fn reencodes_animated_gif() {
 fn refuses_bad_arguments() {
     assert_eq!(run(&["thumb", "999999"], &png(8, 8)).0, Some(6));
     assert_eq!(run(&["format-c", "256"], &png(8, 8)).0, Some(6));
+}
+
+/// Same synthetic one-page PDF as the unit tests (see src/pdf.rs).
+#[cfg(target_os = "macos")]
+fn pdf(extra: &str) -> Vec<u8> {
+    let objs = [
+        format!("<< /Type /Catalog /Pages 2 0 R {extra} >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+        "<< /Length 34 >>\nstream\nBT /F1 40 Tf 10 30 Td (Mori) Tj ET\nendstream".to_string(),
+        // A standard font the document references without embedding it.
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+    for off in offsets {
+        out.extend(format!("{off:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
+    out
+}
+
+/// PDFs are read and rasterised inside the strict sandbox; active content is
+/// only reported.
+#[cfg(target_os = "macos")]
+#[test]
+fn pdf_info_and_pages_inside_the_sandbox() {
+    let (code, out, _) = run(&["pdfinfo", "64"], &pdf("/OpenAction << /S /JavaScript /JS (app.alert(1)) >>"));
+    assert_eq!(code, Some(0));
+    let text = String::from_utf8_lossy(&out[16..]).into_owned();
+    assert!(text.starts_with("pages=1"), "{text}");
+    assert!(text.contains("openaction=true"));
+
+    let mut input = 1u32.to_le_bytes().to_vec();
+    input.extend(pdf(""));
+    let (code, out, _) = run(&["pdfpage", "300"], &input);
+    assert_eq!(code, Some(0));
+    assert_eq!(&out[..4], b"MORI");
+    assert!(u32::from_le_bytes(out[4..8].try_into().unwrap()) > 0);
+    // The text was drawn: the PDF profile can read the system fonts.
+    let img = image::load_from_memory(&out[16..]).unwrap().to_luma8();
+    assert!(img.pixels().filter(|p| p[0] < 80).count() > 200, "standard-font text missing");
+
+    // A missing page, junk and an empty input all fail cleanly.
+    let mut input = 7u32.to_le_bytes().to_vec();
+    input.extend(pdf(""));
+    assert_ne!(run(&["pdfpage", "300"], &input).0, Some(0));
+    assert_ne!(run(&["pdfpage", "300"], b"\x01\0\0\0%PDF-1.4 junk").0, Some(0));
+    assert_ne!(run(&["pdfinfo", "64"], b"").0, Some(0));
 }
