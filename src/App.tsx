@@ -22,6 +22,7 @@ import {
 } from "./api";
 import { Analyzer } from "./components/Analyzer";
 import { FileView } from "./components/FileView";
+import { Inspector } from "./components/Inspector";
 import { Icon, Logo, type IconName } from "./components/Icon";
 import { ModalFrame } from "./components/Modal";
 import { Preview } from "./components/Preview";
@@ -63,7 +64,8 @@ const SORTS: { key: SortKey; label: string }[] = [
 type Dialog =
   | { kind: "trash"; entries: Entry[]; summary: TrashSummary }
   | { kind: "rename"; entry: Entry }
-  | { kind: "private"; entry: Entry };
+  | { kind: "private"; entry: Entry }
+  | { kind: "unprotect"; entry: Entry };
 
 const EMPTY: QueryResult = { items: [], total: 0, truncated: false, crumbs: [] };
 
@@ -90,6 +92,9 @@ export default function App() {
   /** `targets`: what the menu's actions apply to (the whole selection when right-clicking inside it). */
   const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry; targets: Entry[] } | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  /** Item shown in the inspector panel. */
+  const [inspectId, setInspectId] = useState<string | null>(null);
+  const [readOnly, setReadOnlyState] = useState(false);
   const [mode, setMode] = useState<"browse" | "analyzer" | "similar">("browse");
   /** Bumped when files are trashed from the browser, so analyzer results refresh. */
   const [analysisVersion, setAnalysisVersion] = useState(0);
@@ -114,6 +119,7 @@ export default function App() {
       if (i.desc !== null) setDesc(i.desc);
       if (i.recursive !== null) setRecursive(i.recursive);
       if (i.searchGlobal !== null) setSearchGlobal(i.searchGlobal);
+      setReadOnlyState(i.readOnly);
       // If the UI was reloaded (e.g. after the video engine failed), come back
       // to the same place instead of the drive root.
       const saved = readSession(i.launchId);
@@ -234,6 +240,8 @@ export default function App() {
       const e = items[i];
       if (!e) return;
       if (e.kind === "folder") navigate({ scope: "folder", folder: e.id }, { keepKind: true });
+      // Links are never followed: show what they are instead.
+      else if (e.kind === "link") setInspectId(e.id);
       else setPreviewId(e.id);
     },
     [items, navigate],
@@ -308,6 +316,28 @@ export default function App() {
     }
   };
 
+  const setProtected = async (entry: Entry, on: boolean) => {
+    setDialog(null);
+    try {
+      await api.setFolderProtected(entry.id, on);
+      setIndexVersion((v) => v + 1);
+      flash(on ? `“${entry.name}” is protected: Mori won't change anything inside it` : `Protection removed from “${entry.name}”`, 3000);
+    } catch (e) {
+      flash(String(e), 4000);
+    }
+  };
+
+  const toggleReadOnly = async () => {
+    const next = !readOnly;
+    try {
+      await api.setReadOnly(next);
+      setReadOnlyState(next);
+      flash(next ? "Read-only Mode on: Mori won't change any files" : "Read-only Mode off", 2500);
+    } catch (e) {
+      flash(String(e), 4000);
+    }
+  };
+
   const clickItem = (i: number, { toggle, range }: { toggle: boolean; range: boolean }) => {
     const e = items[i];
     if (!e) return;
@@ -373,6 +403,14 @@ export default function App() {
         e.preventDefault();
         const previewed = previewId ? files.find((f) => f.id === previewId) : undefined;
         requestTrash(previewed ? [previewed] : selectionTargets());
+        return;
+      }
+      if (!inInput && !previewId && (e.key === "i" || (mod && e.key.toLowerCase() === "i")) && !e.altKey) {
+        const target = selected >= 0 ? items[selected] : null;
+        if (target) {
+          e.preventDefault();
+          setInspectId((cur) => (cur === target.id ? null : target.id));
+        }
         return;
       }
       if (mod && e.key.toLowerCase() === "f") {
@@ -517,6 +555,11 @@ export default function App() {
             }}
           />
         </nav>
+        {readOnly && (
+          <button className="readonly-chip" onClick={toggleReadOnly} title="Read-only Mode is on: Mori won't change any files. Click to turn it off.">
+            <Icon name="shield" size={12} /> Read-only Mode
+          </button>
+        )}
         <div className="side-footer">
           {status.scanning ? (
             <div className="scan-status">
@@ -616,6 +659,11 @@ export default function App() {
             <h1 className="page-title" title={pageTitle}>
               {pageTitle}
               {pageNote && <span className="scope-note">{pageNote}</span>}
+              {folderScope && !(searching && searchGlobal) && result.protectedScope && (
+                <span className="private-chip" title="Never Modify: Mori won't rename, move or delete anything here.">
+                  <Icon name="shield" size={11} /> Never Modify
+                </span>
+              )}
               {folderScope && !(searching && searchGlobal) && result.privateScope && (
                 <span className="private-chip" title={PRIVATE_HINT}>
                   <Icon name="lock" size={11} /> Private
@@ -726,6 +774,8 @@ export default function App() {
           onTrash={() => requestTrash(menu.targets)}
           onRename={() => setDialog({ kind: "rename", entry: menu.entry })}
           onPrivacy={() => (menu.entry.private ? setPrivate(menu.entry, false) : setDialog({ kind: "private", entry: menu.entry }))}
+          onInfo={() => setInspectId(menu.entry.id)}
+          onProtect={() => (menu.entry.protected ? setDialog({ kind: "unprotect", entry: menu.entry }) : setProtected(menu.entry, true))}
           onPreview={() => (menu.entry.kind === "folder" ? navigate({ scope: "folder", folder: menu.entry.id }) : setPreviewId(menu.entry.id))}
           onCopy={() => copyPath(menu.entry)}
           onError={flash}
@@ -779,6 +829,18 @@ export default function App() {
             <Icon name="folder" size={14} /> Change Folder…
           </button>
           <button
+            role="menuitemcheckbox"
+            aria-checked={readOnly}
+            onClick={() => {
+              setPop(null);
+              toggleReadOnly();
+            }}
+            title="When on, Mori refuses every change to your files (enforced by the backend)."
+          >
+            <Icon name="shield" size={14} /> Read-only Mode
+            {readOnly && <Icon name="check" size={14} className="check" />}
+          </button>
+          <button
             disabled={status.scanning}
             onClick={() => {
               setPop(null);
@@ -797,9 +859,28 @@ export default function App() {
       {dialog?.kind === "private" && (
         <PrivateDialog entry={dialog.entry} onCancel={() => setDialog(null)} onConfirm={() => setPrivate(dialog.entry, true)} />
       )}
+      {dialog?.kind === "unprotect" && (
+        <ModalFrame onCancel={() => setDialog(null)}>
+          <div className="dialog-icon">
+            <Icon name="shield" size={20} />
+          </div>
+          <h2>Remove protection from “{dialog.entry.name}”?</h2>
+          <p>Mori will again allow renaming, moving and deleting items inside this folder when you ask it to.</p>
+          <div className="dialog-actions">
+            <button className="btn" onClick={() => setDialog(null)} autoFocus>
+              Cancel
+            </button>
+            <button className="btn primary" onClick={() => setProtected(dialog.entry, false)}>
+              Remove Protection
+            </button>
+          </div>
+        </ModalFrame>
+      )}
       {dialog?.kind === "rename" && (
         <RenameDialog entry={dialog.entry} onCancel={() => setDialog(null)} onDone={(id, name) => renamed(dialog.entry, id, name)} />
       )}
+
+      {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -892,6 +973,7 @@ function FolderTree({
             <Icon name="folder" size={15} />
             <span className="truncate">{f.name}</span>
             {f.private && <Icon name="lock" size={11} className="private-mark" />}
+            {f.protected && <Icon name="shield" size={11} className="private-mark" />}
           </button>
         </div>,
       );
@@ -911,6 +993,8 @@ function ContextMenu({
   onCopy,
   onRename,
   onPrivacy,
+  onInfo,
+  onProtect,
   onTrash,
   onError,
 }: {
@@ -923,6 +1007,8 @@ function ContextMenu({
   onCopy: () => void;
   onRename: () => void;
   onPrivacy: () => void;
+  onInfo: () => void;
+  onProtect: () => void;
   onTrash: () => void;
   onError: (msg: string) => void;
 }) {
@@ -937,13 +1023,15 @@ function ContextMenu({
       </div>
     );
   }
-  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 290) };
+  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 360) };
   return (
     <div className="menu" style={style} onContextMenu={(e) => e.preventDefault()}>
-      <button onClick={onPreview}>
-        <Icon name={folder ? "folder" : "gallery"} size={14} /> {folder ? "Open Folder" : "Preview"}
-      </button>
-      {!folder && (
+      {entry.kind !== "link" && (
+        <button onClick={onPreview}>
+          <Icon name={folder ? "folder" : "gallery"} size={14} /> {folder ? "Open Folder" : "Preview"}
+        </button>
+      )}
+      {!folder && entry.kind !== "link" && (
         <button onClick={() => api.openFile(entry.id).catch((e) => onError(String(e)))}>
           <Icon name="external" size={14} /> Open with Default App
         </button>
@@ -954,6 +1042,10 @@ function ContextMenu({
       <button onClick={onCopy}>
         <Icon name="copy" size={14} /> Copy Path
       </button>
+      <button onClick={onInfo}>
+        <Icon name="info" size={14} /> Get Info
+        <kbd className="menu-kbd">I</kbd>
+      </button>
       <div className="sep" />
       <button onClick={onRename}>
         <Icon name="rename" size={14} /> Rename…
@@ -961,6 +1053,11 @@ function ContextMenu({
       {folder && (
         <button onClick={onPrivacy} title={entry.private ? undefined : PRIVATE_HINT}>
           <Icon name="lock" size={14} /> {entry.private ? "Make Public" : "Make Private…"}
+        </button>
+      )}
+      {folder && (
+        <button onClick={onProtect} title={entry.protected ? undefined : "Mori will refuse to rename, move or delete anything inside this folder."}>
+          <Icon name="shield" size={14} /> {entry.protected ? "Remove Protection…" : "Never Modify"}
         </button>
       )}
       <div className="sep" />
