@@ -5,7 +5,7 @@ use crate::secure::display_safe;
 use crate::thumbs::fnv;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -82,6 +82,32 @@ pub struct Entry {
     /// Opaque, stable identifier handed to the UI instead of a path.
     #[serde(skip)]
     pub id: u64,
+    /// Folders only: inode / file id, used to recognise a private folder
+    /// that was moved or renamed outside Mori (0 = unknown).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ino: u64,
+    /// Visibility boundary: byte length of the path of the deepest private
+    /// folder strictly above this entry (0 = none). See `privacy.rs`.
+    #[serde(skip)]
+    pub boundary: u32,
+    /// Folders only: this folder is itself private.
+    #[serde(skip)]
+    pub private: bool,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+impl Entry {
+    /// Whether this entry may be surfaced in a view scoped to `base` (a
+    /// folder path, "" = the whole drive). Hidden when a private folder lies
+    /// strictly between the scope and the entry: looking into a private
+    /// folder from outside is not allowed, opening it (scope = the folder or
+    /// a folder inside it) is.
+    pub fn visible_from(&self, base: &str) -> bool {
+        self.boundary == 0 || self.boundary as usize <= base.len()
+    }
 }
 
 pub fn id_for(rel: &str) -> u64 {
@@ -114,6 +140,9 @@ pub struct Item {
     /// Folder relative to the current view (set by queries).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// A private folder (visibility boundary).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
 }
 
 impl From<&Entry> for Item {
@@ -128,6 +157,7 @@ impl From<&Entry> for Item {
             modified: e.modified,
             created: e.created,
             location: None,
+            private: e.private,
         }
     }
 }
@@ -209,6 +239,25 @@ impl Index {
             e.id = id_for(&e.path);
         }
         self.build_lookup();
+    }
+
+    /// Recompute visibility boundaries from the set of private folders
+    /// (paths relative to this index's root, strictly below it).
+    pub fn apply_boundaries(&mut self, private: &HashSet<String>) {
+        for e in self.files.iter_mut().chain(self.dirs.iter_mut()) {
+            e.private = e.kind == Kind::Folder && private.contains(&e.path);
+            e.boundary = 0;
+            if private.is_empty() {
+                continue;
+            }
+            // Deepest private strict ancestor: check each parent prefix.
+            let p = e.path.as_str();
+            for (i, _) in p.match_indices('/') {
+                if private.contains(&p[..i]) {
+                    e.boundary = i as u32;
+                }
+            }
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry> {
@@ -317,6 +366,9 @@ pub fn make_entry(path: String, name: String, is_dir: bool, meta: &fs::Metadata)
         modified: millis(meta.modified()).unwrap_or(0),
         created: millis(meta.created()),
         key,
+        ino: if is_dir { crate::privacy::ino_of(meta) } else { 0 },
+        boundary: 0,
+        private: false,
     }
 }
 
@@ -432,6 +484,8 @@ pub struct QueryResult<'a> {
     /// Relative path the results are scoped to ("" = whole drive); item
     /// locations are shown relative to it.
     pub base: &'a str,
+    /// The scope is a private folder or inside one (opened explicitly).
+    pub private_scope: bool,
 }
 
 /// Case-insensitive natural ordering: "IMG_2" < "IMG_10".
@@ -483,7 +537,7 @@ fn compare(a: &Entry, b: &Entry, sort: &str) -> Ordering {
 }
 
 pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
-    let empty = QueryResult { items: Vec::new(), total: 0, truncated: false, base: "" };
+    let empty = QueryResult { items: Vec::new(), total: 0, truncated: false, base: "", private_scope: false };
     let tokens: Vec<String> = fold(&q.search).split_whitespace().map(String::from).collect();
     let searching = !tokens.is_empty();
     let kind = Kind::parse(&q.kind);
@@ -515,7 +569,10 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
         }
         e.key.get(folded_base.len() + 1..)
     };
-    let in_scope = |e: &'a Entry| if recursive { rel_key(e).is_some() } else { e.parent() == base };
+    // Private folders are boundaries: nothing below one is surfaced unless
+    // the scope is that folder (or inside it). Applied here, for every view.
+    let in_scope =
+        |e: &'a Entry| (if recursive { rel_key(e).is_some() } else { e.parent() == base }) && e.visible_from(base);
     // Search matches the path *relative to the scope*, so searching "family"
     // while inside Family doesn't trivially match everything.
     let matches = |e: &'a Entry| tokens.iter().all(|t| rel_key(e).is_some_and(|k| k.contains(t.as_str())));
@@ -544,7 +601,8 @@ pub fn query<'a>(idx: &'a Index, q: &Query) -> QueryResult<'a> {
     let mut items = dirs;
     items.extend(files);
     items.truncate(RESULT_LIMIT);
-    QueryResult { truncated: total > items.len(), items, total, base }
+    let private_scope = !base.is_empty() && idx.get(&id_str(id_for(base))).is_some_and(|d| d.private || d.boundary > 0);
+    QueryResult { truncated: total > items.len(), items, total, base, private_scope }
 }
 
 /// Where an entry lives, relative to the folder being viewed ("" = right there).
@@ -569,9 +627,15 @@ pub struct Stats {
     pub bytes: u64,
 }
 
+/// Drive-wide counts. Contents of private folders are not counted.
 pub fn stats(idx: &Index) -> Stats {
-    let mut s = Stats { files: idx.files.len(), folders: idx.dirs.len(), ..Default::default() };
-    for e in &idx.files {
+    let visible = |e: &&Entry| e.visible_from("");
+    let mut s = Stats {
+        files: idx.files.iter().filter(visible).count(),
+        folders: idx.dirs.iter().filter(visible).count(),
+        ..Default::default()
+    };
+    for e in idx.files.iter().filter(visible) {
         s.bytes += e.size;
         match e.kind {
             Kind::Photo => s.photo += 1,
@@ -727,6 +791,125 @@ mod tests {
             fs::write(full, b"x").unwrap();
         }
         d
+    }
+
+    /// Private folders are visibility boundaries (privacy.rs): cases A–K.
+    #[test]
+    fn private_folders_are_boundaries_for_every_outside_view() {
+        let d = tempdir::Dir::new();
+        for p in [
+            "Pictures/Family/A/a.jpg",
+            "Pictures/Family/b.jpg",
+            "Pictures/Travel/holiday-travel.jpg",
+            "Pictures/Private/photo1.jpg",
+            "Pictures/Private/video.mov",
+            "Pictures/Private/holiday.jpg",
+            "Pictures/Private/doc.pdf",
+            "Pictures/Private/song.mp3",
+            "Pictures/Private/Secret1/photo.jpg",
+            "Pictures/Private/NormalInside/n.jpg",
+            "Pictures/Private/MorePrivate/deep.jpg",
+        ] {
+            let full = d.0.join(p);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, b"x").unwrap();
+        }
+        let mut idx = scan_tree(&d);
+        let id = |p: &str| id_str(id_for(p));
+        let lib = |idx: &Index, kind: &str| {
+            names(&query(idx, &Query { scope: "library".into(), kind: kind.into(), ..Default::default() }))
+        };
+        let has = |v: &[String], p: &str| v.iter().any(|x| x == p);
+
+        // A) Normal folders: everything appears globally.
+        assert!(has(&lib(&idx, "photo"), "Pictures/Private/photo1.jpg"));
+
+        idx.apply_boundaries(&["Pictures/Private".to_string(), "Pictures/Private/MorePrivate".to_string()].into());
+
+        // B, C) Library categories and All Files.
+        for kind in ["photo", "video", "document", "audio", "all"] {
+            let v = lib(&idx, kind);
+            assert!(!v.iter().any(|p| p.starts_with("Pictures/Private/")), "{kind}: {v:?}");
+        }
+        assert!(has(&lib(&idx, "photo"), "Pictures/Family/A/a.jpg"));
+        // D) Global search (from the root and from inside the private folder).
+        for folder in ["", "Pictures/Private"] {
+            let g = names(&query(
+                &idx,
+                &Query { folder: id(folder), search: "holiday".into(), global: true, ..Default::default() },
+            ));
+            assert_eq!(g, ["Pictures/Travel/holiday-travel.jpg"], "global search from {folder:?}");
+        }
+        // E) Counts.
+        let s = stats(&idx);
+        assert_eq!((s.photo, s.video, s.document, s.audio, s.files), (3, 0, 0, 0, 3));
+        assert!(!has(
+            &names(&query(&idx, &Query { scope: "library".into(), kind: "all".into(), ..Default::default() })),
+            "Pictures/Private/song.mp3"
+        ));
+        // F) Include subfolders from the parent stops at the boundary…
+        let parent = Query { folder: id("Pictures"), kind: "all".into(), ..Default::default() };
+        let rec = names(&query(&idx, &Query { recursive: true, ..parent.clone() }));
+        assert_eq!(rec.len(), 3, "{rec:?}");
+        assert!(!rec.iter().any(|p| p.contains("Private")));
+        // …while the private folder itself is still listed and marked.
+        let level = query(&idx, &parent);
+        let private_dir = level.items.iter().find(|e| e.path == "Pictures/Private").expect("folder visible");
+        assert!(private_dir.private && !level.private_scope);
+        // G) Entering it shows its direct contents (files and folders).
+        let inside = Query { folder: id("Pictures/Private"), kind: "all".into(), ..Default::default() };
+        let direct = query(&idx, &inside);
+        assert_eq!(direct.items.len(), 8, "{:?}", names(&direct));
+        assert!(direct.private_scope);
+        // H) Search inside it.
+        assert!(has(
+            &names(&query(&idx, &Query { search: "holiday".into(), ..inside.clone() })),
+            "Pictures/Private/holiday.jpg"
+        ));
+        assert!(has(
+            &names(&query(&idx, &Query { search: "photo".into(), recursive: true, ..inside.clone() })),
+            "Pictures/Private/Secret1/photo.jpg"
+        ));
+        // Filters inside it.
+        // (single-level views always list subfolders, so you can keep navigating)
+        let vids = query(&idx, &Query { kind: "video".into(), ..inside.clone() });
+        let vids: Vec<&str> = vids.items.iter().filter(|e| e.kind != Kind::Folder).map(|e| e.path.as_str()).collect();
+        assert_eq!(vids, ["Pictures/Private/video.mov"]);
+        // I, J) Include subfolders inside: normal subfolders yes, nested private no.
+        let rec_in = names(&query(&idx, &Query { recursive: true, ..inside.clone() }));
+        assert!(
+            has(&rec_in, "Pictures/Private/Secret1/photo.jpg") && has(&rec_in, "Pictures/Private/NormalInside/n.jpg")
+        );
+        assert!(!has(&rec_in, "Pictures/Private/MorePrivate/deep.jpg"));
+        let nested = query(
+            &idx,
+            &Query { folder: id("Pictures/Private/MorePrivate"), kind: "all".into(), ..Default::default() },
+        );
+        assert_eq!(names(&nested), ["Pictures/Private/MorePrivate/deep.jpg"]);
+        // The folder tree (direct children) still lets you navigate in.
+        assert_eq!(
+            subfolders(&idx, &id("Pictures")).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["Family", "Private", "Travel"]
+        );
+
+        // K) Make public again: everything is surfaced again.
+        idx.apply_boundaries(&HashSet::new());
+        assert!(has(&lib(&idx, "photo"), "Pictures/Private/MorePrivate/deep.jpg"));
+        assert_eq!(stats(&idx).files, 11);
+        assert_eq!(names(&query(&idx, &Query { recursive: true, ..parent })).len(), 11);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folders_remember_their_inode_across_save_and_load() {
+        let d = tree();
+        let idx = scan_tree(&d);
+        let fotos = idx.dirs.iter().find(|e| e.path == "fotos").unwrap();
+        assert_ne!(fotos.ino, 0);
+        let f = d.0.join("index.json");
+        save(&f, &idx).unwrap();
+        let loaded = load(&f, &d.0).unwrap();
+        assert_eq!(loaded.dirs.iter().find(|e| e.path == "fotos").unwrap().ino, fotos.ino);
     }
 
     #[test]

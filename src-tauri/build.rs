@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "similar_forget_decisions",
     "similar_clear",
     "similar_cleanup",
+    "set_folder_private",
 ];
 
 fn main() {

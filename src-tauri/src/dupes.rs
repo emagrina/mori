@@ -58,9 +58,14 @@ pub struct Progress {
     pub recoverable: u64,
 }
 
+#[derive(Default)]
 pub struct Root {
     pub canon: PathBuf,
     pub label: String,
+    /// Private folders strictly below this root (relative paths): the walk
+    /// stops there, before reading anything inside. The root itself is the
+    /// user's explicit choice and is never a boundary. See `privacy.rs`.
+    pub private: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -232,7 +237,16 @@ pub(crate) fn collect(
             .max_depth(if spec.recursive { 64 } else { 1 })
             .into_iter()
             .filter_entry(|e| {
-                e.depth() == 0 || e.file_name().to_str().is_some_and(|n| !index::should_skip(n, e.file_type().is_dir()))
+                if e.depth() == 0 {
+                    return true;
+                }
+                let is_dir = e.file_type().is_dir();
+                let boundary = is_dir
+                    && !root.private.is_empty()
+                    && e.path().strip_prefix(&root.canon).ok().and_then(|r| r.to_str()).is_some_and(|r| {
+                        root.private.contains(if cfg!(windows) { r.replace('\\', "/") } else { r.to_owned() }.as_str())
+                    });
+                !boundary && e.file_name().to_str().is_some_and(|n| !index::should_skip(n, is_dir))
             });
         for (i, item) in walker.enumerate() {
             if i % 256 == 0 {
@@ -857,7 +871,11 @@ mod tests {
     fn run(roots: &[&Path], kinds: Option<Vec<Kind>>) -> Analysis {
         let roots = roots
             .iter()
-            .map(|p| Root { canon: p.to_path_buf(), label: p.file_name().unwrap().to_string_lossy().into() })
+            .map(|p| Root {
+                canon: p.to_path_buf(),
+                label: p.file_name().unwrap().to_string_lossy().into(),
+                ..Default::default()
+            })
             .collect();
         analyze(Spec { roots, kinds, recursive: true }, &AtomicBool::new(false), &mut |_| {}).unwrap()
     }
@@ -867,6 +885,45 @@ mod tests {
             g.members.iter().flat_map(|m| m.files.iter().map(|&f| a.files[f].rel.clone())).collect();
         v.sort();
         v
+    }
+
+    /// Private folders (privacy.rs): an analysis started from a parent skips
+    /// them entirely; one rooted at the private folder itself analyses it,
+    /// with nested private folders still skipped.
+    #[test]
+    fn private_folders_are_skipped_unless_chosen_explicitly() {
+        let t = Tmp::new("private");
+        let photo = vec![3u8; 200_000];
+        let other = vec![4u8; 150_000];
+        t.put("Pictures/Family/a.jpg", &photo);
+        t.put("Pictures/Private/a copy.jpg", &photo);
+        t.put("Pictures/Private/b.jpg", &other);
+        t.put("Pictures/Private/Inner/b copy.jpg", &other);
+        t.put("Pictures/Private/Deeper/b again.jpg", &other);
+        let root = |rel: &str, private: &[&str]| Root {
+            canon: t.0.join(rel),
+            label: rel.into(),
+            private: private.iter().map(|s| s.to_string()).collect(),
+        };
+        let go = |r: Root| {
+            analyze(Spec { roots: vec![r], kinds: None, recursive: true }, &AtomicBool::new(false), &mut |_| {})
+                .unwrap()
+        };
+        // M/N) From the parent: nothing inside Private is even listed.
+        let a = go(root("Pictures", &["Private", "Private/Deeper"]));
+        assert!(a.groups.is_empty());
+        assert!(
+            a.files.iter().all(|f| !f.rel.starts_with("Private")),
+            "{:?}",
+            a.files.iter().map(|f| &f.rel).collect::<Vec<_>>()
+        );
+        assert_eq!(a.stats.scanned, 1);
+        // O) Explicitly analysing the private folder works; the nested
+        // private folder is still a boundary.
+        let a = go(root("Pictures/Private", &["Deeper"]));
+        assert_eq!(a.groups.len(), 1);
+        assert_eq!(names(&a, &a.groups[0]), ["Inner/b copy.jpg", "b.jpg"]);
+        assert!(a.files.iter().all(|f| !f.rel.starts_with("Deeper")));
     }
 
     #[test]
@@ -951,7 +1008,11 @@ mod tests {
         }
         let cancel = AtomicBool::new(true);
         let r = analyze(
-            Spec { roots: vec![Root { canon: t.0.clone(), label: "t".into() }], kinds: None, recursive: true },
+            Spec {
+                roots: vec![Root { canon: t.0.clone(), label: "t".into(), ..Default::default() }],
+                kinds: None,
+                recursive: true,
+            },
             &cancel,
             &mut |_| {},
         );
@@ -1106,8 +1167,11 @@ mod tests {
     fn duplab_end_to_end() {
         let Some(lab) = std::env::var_os("MORI_DUPLAB").map(PathBuf::from) else { return };
         let canon = fs::canonicalize(&lab).unwrap();
-        let spec =
-            Spec { roots: vec![Root { canon: canon.clone(), label: "DupLab".into() }], kinds: None, recursive: true };
+        let spec = Spec {
+            roots: vec![Root { canon: canon.clone(), label: "DupLab".into(), ..Default::default() }],
+            kinds: None,
+            recursive: true,
+        };
         let t = std::time::Instant::now();
         let a = analyze(spec, &AtomicBool::new(false), &mut |_| {}).unwrap();
         println!("analyzed {} files in {:?}; stats {:?}", a.files.len(), t.elapsed(), a.stats);
