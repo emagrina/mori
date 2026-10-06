@@ -77,6 +77,24 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Cleanup:** uses the same validated executor as exact duplicates (at least one copy kept, kept copies re-checked, OS Trash only, Live Photo halves together).
 - **Failures:** a file that can't be decoded or sampled is reported as "could not safely analyze" and remembered until it changes; the rest of the analysis continues.
 
+## Private folders (visibility boundaries)
+
+Private folders are a Mori visibility rule, **not a security boundary against other software**:
+
+- **Nothing on disk changes.** No encryption, permission changes, hidden marker files or renames are made, and anyone with access to the drive can read the files.
+- **Enforcement is central.**
+  - When an index is published, every entry gets the path length of the deepest private folder above it (`Index::apply_boundaries`).
+  - `index::query` and `index::stats` show an entry only if that private folder is not strictly below the current scope. That covers library categories, All Files, global and folder search, filters, "Include subfolders" and counts, so no view can forget the rule.
+- **Analyses.** The shared walker in `dupes::collect` (Exact Duplicates and Similar Media) stops at private folders below each chosen location before reading anything inside them. A private folder chosen directly as a location is analysed, with nested private folders still skipped. Making a folder private also drops its files from analysis results already computed from outside it.
+- **Storage.** Records live only in app data (`private-folders.json`):
+  - per volume, identified by the filesystem UUID on macOS (getattrlist `ATTR_VOL_UUID`), or by the mount path elsewhere;
+  - each record holds the folder's path relative to the volume and its inode.
+- **Renames and moves.**
+  - Renames made through Mori update the records.
+  - A private folder renamed or moved within the same volume outside Mori is matched again by inode during the next scan, before partial results are shown.
+  - A record that can't be matched is kept, never silently dropped.
+- **Files stay reachable by id.** Opening a file by an id that was obtained while browsing inside the folder still works. The rule governs what is listed, not access.
+
 ## Supported formats (detail)
 
 Mori deliberately keeps its attack surface small. Every file is listed and searchable, but only a few formats are ever decoded:
