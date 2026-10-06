@@ -230,6 +230,41 @@ pub struct GroupMeta {
     /// Lowest member similarity in the group.
     pub similarity: u8,
     pub members: Vec<MemberMeta>,
+    /// The photos look like a burst (see `mark_bursts`).
+    pub burst: Option<Burst>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Burst {
+    pub frames: usize,
+    /// Time from the first to the last frame.
+    pub span_ms: u64,
+}
+
+/// Largest gap between consecutive frames of a burst.
+const BURST_GAP_MS: i64 = 1500;
+
+/// A group of photos is a burst when every member has a capture time from
+/// the same camera (make + model) and consecutive shots are at most 1.5 s
+/// apart, with at least three frames. `times`: file → (capture time in ms,
+/// camera). A local heuristic; it never changes which files are grouped.
+pub fn mark_bursts(s: &mut SimilarAnalysis, times: &HashMap<usize, (i64, String)>) {
+    for (g, m) in s.analysis.groups.iter().zip(s.meta.iter_mut()) {
+        m.burst = None;
+        if m.video || g.members.len() < 3 {
+            continue;
+        }
+        let shots: Option<Vec<&(i64, String)>> = g.members.iter().map(|mem| times.get(&mem.files[0])).collect();
+        let Some(mut shots) = shots else { continue };
+        if shots[0].1.is_empty() || shots.iter().any(|t| t.1 != shots[0].1) {
+            continue;
+        }
+        shots.sort_by_key(|t| t.0);
+        if shots.windows(2).all(|w| w[1].0 - w[0].0 <= BURST_GAP_MS) {
+            m.burst = Some(Burst { frames: shots.len(), span_ms: (shots[shots.len() - 1].0 - shots[0].0) as u64 });
+        }
+    }
 }
 
 pub struct SimilarAnalysis {
@@ -933,6 +968,55 @@ fn quality(a: &SimilarAnalysisDraft, file: usize) -> f64 {
     q
 }
 
+/// Plain-language reasons why the suggested copy was preferred, from the
+/// same facts `quality` weighs. Only differences that actually exist in the
+/// group are listed.
+pub fn keep_reasons(s: &SimilarAnalysis, group: usize) -> Vec<String> {
+    let a = &s.analysis;
+    let Some(g) = a.groups.get(group) else { return Vec::new() };
+    let k = g.suggested;
+    let file = |m: &Member| &a.files[m.files[0]];
+    let media = |m: &Member| s.media.get(&m.files[0]).cloned().unwrap_or_default();
+    let keeper = &g.members[k];
+    let others: Vec<&Member> = g.members.iter().enumerate().filter(|(i, _)| *i != k).map(|(_, m)| m).collect();
+    let (km, kf) = (media(keeper), file(keeper));
+    let px = |m: &MediaInfo| m.width as u64 * m.height as u64;
+    let mut r = Vec::new();
+    if px(&km) > 0 && others.iter().all(|m| px(&media(m)) < px(&km)) {
+        r.push(format!("Highest resolution ({} × {})", km.width, km.height));
+    }
+    if let Some(d) = km.duration_ms {
+        if others.iter().all(|m| media(m).duration_ms.is_some_and(|o| o + 500 < d)) {
+            r.push(format!("Longest ({}:{:02})", d / 60_000, d / 1000 % 60));
+        }
+    }
+    if keeper.files.len() > 1 && others.iter().all(|m| m.files.len() == 1) {
+        r.push("Live Photo (photo + motion)".into());
+    }
+    if matches!(kf.ext.as_str(), "heic" | "heif")
+        && others.iter().all(|m| !matches!(file(m).ext.as_str(), "heic" | "heif"))
+    {
+        r.push("Original camera format (HEIC)".into());
+    }
+    if km.exif && others.iter().any(|m| !media(m).exif) {
+        r.push("Keeps the camera metadata".into());
+    }
+    let same_px: Vec<&&Member> = others.iter().filter(|m| px(&media(m)) == px(&km)).collect();
+    if km.duration_ms.is_none() && !same_px.is_empty() && same_px.iter().all(|m| file(m).size < kf.size) {
+        r.push("Least compressed at this resolution".into());
+    }
+    if name_penalty(kf) == 0.0 && others.iter().any(|m| name_penalty(file(m)) > 0.0) {
+        r.push("Original-looking name (others look like copies, exports or messaging saves)".into());
+    }
+    if others.iter().all(|m| kf.modified < file(m).modified) {
+        r.push("Oldest copy".into());
+    }
+    if r.is_empty() {
+        r.push("The copies look equivalent; the first one is suggested".into());
+    }
+    r
+}
+
 struct SimilarAnalysisDraft<'a> {
     files: &'a [FileRec],
     media: &'a HashMap<usize, MediaInfo>,
@@ -1252,7 +1336,7 @@ pub fn analyze(
             }
             let lowest = mmeta[1..].iter().map(|m| m.similarity).min().unwrap_or(100);
             groups.push(Group { members, live: false, unit_size: 0, suggested: 0 });
-            meta.push(GroupMeta { video: nodes[keeper].video, similarity: lowest, members: mmeta });
+            meta.push(GroupMeta { video: nodes[keeper].video, similarity: lowest, members: mmeta, burst: None });
             rest.retain(|n| *n != keeper && !linked.contains(n));
         }
     }
@@ -1315,7 +1399,8 @@ pub fn forget(s: &mut SimilarAnalysis, removed: &HashSet<usize>) {
         if members.len() > 1 {
             let lowest = mm[1..].iter().map(|x: &MemberMeta| x.similarity).min().unwrap_or(100);
             keep_groups.push(Group { members, ..g });
-            keep_meta.push(GroupMeta { members: mm, similarity: lowest, ..m });
+            let burst = m.burst.as_ref().filter(|_| mm.len() >= 3).map(|b| Burst { frames: mm.len(), ..b.clone() });
+            keep_meta.push(GroupMeta { members: mm, similarity: lowest, burst, ..m });
         }
     }
     a.groups = keep_groups;
@@ -1345,6 +1430,8 @@ pub fn dismiss(s: &mut SimilarAnalysis, group: usize, member: Option<usize>) -> 
             s.analysis.groups[group].members.remove(m);
             s.meta[group].members.remove(m);
             s.meta[group].similarity = s.meta[group].members[1..].iter().map(|x| x.similarity).min().unwrap_or(100);
+            let frames = s.meta[group].members.len();
+            s.meta[group].burst = s.meta[group].burst.take().filter(|_| frames >= 3).map(|b| Burst { frames, ..b });
         }
         _ => {
             s.analysis.groups.remove(group);
@@ -1530,6 +1617,38 @@ mod tests {
         assert_eq!(n.len(), 3);
         assert!(r.meta[0].members.iter().skip(1).all(|m| !m.exact && m.similarity < 100), "never shown as identical");
         assert_eq!(r.stats.uninformative, 1, "the flat image is not compared");
+        let why = keep_reasons(&r, 0);
+        assert!(why.iter().any(|x| x == "Highest resolution (1600 × 1200)"), "{why:?}");
+        assert!(why.iter().any(|x| x.starts_with("Original-looking name")), "{why:?}");
+        fs::remove_dir_all(lab).unwrap();
+    }
+
+    #[test]
+    fn bursts_need_one_camera_and_short_gaps() {
+        let lab = temp_lab();
+        let a = scene(9, 1200, 900);
+        for (i, w) in [1200u32, 1000, 900].iter().enumerate() {
+            save(
+                &image::imageops::resize(&a, *w, w * 3 / 4, image::imageops::FilterType::Triangle),
+                &lab.join(format!("IMG_{i}.jpg")),
+            );
+        }
+        let mut r = run(&lab, &HashSet::new(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(r.analysis.groups.len(), 1);
+        let files: Vec<usize> = r.analysis.groups[0].members.iter().map(|m| m.files[0]).collect();
+        let cam = "Apple iPhone 15".to_string();
+        let t = |gaps: [i64; 3], cams: [&String; 3]| {
+            files.iter().zip(gaps).zip(cams).map(|((f, g), c)| (*f, (g, c.clone()))).collect::<HashMap<_, _>>()
+        };
+        mark_bursts(&mut r, &t([0, 400, 900], [&cam, &cam, &cam]));
+        assert_eq!(r.meta[0].burst, Some(Burst { frames: 3, span_ms: 900 }));
+        mark_bursts(&mut r, &t([0, 400, 5000], [&cam, &cam, &cam]));
+        assert_eq!(r.meta[0].burst, None, "a long gap is not a burst");
+        let other = "Canon EOS".to_string();
+        mark_bursts(&mut r, &t([0, 400, 900], [&cam, &cam, &other]));
+        assert_eq!(r.meta[0].burst, None, "different cameras");
+        mark_bursts(&mut r, &HashMap::new());
+        assert_eq!(r.meta[0].burst, None, "no capture times");
         fs::remove_dir_all(lab).unwrap();
     }
 

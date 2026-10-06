@@ -22,7 +22,7 @@ import {
   type SimProgress,
   type SimView,
 } from "../api";
-import { FinalReview, LocationList, ProgressBar, Summary, ToolSwitch } from "./Analyzer";
+import { FinalReview, LocationList, ProgressBar, Reasons, Summary, ToolSwitch } from "./Analyzer";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
@@ -670,6 +670,11 @@ function SimGroupCard({
           <div className="muted">
             {allExact ? <span className="tag">Exact duplicate</span> : <span className="tag">Visually similar</span>}
             {g.members.some((m) => m.files.length > 1) && <span className="tag">Live Photo</span>}
+            {g.burst && (
+              <span className="tag" title="Taken in quick succession by the same camera (from capture times)">
+                Burst · {g.burst.frames} frames in {(g.burst.spanMs / 1000).toFixed(1)} s
+              </span>
+            )}
             {plural(g.members.length, "copy", "copies")}
           </div>
         </div>
@@ -694,6 +699,7 @@ function SimGroupCard({
           </button>
         </div>
       </header>
+      <Reasons reasons={g.reasons} />
       <div className="dup-members">
         {g.members.map((m, i) => {
           const trash = marks.has(keyOf(m));
@@ -742,20 +748,64 @@ function SimGroupCard({
 
 // ------------------------------------------------------------- side by side
 
-/** Two photos side by side, with shared zoom and pan (sanitized previews). */
+type CompareMode = "side" | "slider" | "diff";
+
+/**
+ * Two photos: side by side, overlaid with a slider, or as a difference image.
+ * All modes use the worker-made previews (never the originals) and share
+ * one zoom and pan.
+ */
 function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number; b: number; onPick: (b: number) => void; onClose: () => void }) {
+  const [mode, setMode] = useState<CompareMode>("side");
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [split, setSplit] = useState(50);
   const drag = useRef<{ x: number; y: number } | null>(null);
   const files = [group.members[a].files[0], group.members[b].files[0]];
   const setZ = (z: number) => {
     setZoom(z);
     if (z === 1) setPan({ x: 0, y: 0 });
   };
+  const transform = { transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` };
+  const panHandlers = {
+    onPointerDown: (e: React.PointerEvent) => {
+      if (zoom > 1 && !(e.target as HTMLElement).closest(".slider-handle")) drag.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+    },
+    onPointerMove: (e: React.PointerEvent) => drag.current && setPan({ x: e.clientX - drag.current.x, y: e.clientY - drag.current.y }),
+    onPointerUp: () => (drag.current = null),
+    onPointerLeave: () => (drag.current = null),
+  };
+  const caption = (f: SimFile, k: number) => (
+    <figcaption key={f.id}>
+      <div className="truncate">
+        {k === 0 ? <span className="tag suggested">★ A · Suggested</span> : <span className="tag">B</span>} {f.name}
+      </div>
+      <div className="muted">
+        {resolution(f)} · {f.ext.toUpperCase()} · {formatSize(f.size)} · {formatShortDate(f.created ?? f.modified)}
+        {f.exif ? " · camera metadata" : ""}
+      </div>
+      <div className="muted truncate">
+        {f.location} / {f.path}
+      </div>
+    </figcaption>
+  );
   return (
     <ModalFrame onCancel={onClose} wide>
       <div className="compare-head">
         <h2>Compare</h2>
+        <div className="segmented small" role="tablist" aria-label="Mode">
+          {(
+            [
+              ["side", "A | B"],
+              ["slider", "Slider"],
+              ["diff", "Difference"],
+            ] as const
+          ).map(([m, label]) => (
+            <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)} role="tab" aria-selected={mode === m}>
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="segmented small" role="group" aria-label="Zoom">
           {[1, 2, 4].map((z) => (
             <button key={z} className={zoom === z ? "on" : ""} onClick={() => setZ(z)}>
@@ -778,38 +828,112 @@ function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number;
           <Icon name="close" size={14} />
         </button>
       </div>
-      <div
-        className="compare-panes"
-        onPointerDown={(e) => {
-          if (zoom > 1) drag.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
-        }}
-        onPointerMove={(e) => drag.current && setPan({ x: e.clientX - drag.current.x, y: e.clientY - drag.current.y })}
-        onPointerUp={() => (drag.current = null)}
-        onPointerLeave={() => (drag.current = null)}
-      >
-        {files.map((f, k) => (
-          <figure key={f.id} className="compare-pane">
+      {mode === "side" && (
+        <div className="compare-panes" {...panHandlers}>
+          {files.map((f, k) => (
+            <figure key={f.id} className="compare-pane">
+              <div className="compare-stage">
+                <img src={previewUrl(f.id)} alt="" draggable={false} style={transform} />
+              </div>
+              {caption(f, k)}
+            </figure>
+          ))}
+        </div>
+      )}
+      {mode === "slider" && (
+        <>
+          <div className="compare-single" {...panHandlers}>
             <div className="compare-stage">
-              <img src={previewUrl(f.id)} alt="" draggable={false} style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }} />
+              {/* B underneath, A on top clipped at the slider: both fill the same box. */}
+              <div className="slider-box" style={transform}>
+                <img src={previewUrl(files[1].id)} alt="" draggable={false} />
+                <img src={previewUrl(files[0].id)} alt="" draggable={false} className="overlay" style={{ clipPath: `inset(0 ${100 - split}% 0 0)` }} />
+                <div className="slider-line" style={{ left: `${split}%` }} />
+              </div>
+              <span className="slider-label left">A</span>
+              <span className="slider-label right">B</span>
             </div>
-            <figcaption>
-              <div className="truncate">
-                {k === 0 && <span className="tag suggested">★ Suggested</span>} {f.name}
-              </div>
-              <div className="muted">
-                {resolution(f)} · {f.ext.toUpperCase()} · {formatSize(f.size)} · {formatShortDate(f.created ?? f.modified)}
-                {f.exif ? " · camera metadata" : ""}
-              </div>
-              <div className="muted truncate">
-                {f.location} / {f.path}
-              </div>
-            </figcaption>
-          </figure>
-        ))}
-      </div>
+            <input className="slider-handle" type="range" min={0} max={100} value={split} onChange={(e) => setSplit(Number(e.target.value))} aria-label="Slider position" />
+          </div>
+          <div className="compare-captions">{files.map(caption)}</div>
+        </>
+      )}
+      {mode === "diff" && (
+        <>
+          <div className="compare-single" {...panHandlers}>
+            <DiffView a={files[0].id} b={files[1].id} style={transform} />
+          </div>
+          <div className="compare-captions">{files.map(caption)}</div>
+        </>
+      )}
       <p className="muted compare-note">
         {group.members[b].exact ? "Identical bytes, verified by hash." : `${group.members[b].similarity}% estimated similarity — an estimate, not a guarantee.`}
+        {mode === "diff" && " Bright areas differ; black is identical (after scaling both to the same size)."}
       </p>
     </ModalFrame>
+  );
+}
+
+/** |A − B| per pixel, amplified, from the two sanitized previews. */
+function DiffView({ a, b, style }: { a: string; b: string; style: React.CSSProperties }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [state, setState] = useState<{ changed: number } | "loading" | "failed">("loading");
+  useEffect(() => {
+    let alive = true;
+    setState("loading");
+    const load = (id: string) =>
+      new Promise<HTMLImageElement>((ok, fail) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => ok(img);
+        img.onerror = fail;
+        img.src = previewUrl(id);
+      });
+    Promise.all([load(a), load(b)]).then(
+      ([ia, ib]) => {
+        const c = canvas.current;
+        if (!alive || !c) return;
+        const scale = Math.min(1, 1600 / Math.max(ia.naturalWidth, ia.naturalHeight));
+        const w = Math.max(1, Math.round(ia.naturalWidth * scale));
+        const h = Math.max(1, Math.round(ia.naturalHeight * scale));
+        const off = document.createElement("canvas");
+        off.width = w;
+        off.height = h;
+        const octx = off.getContext("2d", { willReadFrequently: true })!;
+        try {
+          octx.drawImage(ia, 0, 0, w, h);
+          const pa = octx.getImageData(0, 0, w, h).data;
+          octx.drawImage(ib, 0, 0, w, h);
+          const pb = octx.getImageData(0, 0, w, h);
+          const out = pb.data;
+          let changed = 0;
+          for (let i = 0; i < out.length; i += 4) {
+            const d = (Math.abs(pa[i] - out[i]) + Math.abs(pa[i + 1] - out[i + 1]) + Math.abs(pa[i + 2] - out[i + 2])) / 3;
+            if (d > 24) changed++;
+            const v = Math.min(255, d * 4);
+            out[i] = out[i + 1] = out[i + 2] = v;
+            out[i + 3] = 255;
+          }
+          c.width = w;
+          c.height = h;
+          c.getContext("2d")!.putImageData(pb, 0, 0);
+          setState({ changed: changed / (w * h) });
+        } catch {
+          setState("failed");
+        }
+      },
+      () => alive && setState("failed"),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [a, b]);
+  return (
+    <div className="compare-stage">
+      <canvas ref={canvas} style={{ ...style, visibility: typeof state === "object" ? "visible" : "hidden" }} />
+      {state === "loading" && <div className="spinner" />}
+      {state === "failed" && <p className="muted">The difference couldn't be computed for these previews.</p>}
+      {typeof state === "object" && <span className="diff-stat">{(state.changed * 100).toFixed(1)}% of pixels differ noticeably</span>}
+    </div>
   );
 }

@@ -45,7 +45,17 @@ const FILTERS: { kind: KindFilter; label: string; icon: IconName }[] = [
   { kind: "other", label: "Other", icon: "other" },
 ];
 
+/** Guessed from names and the macOS screen-capture attribute; correctable per file. */
+const CAPTURE_FILTERS: { kind: KindFilter; label: string; icon: IconName }[] = [
+  { kind: "screenshot", label: "Screenshots", icon: "screenshot" },
+  { kind: "recording", label: "Screen Recordings", icon: "recording" },
+];
+
+const filterIcon = (k: KindFilter) => [...FILTERS, ...CAPTURE_FILTERS].find((f) => f.kind === k)?.icon ?? "all";
+
 const LIBRARY_TITLE: Record<KindFilter, string> = {
+  screenshot: "Screenshots",
+  recording: "Screen Recordings",
   all: "All Files",
   photo: "Photos",
   video: "Videos",
@@ -573,6 +583,21 @@ export default function App() {
               <span className="count">{count(f.kind)?.toLocaleString()}</span>
             </button>
           ))}
+          {CAPTURE_FILTERS.filter((f) => (count(f.kind) ?? 0) > 0).map((f) => (
+            <button
+              key={f.kind}
+              className={`side-item ${browsing && loc.scope === "library" && kind === f.kind && !searching ? "on" : ""}`}
+              onClick={() => {
+                navigate({ scope: "library", folder: "" }, { keepKind: true });
+                setKind(f.kind);
+              }}
+              title="Recognised from file names and the system's screen-capture mark. Right-click a file to correct it."
+            >
+              <Icon name={f.icon} />
+              <span>{f.label}</span>
+              <span className="count">{count(f.kind)?.toLocaleString()}</span>
+            </button>
+          ))}
           <div className="side-heading">Analyze</div>
           <button className={`side-item ${mode === "analyzer" ? "on" : ""}`} onClick={() => setMode("analyzer")} title="Exact byte-identical files">
             <Icon name="duplicate" />
@@ -810,7 +835,7 @@ export default function App() {
           </div>
         ) : (
           <div className="empty">
-            <Icon name={FILTERS.find((f) => f.kind === kind)!.icon} size={34} stroke={1.3} />
+            <Icon name={filterIcon(kind)} size={34} stroke={1.3} />
             <p>
               No {LIBRARY_TITLE[kind].toLowerCase()} here{recursiveView ? " or in subfolders" : ""}.
             </p>
@@ -855,6 +880,15 @@ export default function App() {
           onInfo={() => setInspectId(menu.entry.id)}
           onProtect={() => (menu.entry.protected ? setDialog({ kind: "unprotect", entry: menu.entry }) : setProtected(menu.entry, true))}
           onPreview={() => (menu.entry.kind === "folder" ? navigate({ scope: "folder", folder: menu.entry.id }) : setPreviewId(menu.entry.id))}
+          onCapture={async () => {
+            const e = menu.entry;
+            try {
+              await api.setCaptureOverride(e.id, e.capture ? "not" : "yes");
+              flash(e.capture ? `“${e.name}” is no longer listed as a ${e.capture === 2 ? "screen recording" : "screenshot"}` : `“${e.name}” is now listed as a ${e.kind === "video" ? "screen recording" : "screenshot"}`, 2500);
+            } catch (err) {
+              flash(String(err), 4000);
+            }
+          }}
           onIsolate={() => {
             setPreviewIso(true);
             setPreviewId(menu.entry.id);
@@ -1094,6 +1128,7 @@ function ContextMenu({
   count,
   onPreview,
   onIsolate,
+  onCapture,
   onCopy,
   onRename,
   onPrivacy,
@@ -1109,6 +1144,7 @@ function ContextMenu({
   count: number;
   onPreview: () => void;
   onIsolate: () => void;
+  onCapture: () => void;
   onCopy: () => void;
   onRename: () => void;
   onPrivacy: () => void;
@@ -1156,6 +1192,12 @@ function ContextMenu({
         <Icon name="info" size={14} /> Get Info
         <kbd className="menu-kbd">I</kbd>
       </button>
+      {(entry.kind === "photo" || entry.kind === "video") && (
+        <button onClick={onCapture} title="Mori guesses this from the name and the system's screen-capture mark; correct it here. The file isn't changed.">
+          <Icon name={entry.kind === "video" ? "recording" : "screenshot"} size={14} />
+          {entry.capture ? (entry.capture === 2 ? "Not a Screen Recording" : "Not a Screenshot") : entry.kind === "video" ? "Mark as Screen Recording" : "Mark as Screenshot"}
+        </button>
+      )}
       <div className="sep" />
       <button onClick={onRename}>
         <Icon name="rename" size={14} /> Rename…

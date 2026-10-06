@@ -3351,3 +3351,114 @@ button.link:hover {
 .places-list li button:hover {
   background: var(--hover);
 }
+
+/* ------------------------------------------------ reasons, compare modes */
+
+.keep-reasons {
+  padding: 0 14px 10px 14px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.compare-single {
+  user-select: none;
+  position: relative;
+}
+
+.compare-single .compare-stage {
+  position: relative;
+}
+
+.slider-box {
+  position: relative;
+  transform-origin: center;
+  line-height: 0;
+}
+
+.slider-box img {
+  display: block;
+  max-width: 100%;
+  max-height: min(60vh, 560px);
+}
+
+.slider-box img.overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+
+.slider-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.slider-label {
+  position: absolute;
+  top: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.slider-label.left {
+  left: 10px;
+}
+
+.slider-label.right {
+  right: 10px;
+}
+
+.slider-handle {
+  width: 100%;
+  margin: 10px 0 0;
+  accent-color: var(--text);
+}
+
+.compare-single canvas {
+  max-width: 100%;
+  max-height: 100%;
+  transform-origin: center;
+  image-rendering: auto;
+}
+
+.diff-stat {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare-captions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.compare-captions figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.compare-captions .muted {
+  font-size: 11.5px;
+}

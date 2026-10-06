@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod archive;
+mod capture;
 mod drives;
 mod dupes;
 mod fileops;
@@ -94,6 +95,9 @@ pub struct AppState {
     pub decoded: AtomicU64,
     /// Drives connected while Mori runs, announced to the UI: key → (mount, label).
     connected: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// Screenshot corrections: never one / always one (per volume, like private folders).
+    capture_not: privacy::Store,
+    capture_yes: privacy::Store,
     /// Sensitive Metadata scan results (memory only).
     meta_scan: Mutex<Option<metascan::Store>>,
     meta_running: AtomicBool,
@@ -425,6 +429,7 @@ fn publish_index(app: &AppHandle, mut idx: Index) {
     if let Some(root) = state.root_canon() {
         idx.apply_boundaries(&state.privacy.boundaries(&root));
         idx.apply_protection(&state.protected.boundaries(&root), state.protected.covering(&root).is_some());
+        idx.apply_capture(&state.capture_not.boundaries(&root), &state.capture_yes.boundaries(&root));
     }
     *state.index.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(idx);
     let _ = app.emit("index-changed", ());
@@ -997,6 +1002,8 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
     if meta.is_dir() {
         // A private folder (or one containing private folders) keeps its privacy.
         state.privacy.renamed(&path, &target);
+        state.capture_not.renamed(&path, &target);
+        state.capture_yes.renamed(&path, &target);
     }
     let old_rel = loc.rel.clone();
     let new_rel = match old_rel.rsplit_once('/') {
@@ -1052,6 +1059,30 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
     })
     .await
     .map_err(|_| "The report failed.".to_string())?
+}
+
+// ------------------------------------------- screenshots and recordings
+
+/// Correct the screenshot / screen-recording guess for one file:
+/// "auto" (Mori's guess), "not" or "yes". Only Mori's view changes.
+#[tauri::command]
+fn set_capture_override(app: AppHandle, state: State<'_, AppState>, id: String, mode: String) -> Result<(), String> {
+    let loc = state.locate(&id)?;
+    if loc.is_dir || loc.is_link || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Only files in the browsed folder can be corrected.".into());
+    }
+    let path = loc.root.join(&loc.rel);
+    let (not, yes) = match mode.as_str() {
+        "auto" => (false, false),
+        "not" => (true, false),
+        "yes" => (false, true),
+        _ => return Err("Unknown choice".into()),
+    };
+    state.capture_not.set(&path, 0, not)?;
+    state.capture_yes.set(&path, 0, yes)?;
+    let idx = (*state.index()).clone();
+    publish_index(&app, idx);
+    Ok(())
 }
 
 // ------------------------------------------------- PDFs and archives
@@ -1552,6 +1583,8 @@ struct ViewGroup {
     unit_size: u64,
     recoverable: u64,
     suggested: usize,
+    /// Why the suggested copy was picked.
+    reasons: Vec<String>,
     members: Vec<ViewMember>,
 }
 
@@ -1605,6 +1638,7 @@ fn analysis_results(app: AppHandle, state: State<'_, AppState>) -> Option<Analys
                 unit_size: g.unit_size,
                 recoverable: g.recoverable(),
                 suggested: g.suggested,
+                reasons: dupes::suggest_reasons(&a.files, &a.roots, g),
                 members: g
                     .members
                     .iter()
@@ -1809,7 +1843,24 @@ fn launch_similar(
             })
         }));
         let event = match res {
-            Ok(Ok(result)) => {
+            Ok(Ok(mut result)) => {
+                // Bursts: capture times of the grouped photos only (worker-read EXIF).
+                let wanted: Vec<(usize, PathBuf, dupes::FileRec)> = result
+                    .analysis
+                    .groups
+                    .iter()
+                    .zip(&result.meta)
+                    .filter(|(g, m)| !m.video && g.members.len() >= 3)
+                    .flat_map(|(g, _)| g.members.iter().map(|mem| mem.files[0]))
+                    .map(|f| {
+                        let rec = result.analysis.files[f].clone();
+                        (f, result.analysis.roots[rec.root].canon.clone(), rec)
+                    })
+                    .collect();
+                if !wanted.is_empty() {
+                    let times = metascan::capture_times(&wanted);
+                    similar::mark_bursts(&mut result, &times);
+                }
                 if let Some(store) = state.similar.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
                     store.result = Some(result);
                 }
@@ -1868,7 +1919,13 @@ fn debug_similar_autorun(app: &AppHandle) {
                     )
                 })
                 .collect();
-            eprintln!("mori: DEBUG group video={} {}% :: {}", m.video, m.similarity, names.join(" | "));
+            eprintln!(
+                "mori: DEBUG group video={} {}% burst={:?} :: {}",
+                m.video,
+                m.similarity,
+                m.burst,
+                names.join(" | ")
+            );
         }
     });
 }
@@ -1953,6 +2010,10 @@ struct SimGroup {
     similarity: u8,
     /// Bytes recovered if every copy except the suggested one goes to Trash.
     recoverable: u64,
+    /// Why the suggested copy (the first) is preferred.
+    reasons: Vec<String>,
+    /// Photos taken in quick succession by the same camera.
+    burst: Option<similar::Burst>,
     members: Vec<SimMember>,
 }
 
@@ -2008,6 +2069,8 @@ fn similar_results(app: AppHandle, state: State<'_, AppState>) -> Option<SimView
                 video: m.video,
                 similarity: m.similarity,
                 recoverable: g.members[1..].iter().flat_map(|mem| &mem.files).map(|&f| a.files[f].size).sum(),
+                reasons: similar::keep_reasons(r, gi),
+                burst: m.burst.clone(),
                 members: g
                     .members
                     .iter()
@@ -2361,6 +2424,8 @@ fn main() {
                 safe_mode: AtomicBool::new(false),
                 decoded: AtomicU64::new(0),
                 connected: Mutex::new(HashMap::new()),
+                capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
+                capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
                 meta_scan: Mutex::new(None),
                 meta_running: AtomicBool::new(false),
                 meta_job: Arc::new(jobs::Control::default()),
@@ -2445,6 +2510,7 @@ fn main() {
             archive_listing,
             open_drive_safely,
             set_drive_previews,
+            set_capture_override,
             metascan::file_metadata,
             metascan::meta_start,
             metascan::meta_pause,

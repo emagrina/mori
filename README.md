@@ -63,6 +63,25 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 - **Never removes every copy.** At least one copy of every group is always kept, and this is enforced in the Rust backend, not just the UI. Kept copies are re-checked just before cleanup; if one has changed or its drive is gone, that group is left untouched.
 - **Private results.** Results stay in memory and are discarded with **Clear Analysis** or when Mori quits. Nothing is uploaded; there is no cloud vision or remote service of any kind.
 
+### Media intelligence
+
+- **Compare** (Similar Media) shows two copies in three modes, with one shared zoom and pan:
+  - **A | B** side by side;
+  - **Slider**: A over B, with a draggable divider;
+  - **Difference**: the per-pixel |A − B| of the two worker-made previews, amplified, with the share of pixels that differ noticeably.
+- **Why this copy?** Both analyzers explain the suggested copy using only differences that actually exist in the group:
+  - highest resolution, longest video, Live Photo, original HEIC format, camera metadata kept, least compressed;
+  - original-looking name, oldest copy;
+  - for exact duplicates, the other copies' Downloads/backup locations or copy-style names.
+- **Bursts.** A Similar Media group of three or more photos is marked *Burst · N frames in X s* when every frame comes from the same camera and consecutive shots are at most 1.5 s apart. Capture times come from EXIF, read by the sandboxed worker.
+- **Screenshots and Screen Recordings** appear in the Library when present.
+  - They are recognised locally from the names systems give them (English, Spanish, French, German, Italian, Japanese, Chinese, Korean and more) and, on macOS, from the system's screen-capture attribute.
+  - Wrong guesses can be corrected from the file menu (*Not a Screenshot* / *Mark as Screenshot*). Corrections are remembered per drive and never change the file.
+
+![Similar Media with reasons and a burst](docs/images/phase4/similar-reasons-burst.jpg)
+![Compare: slider](docs/images/phase4/compare-slider.jpg)
+![Compare: difference](docs/images/phase4/compare-difference.jpg)
+
 ### Private folders
 
 Right-click a folder and choose **Make Private** to create a visibility boundary inside Mori. The folder stays where it is and opens normally, but its contents are no longer surfaced from outside it:
@@ -243,6 +262,7 @@ Mori stores nothing on the browsed drive. It changes your files only when you re
 | "Not duplicates" decisions | `…/app.mori.viewer/similar-dismissed.bin` | `%APPDATA%\app.mori.viewer\similar-dismissed.bin` |
 | Private folders | `…/app.mori.viewer/private-folders.json` | `%APPDATA%\app.mori.viewer\private-folders.json` |
 | Protected folders | `…/app.mori.viewer/protected-folders.json` | `%APPDATA%\app.mori.viewer\protected-folders.json` |
+| Screenshot corrections | `…/app.mori.viewer/capture-not.json`, `capture-yes.json` | `%APPDATA%\app.mori.viewer\capture-*.json` |
 | Known drives (Safe Inspection Mode) | `…/app.mori.viewer/drives.json` | `%APPDATA%\app.mori.viewer\drives.json` |
 
 Thumbnails are small re-encodes stored under hash names. Full-size previews are kept only in memory. Analysis results, and thumbnails of analyzed files outside the browsed drive, are never written to disk. Similar-media fingerprints are 64×64 grayscale miniatures stored under hash names (no file names), and "not duplicates" decisions are stored as pairs of content hashes (no names or paths).
