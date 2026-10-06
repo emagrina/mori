@@ -2313,12 +2313,12 @@ button.link:hover {
 }
 
 .dup-row.sim {
-  grid-template-columns: 34px minmax(0, 1fr) minmax(200px, 300px) minmax(70px, 120px) 74px auto;
+  grid-template-columns: 34px minmax(0, 1fr) minmax(230px, 320px) minmax(70px, 120px) 74px auto;
 }
 
 .sim-facts {
   display: grid;
-  grid-template-columns: 1.2fr 0.8fr 1fr 1fr;
+  grid-template-columns: 1.15fr 0.7fr 1fr 1.15fr;
   gap: 8px;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -2426,4 +2426,30 @@ button.link:hover {
 .compare-note {
   margin: 12px 0 0 !important;
   font-size: 12px;
+}
+
+.name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.name-line .tag {
+  flex-shrink: 0;
+  margin-left: 0 !important;
+}
+
+.dup-title .muted {
+  overflow: hidden;
+}
+
+@media (max-width: 1180px) {
+  .dup-group > header:has(.group-actions) {
+    flex-wrap: wrap;
+  }
+  .dup-group > header .group-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
 }

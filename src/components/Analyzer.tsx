@@ -765,6 +765,7 @@ export function FinalReview({
   reviewed,
   ignored,
   title,
+  confirmLabel,
 }: {
   plan: { items: PlanItem[]; trash: DupFile[]; keep: number; bytes: number; invalid: boolean };
   onCancel: () => void;
@@ -774,6 +775,7 @@ export function FinalReview({
   reviewed?: number;
   ignored?: number;
   title?: string;
+  confirmLabel?: string;
 }) {
   const drives = [...new Set(plan.trash.map((f) => f.drive))];
   return (
@@ -828,7 +830,7 @@ export function FinalReview({
           Review Selection
         </button>
         <button className="btn primary danger-fill" onClick={onConfirm} disabled={plan.invalid || !plan.items.length}>
-          Move Selected Duplicates to Trash
+          {confirmLabel ?? "Move Selected Duplicates to Trash"}
         </button>
       </div>
     </ModalFrame>

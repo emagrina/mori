@@ -548,6 +548,7 @@ export function SimilarAnalyzer({
       {phase === "review" && (
         <FinalReview
           title="Similar media cleanup"
+          confirmLabel="Move Selected Files to Trash"
           plan={plan}
           reviewed={groups.length}
           ignored={ignored.size}
@@ -702,8 +703,11 @@ function SimGroupCard({
                 <Thumb entry={simEntry(f)} fit="cover" iconSize={16} />
               </button>
               <div className="dup-info">
-                <div className="truncate name">
-                  {m.files.map((x) => x.name).join(" + ")}
+                <div className="name-line name">
+                  <span className="truncate" title={m.files.map((x) => x.name).join(" + ")}>
+                    {m.files[0].name}
+                    {m.files.length > 1 && ` + ${m.files[1].ext.toUpperCase()}`}
+                  </span>
                   {i === 0 && <span className="tag suggested">★ Suggested original</span>}
                   {i > 0 && (m.exact ? <span className="tag">Identical (verified)</span> : <span className="tag">{m.similarity}% similar</span>)}
                 </div>
