@@ -38,6 +38,7 @@ const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 const MAX_GIF_FRAMES: usize = 600;
 const MAX_GIF_EDGE: u32 = 720;
 /// CPU seconds before the kernel kills the worker (wall-clock is enforced by the host too).
+#[cfg(unix)] // RLIMIT_CPU; the Windows Job object uses its own limits
 const CPU_SECONDS: u64 = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -325,6 +326,8 @@ fn decode_oriented(input: &[u8], format: ImageFormat) -> Result<DynamicImage, i3
 /// Returns the image (possibly already reduced to `max` on its longest edge)
 /// and the oriented source size.
 fn decode_any_still(input: &[u8], max: u32) -> Result<(DynamicImage, u32, u32), i32> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = max; // only the macOS HEIF decoder reduces while decoding
     #[cfg(target_os = "macos")]
     if crate::heif::is_heif(input) {
         let d = crate::heif::decode(input, max, MAX_DIMENSION, MAX_PIXELS).ok_or(EXIT_DECODE)?;

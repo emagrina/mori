@@ -6,6 +6,8 @@ All notable changes to Mori are documented here. The format follows [Keep a Chan
 
 First stable release. The features are listed by area rather than by development commit.
 
+Builds: macOS (Apple Silicon, Intel), Windows x64 (installer and MSI), Linux x64 (AppImage and .deb). macOS is the primary, hand-tested platform; the Windows and Linux builds are built and tested in CI.
+
 ### Browsing
 - Folder navigation with breadcrumbs and back history, in virtualized Gallery, Grid and List views that stay smooth with tens of thousands of files.
 - **Include subfolders**: a folder and everything beneath it as one flat list.

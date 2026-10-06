@@ -3216,7 +3216,10 @@ fn heif_flag(bytes: &[u8]) -> bool {
     #[cfg(target_os = "macos")]
     return heif::is_heif(bytes);
     #[cfg(not(target_os = "macos"))]
-    return false;
+    {
+        let _ = bytes;
+        false
+    }
 }
 
 fn similar_id(root: &Path, rel: &str) -> String {

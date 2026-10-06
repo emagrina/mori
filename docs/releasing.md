@@ -1,31 +1,50 @@
 # Releasing Mori
 
-Releases are built by GitHub Actions (`.github/workflows/release.yml`) from a version tag. Nothing is published automatically: the workflow creates a **draft** release for you to review.
+Releases are built by GitHub Actions (`.github/workflows/release.yml`) on native runners when a version tag is pushed. Ordinary pushes and pull requests never run it.
 
 ## Steps
 
 1. **Set the version** in `package.json`, `package-lock.json` (`npm version X.Y.Z --no-git-tag-version`), `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
    - Running `cargo build` updates `Cargo.lock`.
    - `cargo test` fails if any of these disagree (`tests/version.rs`).
-2. **Update `CHANGELOG.md`** and add release notes as `docs/releases/vX.Y.Z.md`.
+2. **Update `CHANGELOG.md`** and add release notes as `docs/releases/vX.Y.Z.md`. The workflow refuses to release without that file.
 3. **Merge to `main`** through a pull request.
-4. **Tag the merge commit and push the tag:**
+4. **Tag the merge commit on `main` and push the tag:**
    ```bash
-   git checkout main && git pull
+   git checkout main && git pull --ff-only
+   git log -1 --oneline            # the commit you intend to release
    git tag -a vX.Y.Z -m "Mori X.Y.Z"
    git push origin vX.Y.Z
    ```
-5. **Wait for the workflow.** It:
-   1. checks out exactly that tag;
-   2. refuses to continue if the tag doesn't match the app version;
-   3. installs the pinned toolchains and the locked dependencies (`npm ci`, `cargo --locked`);
-   4. runs the type check, `cargo fmt`, clippy and every test, including the sandboxed-worker and temporary-session persistence tests;
-   5. builds `Mori.app` and `Mori_X.Y.Z_aarch64.dmg` on an Apple Silicon runner and verifies the bundle signature and version;
-   6. writes `SHA256SUMS.txt`;
-   7. creates a **draft** GitHub Release named "Mori X.Y.Z", with the DMG, the checksums and the release notes attached.
-6. **Review the draft** on the Releases page, download and test the DMG, and click **Publish**.
+5. **The workflow runs.**
+   1. **Four build jobs run in parallel**, one per native runner:
 
-To build without releasing, use **Actions → Release → Run workflow**. It runs the same checks and build, and keeps the DMG as a workflow artifact.
+      | Job | Runner | Produces |
+      |---|---|---|
+      | macOS_arm64 | `macos-15` | `Mori_X.Y.Z_macOS_arm64.dmg` |
+      | macOS_x64 | `macos-15-intel` | `Mori_X.Y.Z_macOS_x64.dmg` |
+      | Windows_x64 | `windows-2025` | `Mori_X.Y.Z_Windows_x64-setup.exe`, `Mori_X.Y.Z_Windows_x64.msi` |
+      | Linux_x64 | `ubuntu-22.04` | `Mori_X.Y.Z_Linux_x64.AppImage`, `Mori_X.Y.Z_Linux_x64.deb` |
+
+      Each job:
+      - refuses a tag that doesn't match the app version or doesn't point at a commit on `main`;
+      - installs the pinned Rust toolchain and the locked dependencies (`npm ci`, `cargo --locked`);
+      - runs the type check, `cargo fmt`, clippy and the tests;
+      - builds;
+      - checks the output: macOS signature, architecture and version; DMG integrity; `.deb` metadata.
+
+      The files are Tauri's own bundles with clearer names; their contents aren't changed.
+   2. **Only if all four succeed,** a final job:
+      1. writes `SHA256SUMS.txt` over the final files;
+      2. creates the release **"Mori vX.Y.Z"** as a draft, with `docs/releases/vX.Y.Z.md` as the notes and every file attached;
+      3. downloads the attached files again and checks them against `SHA256SUMS.txt`;
+      4. **publishes** the release and marks it as latest.
+
+      If any step fails, nothing is published (at most an unpublished draft is left to delete).
+
+To build without releasing, use **Actions → Release → Run workflow**. It runs the same checks and builds, keeps the files as workflow artifacts, and never creates a release.
+
+**If a release run fails**, delete the tag before retrying, both on GitHub and locally (`git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`), along with any draft it left. Then fix `main` and tag again.
 
 ## Signing and notarization (optional)
 
@@ -46,7 +65,9 @@ When `APPLE_SIGNING_IDENTITY` is set, the workflow does two things:
 - **Signing:** it replaces the ad-hoc identity with that identity for the build only, and Tauri imports the certificate into a temporary keychain.
 - **Notarization:** when the Apple ID secrets are also present, Tauri notarizes the app and staples the ticket.
 
-The secrets are given only to the build step.
+The secrets are given only to the macOS build step. They are never available to pull requests, because this workflow doesn't run for them.
+
+**Windows** builds are unsigned. Signing them needs a code-signing certificate (OV/EV, or a cloud signing service) and Tauri's `bundle.windows` signing settings; until then SmartScreen shows *Unknown publisher*. **Linux** AppImage and `.deb` files are unsigned; users verify them with `SHA256SUMS.txt`.
 
 Mori needs **no entitlements**: it is not App Sandboxed, uses no JIT in its own process, and loads no third-party libraries. The hardened runtime is on. Don't add entitlements to make signing or notarization pass.
 
@@ -58,4 +79,4 @@ npx tauri build --bundles app,dmg -- --locked
 shasum -a 256 src-tauri/target/release/bundle/dmg/*.dmg
 ```
 
-The bundles are in `src-tauri/target/release/bundle/` (`macos/Mori.app`, `dmg/Mori_X.Y.Z_aarch64.dmg`).
+The bundles are in `src-tauri/target/release/bundle/` (`macos/Mori.app`, `dmg/Mori_X.Y.Z_aarch64.dmg`); the workflow gives them the release names above.

@@ -16,6 +16,7 @@ fn every_version_matches_cargo() {
     assert_eq!(json_version(&root.join("tauri.conf.json")), cargo, "tauri.conf.json");
     assert_eq!(json_version(&root.join("../package.json")), cargo, "package.json");
     assert_eq!(json_version(&root.join("../package-lock.json")), cargo, "package-lock.json");
-    let lock = fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    // Windows checkouts may use CRLF line endings.
+    let lock = fs::read_to_string(root.join("Cargo.lock")).unwrap().replace("\r\n", "\n");
     assert!(lock.contains(&format!("name = \"mori\"\nversion = \"{cargo}\"")), "Cargo.lock");
 }

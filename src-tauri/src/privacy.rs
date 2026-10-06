@@ -142,7 +142,7 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::VolumeId;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// Without a filesystem UUID the mount point is the identity: the
     /// nearest ancestor on the same device (Unix) or the path's prefix
@@ -163,7 +163,8 @@ mod platform {
         }
         #[cfg(not(unix))]
         {
-            let mount = canon.ancestors().last().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("\\"));
+            let mount =
+                canon.ancestors().last().map(Path::to_path_buf).unwrap_or_else(|| std::path::PathBuf::from("\\"));
             VolumeId { uuid: None, mount }
         }
     }

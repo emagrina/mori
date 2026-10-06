@@ -22,6 +22,7 @@ use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // detected on macOS only
 pub enum Medium {
     Rotational,
     SolidState,
@@ -127,7 +128,7 @@ fn overwrite_unchecked(path: &Path) -> Result<u64, String> {
 
 #[cfg(unix)]
 fn volume_info(path: &Path) -> Option<(String, String)> {
-    use std::ffi::{CStr, CString};
+    use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let existing = path.ancestors().find(|p| fs::symlink_metadata(p).is_ok())?;
     let c = CString::new(existing.as_os_str().as_bytes()).ok()?;
@@ -137,13 +138,14 @@ fn volume_info(path: &Path) -> Option<(String, String)> {
     }
     #[cfg(target_os = "macos")]
     {
+        use std::ffi::CStr;
         let t = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) }.to_string_lossy().into_owned();
         let dev = unsafe { CStr::from_ptr(st.f_mntfromname.as_ptr()) }.to_string_lossy().into_owned();
         Some((t, dev))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (CStr::from_bytes_with_nul(b"\0"), st);
+        let _ = st;
         Some(("unknown".into(), String::new()))
     }
 }
@@ -254,8 +256,16 @@ mod tests {
     fn the_system_disk_is_refused() {
         let e = eligibility(&std::env::temp_dir()).unwrap_err();
         assert!(e.contains("copy-on-write") || e.contains("solid-state"), "{e}");
-        let (_, dev) = volume_info(Path::new("/")).unwrap();
-        assert_ne!(medium(&dev), Medium::Rotational, "an internal Mac SSD is never reported as spinning");
+        // A virtual machine's disk (CI runners) may report any medium; on a
+        // real Mac the internal disk is solid state.
+        let vm = std::process::Command::new("sysctl")
+            .args(["-n", "kern.hv_vmm_present"])
+            .output()
+            .is_ok_and(|o| o.stdout.starts_with(b"1"));
+        if !vm {
+            let (_, dev) = volume_info(Path::new("/")).unwrap();
+            assert_ne!(medium(&dev), Medium::Rotational, "an internal Mac SSD is never reported as spinning");
+        }
     }
 
     #[cfg(unix)]
