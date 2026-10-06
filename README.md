@@ -83,6 +83,40 @@ These have been discussed for Mori but **are not in the code yet**:
 - Apple Live Photos playback (Still / Live / Loop modes). Live Photos are recognised as pairs by the analyzers only.
 - Matching heavily cropped images, or videos where a large part was cut.
 
+## Philosophy
+
+Mori assumes files may be untrusted. It tries to reduce your exposure to them through:
+
+- **Local processing:** no network, no cloud, no accounts, no telemetry.
+- **Restricted previews:** decoded in a sandboxed worker and shown only as re-encoded output.
+- **Type verification:** the content decides what a file is, never the extension.
+- **Bounded analysis:** size, time and memory limits on everything Mori reads.
+- **Explicit, policy-checked destructive actions:** Read-only Mode and protected folders.
+- **Privacy boundaries:** private folders.
+
+Mori is **not** an antivirus, a malware guarantee, a perfect sandbox, or a forensic secure-erasure tool. It reports observations ("the extension says JPEG, the content is a Mach-O executable"), never verdicts like "safe" or "virus-free".
+
+### File inspection
+
+- **Get Info** (`I`) shows a factual report for any file, folder or link:
+  - the **real type** detected from the content (about 90 formats: images, RAW, video, audio, documents, archives, executables, scripts, web content, fonts, databases) and whether the extension matches;
+  - **risk indicators** with the reason for each (Info / Attention / High attention);
+  - dates, and **permissions** (mode, owner, group, setuid/setgid, macOS filesystem flags, ACL entry count, extended attribute names).
+- **Risk indicators** are objective anomalies:
+  - executable content disguised as media or documents, double extensions (`invoice.pdf.app`), direction-control characters in names, padded names;
+  - unknown signatures where a known format is expected;
+  - extreme declared image dimensions and compression ratios (read from the header, nothing decoded), truncated JPEG/PNG/GIF/PDF;
+  - the executable bit on media, the macOS quarantine attribute, previous decode failures, videos that previously hung the media engine.
+
+  Names with a high-attention pattern get a small warning mark in the file list.
+- **Symbolic links** are listed and described (where they point, and whether that is outside the folder). They are **never followed**: not when browsing, scanning, searching, analysing or opening. A link to `/` or a link loop cannot pull anything into Mori.
+
+### Read-only Mode and protected folders
+
+- **Read-only Mode** (More menu) makes Mori refuse every change to your files: rename, Trash, and every future destructive operation.
+- **Never Modify** (folder menu) protects a folder: Mori refuses to change anything inside it, or any folder that contains it. Browsing and analysis stay available. Removing protection asks for confirmation. Protected folders use the same per-volume identity as private folders (they survive restarts, remounts and moves within the drive).
+- **Enforcement is in the backend.** Every filesystem mutation function requires the mutation policy and checks it first, so a UI bug can't bypass it.
+
 ## Security design
 
 Mori treats every file on a drive as **untrusted input**. It is designed to reduce the impact of malicious media. It does not and cannot guarantee that a crafted file is harmless. The design is built around:
