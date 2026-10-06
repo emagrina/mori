@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-report"
+description = "Enables the file_report command without any pre-configured scope."
+commands.allow = ["file_report"]
+
+[[permission]]
+identifier = "deny-file-report"
+description = "Denies the file_report command without any pre-configured scope."
+commands.deny = ["file_report"]

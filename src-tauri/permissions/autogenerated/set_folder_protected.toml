@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-folder-protected"
+description = "Enables the set_folder_protected command without any pre-configured scope."
+commands.allow = ["set_folder_protected"]
+
+[[permission]]
+identifier = "deny-set-folder-protected"
+description = "Denies the set_folder_protected command without any pre-configured scope."
+commands.deny = ["set_folder_protected"]

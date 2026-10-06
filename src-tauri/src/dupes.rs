@@ -1200,7 +1200,9 @@ mod tests {
             })
             .filter(|p| !p.trash.is_empty())
             .collect();
-        let mut trasher = |root: &Path, rel: &str| crate::fileops::move_to_trash(&root.join(rel));
+        let store = crate::privacy::Store::load(std::env::temp_dir().join("mori-duplab-protected.json"));
+        let policy = crate::policy::Policy { read_only: false, protected: &store };
+        let mut trasher = |root: &Path, rel: &str| crate::fileops::move_to_trash(&policy, &root.join(rel));
         let out = execute(&a, &plan, &mut trasher, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
         println!(
             "outcome: trashed {} ({} bytes), kept {}, cleaned {}, skipped {}, failures {:?}",

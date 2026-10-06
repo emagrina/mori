@@ -1,3 +1,7 @@
+//! Folder records kept in Mori's app data, per volume: used for private
+//! folders (visibility boundaries, below) and for protected folders
+//! ("Never Modify", see `policy.rs`), with the same identity rules.
+//!
 //! Private folders: visibility boundaries inside Mori.
 //!
 //! A private folder is NOT encrypted, locked, renamed or modified in any way,
@@ -69,9 +73,17 @@ impl VolumeId {
     }
 }
 
-/// Identify the volume holding `canon` (a canonical path).
+/// Identify the volume holding `canon` (a canonical path). A path that
+/// doesn't exist yet (e.g. a file about to be created) is identified by its
+/// nearest existing ancestor, so policy checks never silently miss.
 pub fn volume_of(canon: &Path) -> VolumeId {
-    platform::volume_of(canon)
+    let existing = canon.ancestors().find(|p| fs::symlink_metadata(p).is_ok()).unwrap_or(canon);
+    let mut v = platform::volume_of(existing);
+    // Keep the mount relative to the requested path.
+    if !canon.starts_with(&v.mount) {
+        v.mount = PathBuf::from("/");
+    }
+    v
 }
 
 #[cfg(target_os = "macos")]
@@ -236,6 +248,24 @@ impl Store {
             .filter(|f| below(&f.path, &base))
             .map(|f| if base.is_empty() { f.path.clone() } else { f.path[base.len() + 1..].to_owned() })
             .collect()
+    }
+
+    /// The recorded folder that is `path` itself or one of its ancestors
+    /// (volume-relative path), if any.
+    pub fn covering(&self, path: &Path) -> Option<String> {
+        let vol = volume_of(path);
+        let rel = vol.rel(path)?;
+        let mut data = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        let v = Self::find(&mut data, &vol)?;
+        v.folders.iter().find(|f| f.path == rel || below(&rel, &f.path)).map(|f| f.path.clone())
+    }
+
+    /// Whether any recorded folder lies strictly below `dir`.
+    pub fn any_below(&self, dir: &Path) -> bool {
+        let vol = volume_of(dir);
+        let Some(rel) = vol.rel(dir) else { return false };
+        let mut data = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::find(&mut data, &vol).is_some_and(|v| v.folders.iter().any(|f| below(&f.path, &rel)))
     }
 
     #[cfg(test)]
