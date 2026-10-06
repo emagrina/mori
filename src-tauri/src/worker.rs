@@ -56,6 +56,13 @@ pub enum Op {
     PdfInfo,
     /// One PDF page rendered to a bitmap (input: u32 LE page number + PDF).
     PdfPage,
+    /// Embedded metadata of one file as JSON (input: see `metadata::extract`).
+    Meta,
+    /// Metadata of several files (input: repeated u32 LE length + item);
+    /// a JSON array with `null` for items that failed.
+    MetaBatch,
+    /// The same image without its metadata (JPEG/PNG/WebP, see `sanitize.rs`).
+    Sanitize,
 }
 
 impl Op {
@@ -68,6 +75,9 @@ impl Op {
             Op::Fingerprint => "fingerprint",
             Op::PdfInfo => "pdfinfo",
             Op::PdfPage => "pdfpage",
+            Op::Meta => "meta",
+            Op::MetaBatch => "metabatch",
+            Op::Sanitize => "sanitize",
         }
     }
     fn parse(s: &str) -> Option<Op> {
@@ -79,6 +89,9 @@ impl Op {
             "fingerprint" => Op::Fingerprint,
             "pdfinfo" => Op::PdfInfo,
             "pdfpage" => Op::PdfPage,
+            "meta" => Op::Meta,
+            "metabatch" => Op::MetaBatch,
+            "sanitize" => Op::Sanitize,
             _ => return None,
         })
     }
@@ -95,6 +108,10 @@ pub enum OutFormat {
     Raw = 5,
     /// `Op::PdfInfo`: plain `key=value` lines.
     Text = 6,
+    /// `Op::Meta`/`Op::MetaBatch`: JSON.
+    Json = 7,
+    /// `Op::Sanitize`: the rewritten file.
+    Bytes = 8,
 }
 
 /// Side of the normalized grayscale miniatures made by `Op::Fingerprint`.
@@ -112,6 +129,8 @@ impl OutFormat {
             OutFormat::Probe => "text/plain",
             OutFormat::Raw => "application/octet-stream",
             OutFormat::Text => "text/plain",
+            OutFormat::Json => "application/json",
+            OutFormat::Bytes => "application/octet-stream",
         }
     }
     pub fn ext(self) -> &'static str {
@@ -122,6 +141,8 @@ impl OutFormat {
             OutFormat::Probe => "txt",
             OutFormat::Raw => "bin",
             OutFormat::Text => "txt",
+            OutFormat::Json => "json",
+            OutFormat::Bytes => "bin",
         }
     }
 }
@@ -199,6 +220,11 @@ pub fn worker_main(args: &[String]) -> ! {
         Op::Fingerprint => fingerprint(&input),
         Op::PdfInfo => pdf_info(&input),
         Op::PdfPage => pdf_page(&input, max),
+        Op::Meta => meta(&input),
+        Op::MetaBatch => meta_batch(&input),
+        Op::Sanitize => crate::sanitize::sanitize(&input)
+            .map(|bytes| Output { width: 0, height: 0, format: OutFormat::Bytes, bytes })
+            .map_err(|e| if e == "unsupported" { EXIT_UNSUPPORTED } else { EXIT_DECODE }),
     };
     match result {
         Ok(out) => {
@@ -343,6 +369,37 @@ fn pdf_info(_: &[u8]) -> Result<Output, i32> {
 #[cfg(not(target_os = "macos"))]
 fn pdf_page(_: &[u8], _: u32) -> Result<Output, i32> {
     Err(EXIT_UNSUPPORTED)
+}
+
+const MAX_META_JSON: usize = 4 * 1024 * 1024;
+
+fn meta(input: &[u8]) -> Result<Output, i32> {
+    let m = crate::metadata::extract(input).ok_or(EXIT_UNSUPPORTED)?;
+    let bytes = serde_json::to_vec(&m).map_err(|_| EXIT_DECODE)?;
+    if bytes.len() > MAX_META_JSON {
+        return Err(EXIT_LIMITS);
+    }
+    Ok(Output { width: 0, height: 0, format: OutFormat::Json, bytes })
+}
+
+/// Each item is parsed on its own; a panic in one only nulls that item.
+fn meta_batch(input: &[u8]) -> Result<Output, i32> {
+    let mut items: Vec<Option<crate::metadata::Meta>> = Vec::new();
+    let mut i = 0;
+    while i < input.len() {
+        let len = input.get(i..i + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).ok_or(EXIT_USAGE)?;
+        let item = input.get(i + 4..i + 4 + len).ok_or(EXIT_USAGE)?;
+        items.push(std::panic::catch_unwind(|| crate::metadata::extract(item)).ok().flatten());
+        i += 4 + len;
+        if items.len() > 256 {
+            return Err(EXIT_LIMITS);
+        }
+    }
+    let bytes = serde_json::to_vec(&items).map_err(|_| EXIT_DECODE)?;
+    if bytes.len() > MAX_META_JSON {
+        return Err(EXIT_LIMITS);
+    }
+    Ok(Output { width: 0, height: 0, format: OutFormat::Json, bytes })
 }
 
 /// The fingerprint operation without a separate process: tests only.
@@ -691,6 +748,8 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         4 => OutFormat::Probe,
         5 => OutFormat::Raw,
         6 => OutFormat::Text,
+        7 => OutFormat::Json,
+        8 => OutFormat::Bytes,
         _ => return Err(WorkerError::Failed),
     };
     // Double-check the payload really is the format the worker claimed.
@@ -703,6 +762,9 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         OutFormat::Text => {
             out.len() <= 16 + 16 * 1024 && out[16..].starts_with(b"pages=") && std::str::from_utf8(&out[16..]).is_ok()
         }
+        OutFormat::Json => out.len() <= 16 + MAX_META_JSON && matches!(out.get(16), Some(b'{' | b'[')),
+        // The caller checks what it asked for (see metascan.rs).
+        OutFormat::Bytes => out.len() > 16,
     };
     if !ok_magic {
         return Err(WorkerError::Failed);
