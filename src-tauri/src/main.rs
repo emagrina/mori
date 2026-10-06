@@ -3,6 +3,8 @@
 
 mod dupes;
 mod fileops;
+#[cfg(target_os = "macos")]
+mod heif;
 mod index;
 mod probe;
 mod protocol;

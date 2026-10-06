@@ -50,6 +50,8 @@ pub enum Op {
     Frame,
     /// Identify a video's codecs from an MP4 `moov` box or the head of a WebM file.
     Probe,
+    /// Normalized grayscale miniatures of a still image for similarity analysis.
+    Fingerprint,
 }
 
 impl Op {
@@ -59,6 +61,7 @@ impl Op {
             Op::Preview => "preview",
             Op::Frame => "frame",
             Op::Probe => "probe",
+            Op::Fingerprint => "fingerprint",
         }
     }
     fn parse(s: &str) -> Option<Op> {
@@ -67,6 +70,7 @@ impl Op {
             "preview" => Op::Preview,
             "frame" => Op::Frame,
             "probe" => Op::Probe,
+            "fingerprint" => Op::Fingerprint,
             _ => return None,
         })
     }
@@ -79,7 +83,15 @@ pub enum OutFormat {
     Gif = 3,
     /// Plain `key=value` lines from `Op::Probe`.
     Probe = 4,
+    /// `Op::Fingerprint`: FP_VARIANTS raw FP_SIDE×FP_SIDE grayscale planes.
+    Raw = 5,
 }
+
+/// Side of the normalized grayscale miniatures made by `Op::Fingerprint`.
+pub const FP_SIDE: u32 = 64;
+/// Miniatures per image: the whole frame, then its central 90 %.
+pub const FP_VARIANTS: usize = 2;
+pub const FP_LEN: usize = (FP_SIDE * FP_SIDE) as usize * FP_VARIANTS;
 
 impl OutFormat {
     pub fn mime(self) -> &'static str {
@@ -88,6 +100,7 @@ impl OutFormat {
             OutFormat::Png => "image/png",
             OutFormat::Gif => "image/gif",
             OutFormat::Probe => "text/plain",
+            OutFormat::Raw => "application/octet-stream",
         }
     }
     pub fn ext(self) -> &'static str {
@@ -96,6 +109,7 @@ impl OutFormat {
             OutFormat::Png => "png",
             OutFormat::Gif => "gif",
             OutFormat::Probe => "txt",
+            OutFormat::Raw => "bin",
         }
     }
 }
@@ -118,9 +132,17 @@ const EXIT_USAGE: i32 = 6;
 
 /// Entry point when running as a worker. Never returns.
 pub fn worker_main(args: &[String]) -> ! {
+    // Similarity fingerprints are background work: yield to everything else.
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("fingerprint") {
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+    }
     // Lock down first; refuse to touch input if the sandbox can't be applied.
     restrict_resources();
-    if !enter_sandbox() {
+    // HEIC jobs (flag set by the host from the magic bytes) need Apple's HEVC
+    // decoder service; everything else gets the strictest profile.
+    let heif = args.iter().skip(1).take(2).any(|a| a == "heif");
+    if !enter_sandbox(heif) {
         std::process::exit(EXIT_SANDBOX);
     }
     if args.first().map(String::as_str) == Some("selftest") {
@@ -154,6 +176,7 @@ pub fn worker_main(args: &[String]) -> ! {
             false,
         ),
         Op::Probe => probe_video(&input),
+        Op::Fingerprint => fingerprint(&input),
     };
     match result {
         Ok(out) => {
@@ -205,6 +228,16 @@ fn check_dims(w: u32, h: u32) -> Result<(), i32> {
 }
 
 fn process(input: &[u8], max: u32, allowed: &[ImageFormat], animate: bool, flatten: bool) -> Result<Output, i32> {
+    // HEIC stills (thumbnails and previews only, never the video-frame path).
+    #[cfg(target_os = "macos")]
+    if crate::heif::is_heif(input) && allowed.contains(&ImageFormat::Jpeg) {
+        let (img, src_w, src_h) = decode_any_still(input, max)?;
+        let mut img = DynamicImage::ImageRgb8(img.to_rgb8());
+        if img.width() > max || img.height() > max {
+            img = img.resize(max, max, FilterType::Triangle);
+        }
+        return encode_still(img, src_w, src_h);
+    }
     // Format comes from magic bytes only; the filename is never seen here.
     let format = image::guess_format(input).map_err(|_| EXIT_UNSUPPORTED)?;
     if !allowed.contains(&format) {
@@ -213,7 +246,19 @@ fn process(input: &[u8], max: u32, allowed: &[ImageFormat], animate: bool, flatt
     if format == ImageFormat::Gif && animate {
         return animated_gif(input, max.min(MAX_GIF_EDGE));
     }
+    let mut img = decode_oriented(input, format)?;
+    let (src_w, src_h) = (img.width(), img.height());
+    if flatten {
+        img = DynamicImage::ImageRgb8(img.to_rgb8());
+    }
+    if src_w > max || src_h > max {
+        img = img.resize(max, max, FilterType::Triangle);
+    }
+    encode_still(img, src_w, src_h)
+}
 
+/// Decode a still (first frame for GIF) under the limits, EXIF orientation applied.
+fn decode_oriented(input: &[u8], format: ImageFormat) -> Result<DynamicImage, i32> {
     let mut reader = ImageReader::with_format(Cursor::new(input), format);
     reader.limits(limits());
     let mut decoder = reader.into_decoder().map_err(classify)?;
@@ -224,14 +269,61 @@ fn process(input: &[u8], max: u32, allowed: &[ImageFormat], animate: bool, flatt
     if let Some(o) = orientation {
         img.apply_orientation(o);
     }
-    let (src_w, src_h) = (img.width(), img.height());
-    if flatten {
-        img = DynamicImage::ImageRgb8(img.to_rgb8());
+    Ok(img)
+}
+
+/// Decode any still Mori can analyze: JPEG, PNG, WebP, GIF (first frame) and,
+/// on macOS, HEIC/HEIF through the system decoder (still inside this sandbox).
+/// Returns the image (possibly already reduced to `max` on its longest edge)
+/// and the oriented source size.
+fn decode_any_still(input: &[u8], max: u32) -> Result<(DynamicImage, u32, u32), i32> {
+    #[cfg(target_os = "macos")]
+    if crate::heif::is_heif(input) {
+        let d = crate::heif::decode(input, max, MAX_DIMENSION, MAX_PIXELS).ok_or(EXIT_DECODE)?;
+        return Ok((DynamicImage::ImageRgba8(d.rgba), d.src_w, d.src_h));
     }
-    if src_w > max || src_h > max {
-        img = img.resize(max, max, FilterType::Triangle);
+    let format = image::guess_format(input).map_err(|_| EXIT_UNSUPPORTED)?;
+    if ![ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP, ImageFormat::Gif].contains(&format) {
+        return Err(EXIT_UNSUPPORTED);
     }
-    encode_still(img, src_w, src_h)
+    let img = decode_oriented(input, format)?;
+    let (w, h) = (img.width(), img.height());
+    Ok((img, w, h))
+}
+
+/// The fingerprint operation without a separate process: tests only.
+#[cfg(test)]
+pub fn fingerprint_in_process(input: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    fingerprint(input).ok().map(|o| (o.width, o.height, o.bytes))
+}
+
+/// Grayscale miniatures for perceptual comparison. Transparent areas are
+/// composited onto white so a PNG and its flattened JPEG look the same.
+fn fingerprint(input: &[u8]) -> Result<Output, i32> {
+    let (img, src_w, src_h) = decode_any_still(input, 512)?;
+    let mut rgba = img.to_rgba8();
+    if rgba.width() > 512 || rgba.height() > 512 {
+        rgba = image::imageops::thumbnail(&rgba, 512.min(rgba.width()), 512.min(rgba.height()));
+    }
+    let gray = image::GrayImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+        let p = rgba.get_pixel(x, y).0;
+        let a = p[3] as f32 / 255.0;
+        let l = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+        image::Luma([(l * a + 255.0 * (1.0 - a)).round().clamp(0.0, 255.0) as u8])
+    });
+    let mut bytes = Vec::with_capacity(FP_LEN);
+    for variant in 0..FP_VARIANTS {
+        let (w, h) = (gray.width(), gray.height());
+        let view = if variant == 0 {
+            image::imageops::crop_imm(&gray, 0, 0, w, h).to_image()
+        } else {
+            let (cw, ch) = (((w as f32) * 0.9).round().max(1.0) as u32, ((h as f32) * 0.9).round().max(1.0) as u32);
+            image::imageops::crop_imm(&gray, (w - cw) / 2, (h - ch) / 2, cw, ch).to_image()
+        };
+        let small = image::imageops::resize(&view, FP_SIDE, FP_SIDE, FilterType::Triangle);
+        bytes.extend_from_slice(small.as_raw());
+    }
+    Ok(Output { width: src_w, height: src_h, format: OutFormat::Raw, bytes })
 }
 
 fn encode_still(img: DynamicImage, src_w: u32, src_h: u32) -> Result<Output, i32> {
@@ -323,18 +415,68 @@ fn restrict_resources() {
 
 /// macOS: Seatbelt "pure-computation" profile — no filesystem, no network,
 /// no IPC, no process creation. Applied after the executable has loaded.
+/// macOS sandbox for HEIC jobs. Deny-list on top of `allow default`, because
+/// the system HEVC decoder needs a few low-level operations; what matters is
+/// denied: reading anything but system files and Mori's own app bundle,
+/// writing anything, the network, new processes, every IPC service except
+/// Apple's video decoder, and every IOKit client except IOSurface.
 #[cfg(target_os = "macos")]
-fn enter_sandbox() -> bool {
-    use std::ffi::{c_char, c_int};
+const HEIF_PROFILE: &str = r#"(version 1)
+(allow default)
+(deny file-read*)
+(allow file-read* (subpath "/System") (subpath "/usr/lib") (subpath "/usr/share") (subpath "/Library/Apple") (subpath "/private/var/db/dyld") (subpath "@APP_DIR@"))
+(deny file-write* file-ioctl file-link file-clone file-revoke file-chroot file-read-xattr)
+(deny network*)
+(deny process-fork process-exec*)
+(deny mach-lookup)
+(allow mach-lookup (global-name "com.apple.coremedia.videodecoder"))
+(deny mach-register mach-priv* mach-task-name)
+(deny iokit-open)
+(allow iokit-open (iokit-user-client-class "IOSurfaceRootUserClient"))
+(deny iokit-set-properties)
+(deny ipc-posix* ipc-sysv*)
+(deny system-socket)
+(deny signal (target others))
+(deny nvram* system-privilege user-preference* distributed-notification-post)
+(deny process-info* (target others))
+(deny system-info pseudo-tty lsopen system-kext*)"#;
+
+#[cfg(target_os = "macos")]
+fn enter_sandbox(heif: bool) -> bool {
+    use std::ffi::{c_char, c_int, CString};
     extern "C" {
         fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
         fn sandbox_free_error(errorbuf: *mut c_char);
     }
     const SANDBOX_NAMED: u64 = 0x0001;
+    let custom = if heif {
+        // Mori's own app bundle (or the executable's folder outside a bundle),
+        // inserted literally; refused if it contains characters that would
+        // need escaping.
+        let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) else {
+            return false;
+        };
+        let dir = if exe_dir.ends_with("Contents/MacOS") {
+            exe_dir.parent().and_then(|c| c.parent()).map(|b| b.to_path_buf())
+        } else {
+            Some(exe_dir)
+        };
+        let Some(dir) = dir else { return false };
+        let Some(dir) = dir.to_str().filter(|d| d.starts_with('/') && !d.contains(['"', '\\', '\n', '\0'])) else {
+            return false;
+        };
+        let Ok(p) = CString::new(HEIF_PROFILE.replace("@APP_DIR@", dir)) else { return false };
+        Some(p)
+    } else {
+        None
+    };
     unsafe {
         let mut err: *mut c_char = std::ptr::null_mut();
         // Same value as the SDK's kSBXProfilePureComputation (a char array).
-        let rc = sandbox_init(c"pure-computation".as_ptr(), SANDBOX_NAMED, &mut err);
+        let rc = match &custom {
+            Some(p) => sandbox_init(p.as_ptr(), 0, &mut err),
+            None => sandbox_init(c"pure-computation".as_ptr(), SANDBOX_NAMED, &mut err),
+        };
         if !err.is_null() {
             sandbox_free_error(err);
         }
@@ -343,7 +485,7 @@ fn enter_sandbox() -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn enter_sandbox() -> bool {
+fn enter_sandbox(_heif: bool) -> bool {
     // Linux: rlimits + no_new_privs (see restrict_resources); Windows: Job object
     // applied by the host. The worker still never receives a path.
     true
@@ -403,10 +545,14 @@ pub fn run(op: Op, max: u32, input: Vec<u8>, timeout: std::time::Duration) -> Re
     let exe = std::env::current_exe().map_err(|_| WorkerError::Failed)?;
     let mut cmd = Command::new(exe);
     // Fixed arguments only; nothing derived from the file or its name.
-    cmd.arg(WORKER_FLAG)
-        .arg(op.name())
-        .arg(max.to_string())
-        .env_clear()
+    cmd.arg(WORKER_FLAG).arg(op.name()).arg(max.to_string());
+    // Fixed flag from the magic bytes: lets the worker load the system HEIF
+    // decoder (with trusted data) before it locks itself down.
+    #[cfg(target_os = "macos")]
+    if crate::heif::is_heif(&input) {
+        cmd.arg("heif");
+    }
+    cmd.env_clear()
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -469,6 +615,7 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         2 => OutFormat::Png,
         3 => OutFormat::Gif,
         4 => OutFormat::Probe,
+        5 => OutFormat::Raw,
         _ => return Err(WorkerError::Failed),
     };
     // Double-check the payload really is the format the worker claimed.
@@ -477,6 +624,7 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         OutFormat::Png => out[16..].starts_with(b"\x89PNG"),
         OutFormat::Gif => out[16..].starts_with(b"GIF8"),
         OutFormat::Probe => out.len() <= 16 + 512 && out[16..].starts_with(b"video="),
+        OutFormat::Raw => out.len() == 16 + FP_LEN,
     };
     if !ok_magic {
         return Err(WorkerError::Failed);
