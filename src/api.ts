@@ -352,6 +352,37 @@ export interface HealthProgress {
   paused: boolean;
 }
 
+export interface PlanEntry {
+  id: string;
+  name: string;
+  path: string;
+  kind: "file" | "folder" | "link";
+  bytes: number;
+  files: number;
+  blocked: string | null;
+  note: string | null;
+}
+
+export interface OperationPlan {
+  op: "trash" | "delete" | "overwrite";
+  entries: PlanEntry[];
+  totalBytes: number;
+  totalFiles: number;
+  blocked: number;
+  needsTypedConfirm: boolean;
+  /** null: Secure Overwrite is meaningful here; otherwise why it isn't. */
+  overwriteUnavailable: string | null;
+}
+
+export interface HistoryRecord {
+  id: number;
+  at: number;
+  label: string;
+  undone: boolean;
+  undoable: boolean;
+  note: string | null;
+}
+
 export interface ConnectedDrive {
   key: string;
   label: string;
@@ -595,6 +626,14 @@ export const api = {
   openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
   /** "Generate previews" for the current drive (or back to metadata only). */
   setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** Dry run: what an operation would do, and what the policy refuses. Nothing changes. */
+  planOperation: (op: "trash" | "delete" | "overwrite", ids: string[]) => invoke<OperationPlan>("plan_operation", { op, ids }),
+  /** Permanent: no Trash. `confirm` must be "DELETE" when the plan requires typed confirmation. */
+  deleteItems: (ids: string[], overwrite: boolean, confirm: string) =>
+    invoke<{ deleted: string[]; bytes: number; failed: Failure[] }>("delete_items", { ids, overwrite, confirm }),
+  historyList: () => invoke<HistoryRecord[]>("history_list"),
+  /** `null` = the most recent operation that can be undone. */
+  historyUndo: (id: number | null) => invoke<{ restored: number; failed: string[] }>("history_undo", { id }),
   /** Only Mori's records change; files are never touched. */
   setFavorite: (ids: string[], on: boolean) => invoke<void>("set_favorite", { ids, on }),
   tagsList: () => invoke<TagInfo[]>("tags_list"),

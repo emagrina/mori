@@ -131,6 +131,7 @@ export const SHORTCUTS: [string, string][] = [
   ["← →  (preview)", "Previous / next file"],
   [`${mod}+  ${mod}−  ${mod}0`, "Zoom in / out / fit (preview)"],
   [isMac ? "⌘⌫" : "Delete", "Move to Trash"],
+  [`${mod}Z`, "Undo the last file operation"],
   [`${mod}↑  ⌫`, "Parent folder / back"],
 ];
 

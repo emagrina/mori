@@ -616,6 +616,10 @@ fn sanitize_one(app: &AppHandle, state: &AppState, id: &str) -> Result<String, S
         }
     }
     let name = created.ok_or("no free name for the copy")?;
+    state.history.record(
+        format!("Created sanitized copy “{}”", secure::display_safe(&name)),
+        vec![crate::history::Change::Created { path: dir.join(&name) }],
+    );
     // Read back what was written.
     let rel = match loc.rel.rsplit_once('/') {
         Some((d, _)) => format!("{d}/{name}"),
