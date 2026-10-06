@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-empty-folders"
+description = "Enables the empty_folders command without any pre-configured scope."
+commands.allow = ["empty_folders"]
+
+[[permission]]
+identifier = "deny-empty-folders"
+description = "Denies the empty_folders command without any pre-configured scope."
+commands.deny = ["empty_folders"]

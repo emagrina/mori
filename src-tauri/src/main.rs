@@ -7,6 +7,7 @@ mod drives;
 mod dupes;
 mod fileops;
 mod filetype;
+mod health;
 #[cfg(target_os = "macos")]
 mod heif;
 mod index;
@@ -24,6 +25,7 @@ mod risk;
 mod sanitize;
 mod secure;
 mod similar;
+mod storage;
 mod thumbs;
 mod video;
 mod worker;
@@ -98,6 +100,10 @@ pub struct AppState {
     /// Screenshot corrections: never one / always one (per volume, like private folders).
     capture_not: privacy::Store,
     capture_yes: privacy::Store,
+    /// Media Health results (memory only).
+    health: Mutex<Option<health::Store>>,
+    health_running: AtomicBool,
+    health_job: Arc<jobs::Control>,
     /// Sensitive Metadata scan results (memory only).
     meta_scan: Mutex<Option<metascan::Store>>,
     meta_running: AtomicBool,
@@ -1059,6 +1065,76 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
     })
     .await
     .map_err(|_| "The report failed.".to_string())?
+}
+
+// ---------------------------------------------------------------- storage
+
+/// Where the space goes on the browsed drive (from the index; nothing is read).
+#[tauri::command]
+fn storage_report(state: State<'_, AppState>, folder: String) -> Result<storage::Report, String> {
+    let idx = state.index();
+    let rel = idx.folder_path(&folder).ok_or("Unknown folder")?.to_owned();
+    Ok(storage::report(&idx, &rel))
+}
+
+/// Folders without files, each re-checked on disk (hidden items count).
+#[tauri::command]
+async fn empty_folders(app: AppHandle) -> Result<Vec<storage::EmptyFolder>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let root = state.root_canon().ok_or("No folder selected")?;
+        Ok(storage::empty_folders(&state.index(), &root))
+    })
+    .await
+    .map_err(|_| "The check failed.".to_string())?
+}
+
+/// Move the chosen empty folders to the Trash, re-verifying each on disk
+/// right before (never a permanent delete; protected folders are refused by
+/// the mutation policy).
+#[tauri::command]
+async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut out = TrashResult { trashed: Vec::new(), bytes: 0, failed: Vec::new() };
+        let mut removed = Vec::new();
+        for id in ids.iter().take(10_000) {
+            let Ok(loc) = state.locate(id) else { continue };
+            let shown = secure::display_safe(&loc.rel);
+            if !loc.is_dir {
+                out.failed.push(dupes::Failure { path: shown, reason: "not a folder".into() });
+                continue;
+            }
+            let path = match fileops::confined_item(&loc.root, &loc.rel) {
+                Ok((p, m)) if m.is_dir() => p,
+                Ok(_) => {
+                    out.failed.push(dupes::Failure { path: shown, reason: "not a folder".into() });
+                    continue;
+                }
+                Err(e) => {
+                    out.failed.push(dupes::Failure { path: shown, reason: e });
+                    continue;
+                }
+            };
+            if let Err(e) = storage::verify_empty(&path) {
+                out.failed.push(dupes::Failure { path: shown, reason: format!("no longer empty: {e}") });
+                continue;
+            }
+            match fileops::move_to_trash(&state.policy(), &path) {
+                Ok(()) => {
+                    out.trashed.push(id.clone());
+                    removed.push(loc.rel.clone());
+                }
+                Err(e) => out.failed.push(dupes::Failure { path: shown, reason: e }),
+            }
+        }
+        if !removed.is_empty() {
+            apply_index_change(&app, |idx| idx.remove_paths(&removed));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "The operation failed.".to_string())?
 }
 
 // ------------------------------------------- screenshots and recordings
@@ -2426,6 +2502,9 @@ fn main() {
                 connected: Mutex::new(HashMap::new()),
                 capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
                 capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
+                health: Mutex::new(None),
+                health_running: AtomicBool::new(false),
+                health_job: Arc::new(jobs::Control::default()),
                 meta_scan: Mutex::new(None),
                 meta_running: AtomicBool::new(false),
                 meta_job: Arc::new(jobs::Control::default()),
@@ -2457,6 +2536,7 @@ fn main() {
             if cfg!(debug_assertions) {
                 debug_similar_autorun(app.handle());
                 metascan::debug_autorun(app.handle());
+                health::debug_autorun(app.handle());
                 debug_privacy(app.handle());
             }
             Ok(())
@@ -2511,6 +2591,14 @@ fn main() {
             open_drive_safely,
             set_drive_previews,
             set_capture_override,
+            storage_report,
+            empty_folders,
+            trash_empty_folders,
+            health::health_start,
+            health::health_pause,
+            health::health_cancel,
+            health::health_clear,
+            health::health_results,
             metascan::file_metadata,
             metascan::meta_start,
             metascan::meta_pause,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-health-clear"
+description = "Enables the health_clear command without any pre-configured scope."
+commands.allow = ["health_clear"]
+
+[[permission]]
+identifier = "deny-health-clear"
+description = "Denies the health_clear command without any pre-configured scope."
+commands.deny = ["health_clear"]
