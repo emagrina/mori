@@ -122,6 +122,19 @@ The worker still receives only bytes, never a path. The same resource limits (di
 - **Screenshot detection.** It uses file names plus, on macOS, one `getxattr(…, XATTR_NOFOLLOW)` size query per photo/video during the index scan. No content is read.
 - **Corrections.** They are stored like private folders (`capture-not.json`, `capture-yes.json`), keyed per volume.
 
+## Storage, empty folders and media health
+
+- **Storage** is pure arithmetic over the in-memory index. Private-folder contents are excluded.
+- **Empty folders.** The index hides dotfiles, so every candidate is re-walked on disk with `symlink_metadata` (no link is followed; any link makes the folder non-empty), within 32 levels and 10,000 entries.
+  - Only `.DS_Store`, `.localized`, `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `Icon\r` and small `._*` AppleDouble files count as clutter.
+  - The walk is repeated right before each move to the Trash, through `fileops::move_to_trash` and the mutation policy.
+- **Media Health.**
+  - Type and risk checks read only the head and tail.
+  - Images are decoded by the worker with the usual limits. A cached thumbnail for the same file version counts as decoded.
+  - Videos use the sandboxed container probe and the blocklist. Audio gets type checks only.
+  - Worker failures are reported precisely: unsupported, damaged data, safety limits, timeout or crash.
+  - Every check is isolated with `catch_unwind`, and decodes count toward Safe Inspection Mode's "Media decoded".
+
 ## Mutation policy
 
 - **One gate.** All changes to the user's files go through `fileops`, whose mutating functions (`move_to_trash`, `rename_no_replace`, and later operations) take a `&Policy` and call `policy.check` first.

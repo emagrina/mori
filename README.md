@@ -82,6 +82,29 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 ![Compare: slider](docs/images/phase4/compare-slider.jpg)
 ![Compare: difference](docs/images/phase4/compare-difference.jpg)
 
+### Analysis Center, storage and media health
+
+- **Analyze** (sidebar heading) opens the Analysis Center: every analysis in one place.
+  - Each runs only when started, keeps its results in memory, and changes nothing until you review and confirm.
+  - Long scans (Sensitive Metadata, Media Health) can be paused, resumed and cancelled.
+- **Storage** is computed instantly from Mori's index, so no file is read:
+  - totals by type and by year, and the largest files, videos, images and folders;
+  - a treemap of any folder (click to drill down).
+  - Private folders are shown as "not measured" and their contents aren't counted.
+- **Empty Folders** lists folders without files, topmost only.
+  - Each one is re-checked **on disk**, hidden items included, so a folder holding only `.git` isn't "empty". Only system clutter like `.DS_Store` is ignored.
+  - Nothing is removed automatically. After review, selected folders go to the **Trash** (re-checked again right before), never deleted permanently.
+- **Media Health** checks every photo, video and audio file on the drive. Each file gets at most one result:
+  - **Risk-flagged**: the content contradicts the name or extension;
+  - **Broken**: empty, truncated, damaged or unrecognisable;
+  - **Unsupported**: real media with no safe decoder or player in Mori (RAW/TIFF, AVI, unsupported codecs);
+  - **Decode failed**: the sandboxed decoder timed out, crashed or hit a safety limit.
+  - Files open isolated from the results.
+
+![Analysis Center](docs/images/phase5/analysis-center.jpg)
+![Storage](docs/images/phase5/storage.jpg)
+![Media Health](docs/images/phase5/media-health.jpg)
+
 ### Private folders
 
 Right-click a folder and choose **Make Private** to create a visibility boundary inside Mori. The folder stays where it is and opens normally, but its contents are no longer surfaced from outside it:
