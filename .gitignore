@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+src-tauri/target-*/
+src-tauri/gen/schemas/
+*.dmg
+*.app/
+
+# Local caches / generated data (Mori writes these outside the repo, but never commit copies)
+.cache/
+*.mori-cache/
+thumbs/
+thumbnails/
+index-v2/
+blocked-media.json
+last-panic.txt
+*.sqlite
+*.sqlite3
+*.db
+duplicates*.json
+
+# Test media: generate it locally, never commit personal or sample media
+test-media/
+fixtures/media/
+*.sparseimage
+*.dmg.sparse*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs and debug output
+*.log
+npm-debug.log*
+*.ips
+*.profraw
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
