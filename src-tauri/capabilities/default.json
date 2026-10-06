@@ -51,6 +51,10 @@
     "allow-set-folder-private",
     "allow-file-report",
     "allow-set-read-only",
-    "allow-set-folder-protected"
+    "allow-set-folder-protected",
+    "allow-pdf-info",
+    "allow-archive-listing",
+    "allow-open-drive-safely",
+    "allow-set-drive-previews"
   ]
 }

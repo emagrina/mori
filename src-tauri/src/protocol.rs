@@ -37,10 +37,19 @@ pub fn handle(app: &AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
         .filter(|o| ALLOWED_ORIGINS.contains(o) || (cfg!(debug_assertions) && *o == "http://127.0.0.1:1420"))
         .map(str::to_owned);
 
-    let mut resp = match route.split_once('/') {
-        Some(("thumb", id)) => thumbnail(&state, id),
-        Some(("preview", id)) => preview(&state, id),
-        Some(("media", id)) => media(&state, id, req.headers().get(header::RANGE).and_then(|v| v.to_str().ok())),
+    // "iso-…" routes serve the isolated view: an explicit, per-file request
+    // that is allowed even in Safe Inspection Mode. Everything else respects it.
+    let (kind, rest) = route.split_once('/').unwrap_or((route, ""));
+    let (kind, explicit) = match kind.strip_prefix("iso-") {
+        Some(k) => (k, true),
+        None => (kind, false),
+    };
+    let mut resp = match kind {
+        "thumb" => thumbnail(&state, rest, explicit),
+        "preview" => preview(&state, rest, explicit),
+        "media" => media(&state, rest, req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()), explicit),
+        "frame" => frame(&state, rest, explicit),
+        "pdf" => pdf_page(&state, rest, explicit),
         _ => status(StatusCode::NOT_FOUND),
     };
     let h = resp.headers_mut();
@@ -94,8 +103,23 @@ fn volatile(state: &AppState, canon: &std::path::Path) -> bool {
     state.root_canon().is_none_or(|root| !canon.starts_with(root))
 }
 
-fn thumbnail(state: &AppState, id: &str) -> Response<Vec<u8>> {
+/// Safe Inspection Mode: no automatic decoding of files under the browsed
+/// root until the user allows previews for the drive.
+fn gated(state: &AppState, canon: &std::path::Path, explicit: bool) -> bool {
+    !explicit
+        && state.safe_mode.load(std::sync::atomic::Ordering::SeqCst)
+        && state.root_canon().is_some_and(|r| canon.starts_with(r))
+}
+
+fn decoded(state: &AppState) {
+    state.decoded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn thumbnail(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
     let Some((mut file, meta, canon, ext)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
+    if gated(state, &canon, explicit) {
+        return status(StatusCode::FORBIDDEN);
+    }
     let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, THUMB_SIZE);
     let mem = volatile(state, &canon);
     if mem {
@@ -129,6 +153,7 @@ fn thumbnail(state: &AppState, id: &str) -> Response<Vec<u8>> {
     };
     match worker::run(Op::Thumb, THUMB_SIZE, input, THUMB_TIMEOUT) {
         Ok(out) => {
+            decoded(state);
             if mem {
                 state.volatile_thumbs.put(&stem, Some((out.bytes.clone(), out.format.mime())));
             } else {
@@ -143,8 +168,11 @@ fn thumbnail(state: &AppState, id: &str) -> Response<Vec<u8>> {
     }
 }
 
-fn preview(state: &AppState, id: &str) -> Response<Vec<u8>> {
+fn preview(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
     let Some((mut file, meta, canon, ext)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
+    if gated(state, &canon, explicit) {
+        return status(StatusCode::FORBIDDEN);
+    }
     let key = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, PREVIEW_SIZE).to_string_lossy().into_owned();
     if let Some(hit) = state.previews.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
         return hit;
@@ -158,6 +186,7 @@ fn preview(state: &AppState, id: &str) -> Response<Vec<u8>> {
     let mut cache = state.previews.lock().unwrap_or_else(PoisonError::into_inner);
     match result {
         Ok(out) => {
+            decoded(state);
             cache.put(id, key.clone(), out);
             cache.get(&key).unwrap()
         }
@@ -172,8 +201,11 @@ fn preview(state: &AppState, id: &str) -> Response<Vec<u8>> {
     }
 }
 
-fn media(state: &AppState, id: &str, range: Option<&str>) -> Response<Vec<u8>> {
+fn media(state: &AppState, id: &str, range: Option<&str>, explicit: bool) -> Response<Vec<u8>> {
     let Some((mut file, meta, canon, ext)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
+    if gated(state, &canon, explicit) {
+        return status(StatusCode::FORBIDDEN);
+    }
     // Only containers verified by magic bytes, whose codec passed the sandboxed
     // probe, are ever handed to the system player.
     let detected = sniff_file(&mut file, &ext);
@@ -247,19 +279,38 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Turn a webview-captured PNG frame into a cached video thumbnail, via the worker.
-pub fn store_frame(state: &AppState, id: &str, png: Vec<u8>) -> bool {
+/// Size of the sampled video frames (filmstrip, hover scrub, isolated view).
+pub const FRAME_SIZE: u32 = 480;
+/// Cache tag for frame `k` (kept apart from thumbnail sizes).
+fn frame_tag(k: u32) -> u32 {
+    100_000 + k
+}
+
+/// Store a frame captured by the webview: the thumbnail (`frame` = None) or
+/// sampled frame `k`, always re-encoded by the sandboxed worker first.
+pub fn store_frame(state: &AppState, id: &str, png: Vec<u8>, frame: Option<u32>, explicit: bool) -> bool {
     let Some((mut file, meta, canon, ext)) = open(state, id) else { return false };
+    if gated(state, &canon, explicit) || frame.is_some_and(|k| k >= 64) {
+        return false;
+    }
     let detected = sniff_file(&mut file, &ext);
     if !detected.is_video() || !state.video_playable(&canon, &meta, detected) {
         return false;
     }
-    let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, THUMB_SIZE);
+    let (size, tag) = match frame {
+        Some(k) => (FRAME_SIZE, frame_tag(k)),
+        None => (THUMB_SIZE, THUMB_SIZE),
+    };
+    let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, tag);
     let mem = volatile(state, &canon);
     let result = if png.is_empty() || png.len() > 16 * 1024 * 1024 {
         None
     } else {
-        worker::run(Op::Frame, THUMB_SIZE, png, THUMB_TIMEOUT).ok()
+        worker::run(Op::Frame, size, png, THUMB_TIMEOUT).ok()
     };
+    if result.is_some() {
+        decoded(state);
+    }
     match (result, mem) {
         (Some(out), true) => state.volatile_thumbs.put(&stem, Some((out.bytes, out.format.mime()))),
         (Some(out), false) => crate::thumbs::store(&stem, &out),
@@ -267,6 +318,69 @@ pub fn store_frame(state: &AppState, id: &str, png: Vec<u8>) -> bool {
         (None, false) => crate::thumbs::mark_miss(&stem),
     }
     state.volatile_thumbs.get(&stem).is_some_and(|v| v.is_some()) || (!mem && crate::thumbs::cached(&stem).is_some())
+}
+
+/// A stored video frame: `frame/<id>/<k>`.
+fn frame(state: &AppState, rest: &str, explicit: bool) -> Response<Vec<u8>> {
+    let Some((id, k)) = rest.split_once('/') else { return status(StatusCode::NOT_FOUND) };
+    let Some(k) = k.parse::<u32>().ok().filter(|k| *k < 64) else { return status(StatusCode::NOT_FOUND) };
+    let Some((_, meta, canon, _)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
+    if gated(state, &canon, explicit) {
+        return status(StatusCode::FORBIDDEN);
+    }
+    let stem = crate::thumbs::stem(&state.thumb_dir, &canon, &meta, frame_tag(k));
+    if volatile(state, &canon) {
+        return match state.volatile_thumbs.get(&stem) {
+            Some(Some((bytes, mime))) => ok(bytes, mime, true),
+            _ => status(StatusCode::NOT_FOUND),
+        };
+    }
+    match crate::thumbs::cached(&stem) {
+        Some((bytes, mime)) => ok(bytes, mime, true),
+        None => status(StatusCode::NOT_FOUND),
+    }
+}
+
+/// A PDF page rasterized by the sandboxed worker: `pdf/<id>/<page>/<size>`.
+/// Pages are kept in the in-memory preview cache only.
+fn pdf_page(state: &AppState, rest: &str, explicit: bool) -> Response<Vec<u8>> {
+    let mut parts = rest.split('/');
+    let (Some(id), Some(page), Some(size)) = (parts.next(), parts.next(), parts.next()) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let (Some(page), Some(size)) = (page.parse::<u32>().ok().filter(|p| *p >= 1), size.parse::<u32>().ok()) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let size = size.clamp(64, 2400);
+    let Some((mut file, meta, canon, ext)) = open(state, id) else { return status(StatusCode::NOT_FOUND) };
+    if gated(state, &canon, explicit) {
+        return status(StatusCode::FORBIDDEN);
+    }
+    let key = format!("{}#p{page}", crate::thumbs::stem(&state.thumb_dir, &canon, &meta, size).to_string_lossy());
+    if let Some(hit) = state.previews.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return hit;
+    }
+    if sniff_file(&mut file, &ext) != Detected::Pdf {
+        return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let result =
+        secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| WorkerError::Failed).and_then(|pdf| {
+            let mut input = page.to_le_bytes().to_vec();
+            input.extend(pdf);
+            worker::run(Op::PdfPage, size, input, PREVIEW_TIMEOUT)
+        });
+    let mut cache = state.previews.lock().unwrap_or_else(PoisonError::into_inner);
+    match result {
+        Ok(out) => {
+            decoded(state);
+            cache.put(&format!("{id}#p{page}"), key.clone(), out);
+            cache.get(&key).unwrap()
+        }
+        Err(_) => {
+            cache.fail(key);
+            status(StatusCode::UNPROCESSABLE_ENTITY)
+        }
+    }
 }
 
 // --------------------------------------------------------- preview cache
@@ -281,7 +395,7 @@ pub struct PreviewCache {
 }
 
 impl PreviewCache {
-    const CAPACITY: usize = 10;
+    const CAPACITY: usize = 40;
 
     fn get(&mut self, key: &str) -> Option<Response<Vec<u8>>> {
         if self.failed.contains(key) {

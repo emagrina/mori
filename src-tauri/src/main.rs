@@ -1,6 +1,8 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod archive;
+mod drives;
 mod dupes;
 mod fileops;
 mod filetype;
@@ -8,6 +10,8 @@ mod filetype;
 mod heif;
 mod index;
 mod inspect;
+#[cfg(target_os = "macos")]
+mod pdf;
 mod policy;
 mod privacy;
 mod probe;
@@ -78,6 +82,14 @@ pub struct AppState {
     protected: privacy::Store,
     /// Read-only Mode: every filesystem mutation is refused (policy.rs).
     read_only: AtomicBool,
+    /// Drives Mori knows about (Safe Inspection Mode settings).
+    drives: drives::Store,
+    /// The browsed root is in Safe Inspection Mode: no automatic decoding.
+    pub safe_mode: AtomicBool,
+    /// Media decoded since the current root was opened.
+    pub decoded: AtomicU64,
+    /// Drives connected while Mori runs, announced to the UI: key → (mount, label).
+    connected: Mutex<HashMap<String, (PathBuf, String)>>,
 }
 
 type SimilarReply = (u64, std::sync::mpsc::Sender<Result<similar::Capture, similar::CaptureError>>);
@@ -364,6 +376,10 @@ struct Status {
     scan_count: usize,
     file_count: usize,
     scanned_at: i64,
+    /// Safe Inspection Mode for this drive (no automatic decoding).
+    safe_mode: bool,
+    /// Media decoded since this root was opened.
+    decoded: u64,
 }
 
 fn status(state: &AppState) -> Status {
@@ -376,6 +392,8 @@ fn status(state: &AppState) -> Status {
         scan_count: state.scan_count.load(Ordering::SeqCst),
         file_count: idx.files.len(),
         scanned_at: idx.scanned_at,
+        safe_mode: state.safe_mode.load(Ordering::SeqCst),
+        decoded: state.decoded.load(Ordering::Relaxed),
     }
 }
 
@@ -464,6 +482,8 @@ fn open_root(app: &AppHandle, root: &Path) -> Result<(), String> {
     let name =
         canon.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| secure::plain_path(&canon));
     *state.root.write().unwrap_or_else(PoisonError::into_inner) = Some(RootInfo { canon: canon.clone(), name });
+    state.safe_mode.store(state.drives.safe_for(&canon), Ordering::SeqCst);
+    state.decoded.store(0, Ordering::SeqCst);
     state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
     let cached = index::load(&state.index_file(&canon), &canon).unwrap_or_default();
     publish_index(app, cached);
@@ -660,6 +680,8 @@ struct Inspection {
     mismatch: bool,
     /// Container/codec details for videos.
     video: Option<video::VideoInfo>,
+    /// Automatic previews are off (Safe Inspection Mode).
+    previews_off: bool,
 }
 
 /// Decide how (and whether) a file may be previewed, from its magic bytes.
@@ -674,18 +696,25 @@ async fn inspect(state: State<'_, AppState>, id: String) -> Result<Inspection, S
         Some(expected) => !expected.contains(&detected),
         None => detected.is_image() || detected.is_video() || detected == Detected::Executable,
     };
+    let ft = filetype::detect(&head, meta.len());
     let preview = if detected.is_image() {
         "image"
     } else if video.as_ref().is_some_and(|v| v.status == video::VideoStatus::Playable) {
         "video"
     } else if detected == Detected::Text {
         "text"
+    } else if detected == Detected::Pdf && cfg!(target_os = "macos") {
+        "pdf"
+    } else if matches!(ft.id, "zip" | "tar" | "gzip" | "jar" | "ooxml" | "odf" | "epub") {
+        "archive"
     } else {
         "none"
     };
+    let previews_off =
+        state.safe_mode.load(Ordering::SeqCst) && state.root_canon().is_some_and(|r| canon.starts_with(r));
     // A file whose content contradicts its name is suspicious: never hand it to another app.
     let can_open = !mismatch && secure::may_open_externally(&ext, detected);
-    Ok(Inspection { detected, preview, can_open, mismatch, video })
+    Ok(Inspection { detected, preview, can_open, mismatch, video, previews_off })
 }
 
 /// Begin the (single) active media session for a video about to be loaded by
@@ -768,12 +797,16 @@ async fn store_frame(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result
     let Some(id) = request.headers().get("mori-id").and_then(|v| v.to_str().ok()).map(str::to_owned) else {
         return Ok(false);
     };
+    let frame = request.headers().get("mori-frame").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u32>().ok());
+    let explicit = request.headers().get("mori-explicit").is_some();
     let tauri::ipc::InvokeBody::Raw(body) = request.body() else { return Ok(false) };
     let body = body.clone();
     // The worker can take seconds; never block the async runtime or the UI thread.
-    tauri::async_runtime::spawn_blocking(move || protocol::store_frame(&app.state::<AppState>(), &id, body))
-        .await
-        .map_err(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        protocol::store_frame(&app.state::<AppState>(), &id, body, frame, explicit)
+    })
+    .await
+    .map_err(|_| ())
 }
 
 // ------------------------------------------------------- file management
@@ -1002,6 +1035,157 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
     })
     .await
     .map_err(|_| "The report failed.".to_string())?
+}
+
+// ------------------------------------------------- PDFs and archives
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PdfInfo {
+    pages: u32,
+    encrypted: bool,
+    locked: bool,
+    title: Option<String>,
+    author: Option<String>,
+    creator: Option<String>,
+    producer: Option<String>,
+    subject: Option<String>,
+    /// Present in the document (never run by Mori).
+    javascript: bool,
+    open_action: bool,
+    embedded_files: bool,
+    forms: bool,
+}
+
+/// Facts about a PDF, read by the sandboxed worker (macOS CoreGraphics).
+#[tauri::command]
+async fn pdf_info(app: AppHandle, id: String, explicit: bool) -> Result<PdfInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (mut file, meta, canon, ext) = state.open_by_id(&id)?;
+        if !explicit
+            && state.safe_mode.load(Ordering::SeqCst)
+            && state.root_canon().is_some_and(|r| canon.starts_with(r))
+        {
+            return Err("Previews are off for this drive (Safe Inspection Mode).".to_string());
+        }
+        let head = secure::read_head(&mut file, secure::SNIFF_LEN);
+        if secure::sniff(&head, &ext) != Detected::Pdf {
+            return Err("Not a PDF".into());
+        }
+        let _ = std::io::Seek::rewind(&mut file);
+        let bytes =
+            secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| "This PDF is too large to inspect.")?;
+        let out = worker::run(worker::Op::PdfInfo, 64, bytes, Duration::from_secs(15))
+            .map_err(|_| "This PDF could not be read safely.")?;
+        let text = String::from_utf8_lossy(&out.bytes);
+        let mut info = PdfInfo::default();
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = secure::display_safe(v);
+            match k {
+                "pages" => info.pages = v.parse().unwrap_or(0),
+                "encrypted" => info.encrypted = v == "true",
+                "locked" => info.locked = v == "true",
+                "title" => info.title = Some(v),
+                "author" => info.author = Some(v),
+                "creator" => info.creator = Some(v),
+                "producer" => info.producer = Some(v),
+                "subject" => info.subject = Some(v),
+                "javascript" => info.javascript = v == "true",
+                "openaction" => info.open_action = v == "true",
+                "embedded" => info.embedded_files = v == "true",
+                "forms" => info.forms = v == "true",
+                _ => {}
+            }
+        }
+        Ok(info)
+    })
+    .await
+    .map_err(|_| "The PDF could not be read.".to_string())?
+}
+
+/// List an archive's contents without extracting anything (archive.rs).
+#[tauri::command]
+async fn archive_listing(app: AppHandle, id: String) -> Result<archive::Listing, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (mut file, meta, _, _) = state.open_by_id(&id)?;
+        let head = secure::read_head(&mut file, filetype::HEAD_LEN);
+        let kind = filetype::detect(&head, meta.len()).id;
+        catch_unwind(AssertUnwindSafe(|| archive::inspect(&mut file, meta.len(), kind)))
+            .unwrap_or_else(|_| Err("The archive could not be read safely.".into()))
+    })
+    .await
+    .map_err(|_| "The archive could not be read.".to_string())?
+}
+
+// ------------------------------------------------- safe inspection mode
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ConnectedDrive {
+    key: String,
+    label: String,
+    path: String,
+}
+
+/// Watch for volumes mounted while Mori runs. Drives present at launch and
+/// drives Mori already knows are never announced.
+fn watch_drives(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut seen: HashSet<PathBuf> = drives::mounted().into_iter().collect();
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+            let now: HashSet<PathBuf> = drives::mounted().into_iter().collect();
+            let state = app.state::<AppState>();
+            for path in now.difference(&seen) {
+                let vol = privacy::volume_of(path);
+                let key = drives::key_of(&vol);
+                if state.drives.get(&key).is_some() || state.root_canon().is_some_and(|r| r.starts_with(path)) {
+                    continue;
+                }
+                let label = path.file_name().map(|n| secure::display_safe(&n.to_string_lossy())).unwrap_or_default();
+                state
+                    .connected
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key.clone(), (path.clone(), label.clone()));
+                let _ = app.emit("drive-connected", ConnectedDrive { key, label, path: secure::plain_path(path) });
+            }
+            seen = now;
+        }
+    });
+}
+
+/// Open a newly connected drive in Safe Inspection Mode: metadata only,
+/// no automatic previews until the user allows them.
+#[tauri::command]
+fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) -> Result<Status, String> {
+    let (path, label) = state
+        .connected
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+        .ok_or("That drive is no longer connected.")?;
+    state.drives.set(&key, &label, false);
+    open_root(&app, &path)?;
+    write_settings(&state, |s| s.root = Some(path.to_string_lossy().into_owned()))?;
+    Ok(status(&state))
+}
+
+/// Allow (or stop) automatic previews for the current drive.
+#[tauri::command]
+fn set_drive_previews(app: AppHandle, state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let vol = privacy::volume_of(&root);
+    let label = vol.mount.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    state.drives.set(&drives::key_of(&vol), &label, on);
+    state.safe_mode.store(!on, Ordering::SeqCst);
+    emit_status(&app);
+    let _ = app.emit("index-changed", ());
+    Ok(())
 }
 
 // ---------------------------------------------------------- read-only mode
@@ -2158,6 +2342,10 @@ fn main() {
                 similar_token: AtomicU64::new(0),
                 privacy: privacy::Store::load(data_dir_for_video.join("private-folders.json")),
                 protected: privacy::Store::load(data_dir_for_video.join("protected-folders.json")),
+                drives: drives::Store::load(data_dir_for_video.join("drives.json")),
+                safe_mode: AtomicBool::new(false),
+                decoded: AtomicU64::new(0),
+                connected: Mutex::new(HashMap::new()),
                 read_only: AtomicBool::new(
                     fs::read(data_dir_for_video.join("settings.json"))
                         .ok()
@@ -2167,6 +2355,7 @@ fn main() {
                 ),
             });
             spawn_media_watchdog(app.handle().clone());
+            watch_drives(app.handle().clone());
             // Debug builds only: MORI_DEBUG_FREEZE_AT=<secs> wedges the page's JS
             // for 60 s at that time, to test hang detection and recovery.
             if cfg!(debug_assertions) {
@@ -2232,7 +2421,11 @@ fn main() {
             set_folder_private,
             file_report,
             set_read_only,
-            set_folder_protected
+            set_folder_protected,
+            pdf_info,
+            archive_listing,
+            open_drive_safely,
+            set_drive_previews
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mori");
