@@ -644,39 +644,46 @@ fn video_item(root: &Path, i: usize, f: &FileRec, env: &mut Env, cached: &mut u6
 
 // ------------------------------------------------------------- candidates
 
-/// Bit ranges of the 7 bands used for multi-index hashing.
-const BANDS: [(u32, u32); 7] = [(0, 10), (10, 9), (19, 9), (28, 9), (37, 9), (46, 9), (55, 9)];
-
-fn band(h: u64, (start, len): (u32, u32)) -> u32 {
-    ((h >> start) & ((1u64 << len) - 1)) as u32
-}
-
-/// All photo pairs whose hashes (any variant combination) are within 13
-/// bits: by pigeonhole, such a pair agrees on at least one band to within one
-/// bit, so probing each band's exact value and its single-bit neighbours
-/// finds it. Cost grows with bucket sizes, not with n².
-fn photo_candidates(photos: &[Photo], comparisons: &AtomicU64) -> Vec<(usize, usize)> {
-    let mut table: HashMap<(u8, u32), Vec<u32>> = HashMap::new();
+/// Multi-index hashing: the 64-bit hash is split into 4 bands of 16 bits
+/// (≈ log2 of a large collection, so buckets stay small). If two hashes are
+/// within `r` bits, at least one band differs by at most ⌊r/4⌋ bits
+/// (pigeonhole), so probing every band value within that radius finds every
+/// such pair. Distances are checked while probing and only pairs within `r`
+/// (for any variant combination) are kept: no all-pairs scan, no pair list
+/// proportional to n².
+fn photo_candidates(photos: &[Photo], r: u32, comparisons: &AtomicU64) -> Vec<(usize, usize)> {
+    const BANDS: usize = 4;
+    let band = |h: u64, b: usize| ((h >> (16 * b)) & 0xFFFF) as usize;
+    // Every 16-bit flip mask with at most r/4 bits set.
+    let radius = (r as usize / BANDS).min(4);
+    let masks: Vec<usize> = (0..1usize << 16).filter(|m| m.count_ones() as usize <= radius).collect();
+    let mut table: Vec<Vec<Vec<u32>>> = (0..BANDS).map(|_| vec![Vec::new(); 1 << 16]).collect();
     for (pi, p) in photos.iter().enumerate() {
         for h in p.hashes.iter().flatten() {
-            for (b, &range) in BANDS.iter().enumerate() {
-                table.entry((b as u8, band(*h, range))).or_default().push(pi as u32);
+            for (b, t) in table.iter_mut().enumerate() {
+                let slot = &mut t[band(*h, b)];
+                if slot.last() != Some(&(pi as u32)) {
+                    slot.push(pi as u32);
+                }
             }
         }
     }
+    let close = |a: &Photo, b: &Photo| {
+        a.hashes.iter().flatten().any(|ha| b.hashes.iter().flatten().any(|hb| (ha ^ hb).count_ones() <= r))
+    };
     let mut out = Vec::new();
     let mut seen: HashSet<u32> = HashSet::new();
+    let mut checked = 0u64;
     for (pi, p) in photos.iter().enumerate() {
         seen.clear();
         for h in p.hashes.iter().flatten() {
-            for (b, &range) in BANDS.iter().enumerate() {
-                let v = band(*h, range);
-                for flip in std::iter::once(None).chain((0..range.1).map(Some)) {
-                    let key = (b as u8, flip.map_or(v, |k| v ^ (1 << k)));
-                    if let Some(list) = table.get(&key) {
-                        for &q in list {
-                            if q as usize > pi && seen.insert(q) {
-                                comparisons.fetch_add(1, Ordering::Relaxed);
+            for (b, t) in table.iter().enumerate() {
+                let v = band(*h, b);
+                for &m in &masks {
+                    for &q in &t[v ^ m] {
+                        if q as usize > pi && seen.insert(q) {
+                            checked += 1;
+                            if close(p, &photos[q as usize]) {
                                 out.push((pi, q as usize));
                             }
                         }
@@ -685,6 +692,7 @@ fn photo_candidates(photos: &[Photo], comparisons: &AtomicU64) -> Vec<(usize, us
             }
         }
     }
+    comparisons.fetch_add(checked, Ordering::Relaxed);
     out
 }
 
@@ -1082,7 +1090,7 @@ pub fn analyze(
 
     // 3–4. Candidates, then verification.
     let comparisons = AtomicU64::new(0);
-    let pc = photo_candidates(&photos, &comparisons);
+    let pc = photo_candidates(&photos, t.hash, &comparisons);
     let vc = video_candidates(&videos, &comparisons);
     stats.hash_comparisons = comparisons.load(Ordering::Relaxed);
     let total = (pc.len() + vc.len()) as u64;
@@ -1476,7 +1484,7 @@ mod tests {
             }
         }
         let cmp = AtomicU64::new(0);
-        let found: HashSet<(usize, usize)> = photo_candidates(&photos, &cmp).into_iter().collect();
+        let found: HashSet<(usize, usize)> = photo_candidates(&photos, 13, &cmp).into_iter().collect();
         for e in &expected {
             assert!(found.contains(e), "missed pair {e:?}");
         }
@@ -1783,6 +1791,186 @@ mod lab {
                 check("must").len(),
                 missed.iter().map(|m| &m.2).collect::<Vec<_>>(),
                 wrong
+            );
+        }
+        let _ = fs::remove_dir_all(cache);
+    }
+
+    fn peak_rss_mb() -> f64 {
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
+        // macOS reports bytes, Linux kilobytes.
+        u.ru_maxrss as f64 / if cfg!(target_os = "macos") { 1024.0 * 1024.0 } else { 1024.0 }
+    }
+
+    /// Scale: 50,000 synthetic photo fingerprints (5 % near-duplicates),
+    /// stored as cache files like in the app; candidate generation and
+    /// verification only. `cargo test --release -- --ignored --nocapture bench_scale`
+    #[test]
+    #[ignore]
+    fn bench_scale() {
+        let n: usize = std::env::var("MORI_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+        let dir = std::env::temp_dir().join(format!("mori-bench-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let t0 = Instant::now();
+        let mut photos = Vec::with_capacity(n);
+        let mut last: Vec<u8> = Vec::new();
+        for i in 0..n {
+            let plane: Vec<u8> = if i % 20 == 19 {
+                // Near-duplicate of the previous photo: noise + brightness.
+                last.iter().map(|&v| (v as f32 * 0.92 + 12.0 + (rnd() - 0.5) * 10.0).clamp(0.0, 255.0) as u8).collect()
+            } else {
+                let waves: Vec<(f32, f32, f32, f32)> =
+                    (0..6).map(|_| (rnd() * 0.4, rnd() * 0.4, rnd() * 6.3, rnd())).collect();
+                (0..PLANE)
+                    .map(|k| {
+                        let (x, y) = ((k % SIDE) as f32, (k / SIDE) as f32);
+                        let v: f32 = waves.iter().map(|(fx, fy, ph, a)| a * (fx * x + fy * y + ph).cos()).sum();
+                        (128.0 + v * 40.0).clamp(0.0, 255.0) as u8
+                    })
+                    .collect()
+            };
+            let mut planes = plane.clone();
+            planes.extend_from_slice(&plane);
+            let path = dir.join(format!("{i}.sim"));
+            assert!(cache_write(&path, &Record::Photo { width: 4000, height: 3000, exif: false, planes }));
+            let h = phash(&plane);
+            photos.push(Photo {
+                file: i,
+                width: 4000,
+                height: 3000,
+                exif: false,
+                hashes: [Some(h), None],
+                planes: Planes::Cache(path),
+            });
+            last = plane;
+        }
+        let prep = t0.elapsed();
+        let sens = match std::env::var("MORI_BENCH_SENS").as_deref() {
+            Ok("strict") => Sensitivity::Strict,
+            Ok("broad") => Sensitivity::Broad,
+            _ => Sensitivity::Balanced,
+        };
+        let t = sens.thresholds();
+        println!("BENCH sensitivity {sens:?}");
+        let cmp = AtomicU64::new(0);
+        let t1 = Instant::now();
+        let pairs = photo_candidates(&photos, t.hash, &cmp);
+        let cand = t1.elapsed();
+        let t2 = Instant::now();
+        let matched = pairs.iter().filter(|(a, b)| match_photos(&photos[*a], &photos[*b], &t).is_some()).count();
+        let verify = t2.elapsed();
+        let all_pairs = (n as u64) * (n as u64 - 1) / 2;
+        println!(
+            "BENCH scale n={n}: fingerprints prepared in {prep:.1?}; hash comparisons {} ({:.4} % of {all_pairs} possible pairs) in {cand:.1?}; candidates within threshold {}; verified in {verify:.1?}; matches {matched} (expected ≈ {}); peak RSS {:.0} MB",
+            cmp.load(Ordering::Relaxed),
+            100.0 * cmp.load(Ordering::Relaxed) as f64 / all_pairs as f64,
+            pairs.len(),
+            n / 20,
+            peak_rss_mb()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// End to end on a real folder through the real sandboxed worker binary
+    /// (videos via ffmpeg instead of the webview). Cold, then cached.
+    /// `MORI_BENCH_DIR=… MORI_WORKER_BIN=target/release/mori cargo test --release -- --ignored --nocapture bench_folder`
+    #[test]
+    #[ignore]
+    fn bench_folder() {
+        let (Some(dir), Some(bin)) = (std::env::var_os("MORI_BENCH_DIR"), std::env::var_os("MORI_WORKER_BIN")) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let bin = PathBuf::from(bin);
+        let decode = |bytes: Vec<u8>| -> Option<(u32, u32, Vec<u8>)> {
+            use std::io::{Read, Write};
+            let heif = crate::heif_flag(&bytes);
+            let mut cmd = Command::new(&bin);
+            cmd.args(["--mori-worker", "fingerprint", "64"]);
+            if heif {
+                cmd.arg("heif");
+            }
+            let mut child = cmd
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            let mut stdin = child.stdin.take()?;
+            let w = std::thread::spawn(move || stdin.write_all(&bytes));
+            let mut out = Vec::new();
+            child.stdout.take()?.read_to_end(&mut out).ok()?;
+            let _ = w.join();
+            child.wait().ok()?.success().then_some(())?;
+            (out.len() == 16 + crate::worker::FP_LEN && &out[..4] == b"MORI").then(|| {
+                (
+                    u32::from_le_bytes(out[4..8].try_into().unwrap()),
+                    u32::from_le_bytes(out[8..12].try_into().unwrap()),
+                    out[16..].to_vec(),
+                )
+            })
+        };
+        let cache = std::env::temp_dir().join(format!("mori-bench-cache-{}", std::process::id()));
+        for pass in ["cold", "cached"] {
+            let lab_c = dir.clone();
+            let mut capture = move |_: usize, f: &FileRec, times: &[f64]| {
+                ffmpeg_capture(&lab_c.join(&f.rel), times).ok_or(CaptureError::Failed)
+            };
+            let mut registered = |_: &[Root], _: &[FileRec]| {};
+            let dismissed = HashSet::new();
+            let mut env = Env {
+                cache_dir: Some(cache.clone()),
+                decode: &decode,
+                capture: &mut capture,
+                registered: &mut registered,
+                dismissed: &dismissed,
+            };
+            let spec = Spec {
+                roots: vec![Root { canon: fs::canonicalize(&dir).unwrap(), label: "Bench".into() }],
+                photos: true,
+                videos: true,
+                recursive: true,
+                sensitivity: Sensitivity::Balanced,
+            };
+            let t0 = Instant::now();
+            let r = analyze(spec, &mut env, &AtomicBool::new(false), &mut |_| {}).unwrap();
+            let s = &r.stats;
+            let n = s.photos + s.videos;
+            if pass == "cold" {
+                for (g, m) in r.analysis.groups.iter().zip(&r.meta) {
+                    let names: Vec<String> = g
+                        .members
+                        .iter()
+                        .zip(&m.members)
+                        .map(|(x, mm)| format!("{} {}%", r.analysis.files[x.files[0]].rel, mm.similarity))
+                        .collect();
+                    if !names.iter().any(|n| n.starts_with("Shared/")) || names.len() > 2 {
+                        println!("BENCH extra group: {}", names.join(" | "));
+                    }
+                }
+            }
+            println!(
+                "BENCH folder ({pass}): {} photos, {} videos in {:.1?}; hash comparisons {} ({:.3} % of all pairs); verified {}; matches {}; groups {} ({} photo, {} video); unanalyzable {}; peak RSS {:.0} MB",
+                s.photos,
+                s.videos,
+                t0.elapsed(),
+                s.hash_comparisons,
+                100.0 * s.hash_comparisons as f64 / (n * n.saturating_sub(1) / 2).max(1) as f64,
+                s.verified,
+                s.matches,
+                r.analysis.groups.len(),
+                r.meta.iter().filter(|m| !m.video).count(),
+                r.meta.iter().filter(|m| m.video).count(),
+                s.unanalyzable,
+                peak_rss_mb()
             );
         }
         let _ = fs::remove_dir_all(cache);

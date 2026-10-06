@@ -1228,6 +1228,16 @@ fn analysis_cleanup_cancel(state: State<'_, AppState>) {
 
 // ----------------------------------------------------------- similar media
 
+/// Whether the worker needs its HEIF profile for these bytes (tests use it
+/// to drive the real worker binary).
+#[cfg(test)]
+fn heif_flag(bytes: &[u8]) -> bool {
+    #[cfg(target_os = "macos")]
+    return heif::is_heif(bytes);
+    #[cfg(not(target_os = "macos"))]
+    return false;
+}
+
 fn similar_id(root: &Path, rel: &str) -> String {
     format!("y{:016x}", thumbs::fnv(format!("{}\u{0}{rel}", root.to_string_lossy()).as_bytes()))
 }
