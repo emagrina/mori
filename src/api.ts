@@ -279,6 +279,66 @@ export const CATEGORY_LABEL: Record<MetaCategory, string> = {
   identifier: "Unique IDs",
 };
 
+export interface StorageBucket {
+  key: string;
+  bytes: number;
+  count: number;
+}
+
+export interface StorageTile {
+  kind: "folder" | "file" | "files" | "private";
+  id: string;
+  name: string;
+  bytes: number;
+  files: number;
+}
+
+export interface StorageReport {
+  totalBytes: number;
+  totalFiles: number;
+  byKind: StorageBucket[];
+  byYear: StorageBucket[];
+  largestFiles: Entry[];
+  largestVideos: Entry[];
+  largestImages: Entry[];
+  largestFolders: { id: string; name: string; path: string; bytes: number; files: number }[];
+  folder: string;
+  folderBytes: number;
+  tiles: StorageTile[];
+  privateFolders: number;
+}
+
+export interface EmptyFolder {
+  id: string;
+  name: string;
+  path: string;
+  nested: number;
+  protected: boolean;
+  /** What the on-disk check found ("" = empty). */
+  note: string;
+}
+
+export type HealthCategory = "risk" | "broken" | "unsupported" | "failed";
+
+export interface HealthItem extends Entry {
+  category: HealthCategory;
+  reason: string;
+}
+
+export interface HealthView {
+  checked: number;
+  counts: Partial<Record<HealthCategory, number>>;
+  total: number;
+  items: HealthItem[];
+}
+
+export interface HealthProgress {
+  done: number;
+  total: number;
+  found: number;
+  paused: boolean;
+}
+
 export interface ConnectedDrive {
   key: string;
   label: string;
@@ -522,6 +582,17 @@ export const api = {
   openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
   /** "Generate previews" for the current drive (or back to metadata only). */
   setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** From the index: nothing is read from disk. `folder` = folder id ("" = drive). */
+  storageReport: (folder: string) => invoke<StorageReport>("storage_report", { folder }),
+  /** Index candidates, each re-checked on disk. */
+  emptyFolders: () => invoke<EmptyFolder[]>("empty_folders"),
+  /** Re-verified right before; Trash only. */
+  trashEmptyFolders: (ids: string[]) => invoke<TrashResult>("trash_empty_folders", { ids }),
+  healthStart: () => invoke<void>("health_start"),
+  healthPause: (paused: boolean) => invoke<void>("health_pause", { paused }),
+  healthCancel: () => invoke<void>("health_cancel"),
+  healthClear: () => invoke<void>("health_clear"),
+  healthResults: (category: HealthCategory | null, offset: number, limit: number) => invoke<HealthView | null>("health_results", { category, offset, limit }),
   /** Correct the screenshot / screen-recording guess: "auto", "not" or "yes". Only Mori's view changes. */
   setCaptureOverride: (id: string, mode: "auto" | "not" | "yes") => invoke<void>("set_capture_override", { id, mode }),
   /** Read by the sandboxed worker. */

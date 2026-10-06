@@ -26,7 +26,10 @@ import { FileView } from "./components/FileView";
 import { Inspector } from "./components/Inspector";
 import { Icon, Logo, type IconName } from "./components/Icon";
 import { ModalFrame } from "./components/Modal";
+import { AnalysisCenter } from "./components/AnalysisCenter";
+import { HealthView } from "./components/HealthView";
 import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
+import { StorageView } from "./components/StorageView";
 import { Preview } from "./components/Preview";
 import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
 
@@ -113,7 +116,9 @@ export default function App() {
   /** Item shown in the inspector panel. */
   const [inspectId, setInspectId] = useState<string | null>(null);
   const [readOnly, setReadOnlyState] = useState(false);
-  const [mode, setMode] = useState<"browse" | "analyzer" | "similar" | "metadata" | "places">("browse");
+  const [mode, setMode] = useState<"browse" | "center" | "analyzer" | "similar" | "metadata" | "places" | "storage" | "health">("browse");
+  /** Files opened from Storage or Media Health (Media Health opens them isolated). */
+  const [extPreview, setExtPreview] = useState<{ items: Entry[]; index: number; isolated: boolean } | null>(null);
   /** Bumped when files are trashed from the browser, so analyzer results refresh. */
   const [analysisVersion, setAnalysisVersion] = useState(0);
   // Small anchored menus: sort options and the sidebar overflow ("more") menu.
@@ -180,7 +185,7 @@ export default function App() {
   }, [loc, kind, search, info]);
 
   // Background video decoding (thumbnail frames) pauses while previewing.
-  useEffect(() => setPreviewOpen(previewId !== null), [previewId]);
+  useEffect(() => setPreviewOpen(previewId !== null || extPreview !== null), [previewId, extPreview]);
   useEffect(() => {
     if (!previewId) setPreviewIso(false);
   }, [previewId]);
@@ -598,7 +603,13 @@ export default function App() {
               <span className="count">{count(f.kind)?.toLocaleString()}</span>
             </button>
           ))}
-          <div className="side-heading">Analyze</div>
+          <button className={`side-heading as-button ${mode === "center" ? "on" : ""}`} onClick={() => setMode("center")} title="All analyses">
+            Analyze
+          </button>
+          <button className={`side-item ${mode === "storage" ? "on" : ""}`} onClick={() => setMode("storage")} title="Where the space goes, largest items, empty folders">
+            <Icon name="drive" />
+            <span>Storage</span>
+          </button>
           <button className={`side-item ${mode === "analyzer" ? "on" : ""}`} onClick={() => setMode("analyzer")} title="Exact byte-identical files">
             <Icon name="duplicate" />
             <span>Duplicates</span>
@@ -614,6 +625,10 @@ export default function App() {
           <button className={`side-item ${mode === "places" ? "on" : ""}`} onClick={() => setMode("places")} title="Where photos and videos were taken (offline map)">
             <Icon name="pin" />
             <span>Places</span>
+          </button>
+          <button className={`side-item ${mode === "health" ? "on" : ""}`} onClick={() => setMode("health")} title="Broken, unsupported and risk-flagged media">
+            <Icon name="warning" />
+            <span>Media Health</span>
           </button>
           {topFolders.length > 0 && <div className="side-heading">Folders</div>}
           <FolderTree
@@ -844,6 +859,22 @@ export default function App() {
       </main>
 
       <Analyzer active={mode === "analyzer"} version={analysisVersion} onToast={flash} onSwitch={() => setMode("similar")} />
+      <AnalysisCenter active={mode === "center"} onOpen={(t) => setMode(t)} />
+      <StorageView
+        active={mode === "storage"}
+        version={indexVersion}
+        rootName={status.rootName}
+        onOpenFile={(e) => setExtPreview({ items: [e], index: 0, isolated: false })}
+        onOpenFolder={(id) => navigate({ scope: "folder", folder: id })}
+        onToast={flash}
+      />
+      <HealthView
+        active={mode === "health"}
+        rootName={status.rootName}
+        onOpen={(items, index) => setExtPreview({ items, index, isolated: true })}
+        onInfo={setInspectId}
+        onToast={flash}
+      />
       <MetadataAnalyzer
         active={mode === "metadata" || mode === "places"}
         view={mode === "places" ? "map" : "list"}
@@ -865,6 +896,18 @@ export default function App() {
           onCopyPath={copyPath}
           onError={flash}
           isolated={previewIso}
+        />
+      )}
+
+      {extPreview && (
+        <Preview
+          items={extPreview.items}
+          index={extPreview.index}
+          onIndex={(i) => setExtPreview((p) => p && { ...p, index: i })}
+          onClose={() => setExtPreview(null)}
+          onCopyPath={copyPath}
+          onError={flash}
+          isolated={extPreview.isolated}
         />
       )}
 

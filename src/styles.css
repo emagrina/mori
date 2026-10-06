@@ -3130,7 +3130,7 @@ button.link:hover {
 }
 
 .meta-filters {
-  margin: 0 var(--pad-x) 10px;
+  margin: 0 0 10px;
 }
 
 .chip .count {
@@ -3142,7 +3142,7 @@ button.link:hover {
 .meta-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0 var(--pad-x) 90px;
+  padding: 0 0 90px;
   display: flex;
   flex-direction: column;
 }
@@ -3232,7 +3232,7 @@ button.link:hover {
   flex: 1;
   min-height: 0;
   display: flex;
-  margin: 0 var(--pad-x) 20px;
+  margin: 0 0 20px;
   gap: 12px;
 }
 
@@ -3461,4 +3461,279 @@ button.link:hover {
 
 .compare-captions .muted {
   font-size: 11.5px;
+}
+
+/* ---------------------------------------------------- storage and health */
+
+.side-heading.as-button {
+  width: calc(100% - 16px);
+  text-align: left;
+  border-radius: 6px;
+}
+
+.side-heading.as-button:hover,
+.side-heading.as-button.on {
+  color: var(--text);
+}
+
+.center-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  padding: 4px 0 20px;
+}
+
+.center-grid .tool-card {
+  min-height: 96px;
+}
+
+.analyzer-body.storage {
+  overflow-y: auto;
+}
+
+.storage-overview,
+.largest,
+.empty-folders {
+  padding: 0 0 90px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.storage-overview > *,
+.largest > *,
+.empty-folders > * {
+  flex-shrink: 0;
+}
+
+.storage-overview h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.storage-summary {
+  font-size: 13px;
+}
+
+.storage-summary strong {
+  font-family: var(--font-display);
+  font-size: 22px;
+  margin-right: 4px;
+}
+
+.kind-bar {
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  gap: 2px;
+  background: var(--surface-inset);
+}
+
+.kind-seg {
+  min-width: 3px;
+}
+
+.k-photo { background: color-mix(in srgb, var(--text) 85%, transparent); }
+.k-video { background: color-mix(in srgb, var(--text) 62%, transparent); }
+.k-gif { background: color-mix(in srgb, var(--text) 48%, transparent); }
+.k-audio { background: color-mix(in srgb, var(--text) 36%, transparent); }
+.k-document { background: color-mix(in srgb, var(--text) 26%, transparent); }
+.k-other { background: color-mix(in srgb, var(--text) 16%, transparent); }
+
+.kind-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 12px;
+}
+
+.kind-legend i {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 3px;
+  vertical-align: -1px;
+}
+
+.treemap-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.treemap-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.treemap-head .crumbs {
+  flex: 1;
+  min-width: 0;
+}
+
+.treemap {
+  position: relative;
+  height: 340px;
+  border-radius: var(--r-card);
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+
+.tm-tile {
+  position: absolute;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2px;
+  border: 1px solid var(--bg-content);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
+  color: var(--text);
+  font-size: 11.5px;
+  text-align: left;
+  overflow: hidden;
+  transition: background var(--dur) var(--ease);
+}
+
+.tm-tile.folder:hover {
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+
+.tm-tile.file,
+.tm-tile.files {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text-2);
+  cursor: default;
+}
+
+.tm-tile:disabled {
+  opacity: 1;
+}
+
+.tm-name {
+  max-width: 100%;
+  font-weight: 600;
+}
+
+.tm-size {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.small-empty {
+  height: 100%;
+  font-size: 12px;
+}
+
+.year-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.year-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 160px;
+  align-items: center;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.year-row .bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.year-row .bar div {
+  height: 100%;
+  background: color-mix(in srgb, var(--text) 55%, transparent);
+}
+
+.size-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.size-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--separator);
+  text-align: left;
+  font-size: 12.5px;
+}
+
+button.size-row:hover {
+  background: var(--hover);
+}
+
+.size-row.disabled {
+  color: var(--text-3);
+}
+
+.size-row > svg {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.size-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.size-bytes {
+  width: 80px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.health-legend {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-3);
+}
+
+.health-dot.hd-risk {
+  background: var(--danger);
+}
+
+.health-dot.hd-broken,
+.health-dot.hd-failed {
+  background: var(--attention);
+}
+
+.health-reason {
+  width: 320px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.as-button {
+  text-align: left;
+}
+
+.storage-overview .fineprint,
+.treemap-section .fineprint {
+  margin: 8px 0 0;
 }
