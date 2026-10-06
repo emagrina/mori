@@ -45,6 +45,10 @@ const COMMANDS: &[&str] = &[
     "file_report",
     "set_read_only",
     "set_folder_protected",
+    "pdf_info",
+    "archive_listing",
+    "open_drive_safely",
+    "set_drive_previews",
 ];
 
 fn main() {

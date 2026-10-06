@@ -14,6 +14,7 @@ import {
   type VideoInfo,
 } from "../api";
 import { Icon } from "./Icon";
+import { ArchiveView, FactsPanel, FrameView, PdfView } from "./Viewers";
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
@@ -25,9 +26,14 @@ interface Props {
   onClose: () => void;
   onCopyPath: (e: Entry) => void;
   onError: (msg: string) => void;
+  /**
+   * Open in Isolation: only worker-rendered copies are shown (video as still
+   * frames), and nothing offers to open the original in another app.
+   */
+  isolated?: boolean;
 }
 
-export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }: Props) {
+export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, isolated = false }: Props) {
   const entry = items[index];
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -72,7 +78,7 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
     let alive = true;
     api.inspect(entry.id).then(
       (i) => alive && setInfo(i),
-      () => alive && setInfo({ detected: "unknown", preview: "none", canOpen: false, mismatch: false, video: null }),
+      () => alive && setInfo({ detected: "unknown", preview: "none", canOpen: false, mismatch: false, video: null, previewsOff: false }),
     );
     return () => {
       alive = false;
@@ -120,6 +126,9 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
   }, [index, hasPrev, hasNext, onClose, onIndex]);
 
   if (!entry) return null;
+  // Safe Inspection Mode: opening a file is the explicit request, and it is
+  // always shown isolated.
+  const iso = isolated || !!info?.previewsOff;
   const isImage = info?.preview === "image";
   const openFile = () => api.openFile(entry.id).catch((e) => onError(String(e)));
 
@@ -156,13 +165,23 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
           <button className="icon-btn" onClick={() => api.revealFile(entry.id)} title={isMac ? "Show in Finder" : "Show in folder"}>
             <Icon name="reveal" />
           </button>
-          {info?.canOpen && (
+          {info?.canOpen && !iso && (
             <button className="btn" onClick={openFile}>
               <Icon name="external" size={14} /> Open
             </button>
           )}
         </div>
       </header>
+
+      {iso && info && (
+        <div className="iso-banner" {...chromeHandlers}>
+          <Icon name="shield" size={12} />
+          <span>
+            <strong>Isolated view</strong> · {info.previewsOff && !isolated ? "Safe Inspection Mode · " : ""}the original is never opened or run — only copies
+            rendered by Mori's sandboxed worker are shown.
+          </span>
+        </div>
+      )}
 
       <div className="preview-stage">
         {info === null ? (
@@ -182,7 +201,8 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError }:
             }}
             onDims={setDims}
             videoRef={videoRef}
-            onOpen={openFile}
+            onOpen={iso ? undefined : openFile}
+            iso={iso}
           />
         )}
         {hasPrev && (
@@ -218,12 +238,14 @@ interface BodyProps {
   resetZoom: () => void;
   onDims: (d: string) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
-  onOpen: () => void;
+  /** Absent in the isolated view: there is no way to open the original there. */
+  onOpen?: () => void;
+  iso: boolean;
 }
 
-type Failure = "image" | "text" | VideoFailure;
+type Failure = "image" | "text" | "pdf" | "archive" | "frames" | VideoFailure;
 
-function Body({ entry, info, zoom, pan, setPan, zoomBy, resetZoom, onDims, videoRef, onOpen }: BodyProps) {
+function Body({ entry, info, zoom, pan, setPan, zoomBy, resetZoom, onDims, videoRef, onOpen, iso }: BodyProps) {
   const [failed, setFailed] = useState<Failure | null>(null);
   const [text, setText] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
@@ -249,6 +271,10 @@ function Body({ entry, info, zoom, pan, setPan, zoomBy, resetZoom, onDims, video
   if (failed) {
     return <Unavailable entry={entry} info={info} title="Preview unavailable — file could not be safely processed." onOpen={onOpen} />;
   }
+  const fail = (f: Failure) => () => alive.current && setFailed(f);
+  if (info.preview === "pdf") return <PdfView entry={entry} iso={iso} onFail={fail("pdf")} />;
+  if (info.preview === "archive") return <ArchiveView entry={entry} onFail={fail("archive")} />;
+  if (iso && info.preview === "video") return <FrameView entry={entry} onFail={fail("frames")} />;
   if (info.video && info.video.status !== "playable") {
     const reason: VideoFailure = { unsupportedCodec: "codec", noVideo: "noVideo", damaged: "damaged", blocked: "blocked", playable: "damaged" }[
       info.video.status
@@ -280,7 +306,7 @@ function Body({ entry, info, zoom, pan, setPan, zoomBy, resetZoom, onDims, video
         >
           {/* A size-limited copy decoded and re-encoded by the sandboxed worker, never the original bytes. */}
           <img
-            src={previewUrl(entry.id)}
+            src={previewUrl(entry.id, iso)}
             alt={entry.name}
             draggable={false}
             style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
@@ -456,7 +482,7 @@ const VIDEO_MESSAGES: Record<VideoFailure, [string, string | null]> = {
   stalled: ["This video could not be safely previewed.", "Playback stopped making progress and was stopped."],
 };
 
-function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info: Inspection; reason: VideoFailure; onOpen: () => void }) {
+function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info: Inspection; reason: VideoFailure; onOpen?: () => void }) {
   const [title, note] = VIDEO_MESSAGES[reason];
   const facts = videoFacts(info.video);
   return (
@@ -479,7 +505,7 @@ function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info:
         <button className="btn" onClick={() => api.revealFile(entry.id)}>
           <Icon name="reveal" size={14} /> {isMac ? "Show in Finder" : "Show in folder"}
         </button>
-        {info.canOpen && (
+        {info.canOpen && onOpen && (
           <button className="btn primary" onClick={onOpen}>
             <Icon name="external" size={14} /> Open in system
           </button>
@@ -503,25 +529,15 @@ function MismatchNote({ entry, info }: { entry: Entry; info: Inspection }) {
   );
 }
 
-function Unavailable({ entry, info, title, onOpen }: { entry: Entry; info: Inspection; title: string; onOpen: () => void }) {
+function Unavailable({ entry, info, title, onOpen }: { entry: Entry; info: Inspection; title: string; onOpen?: () => void }) {
   return (
     <div className="unsupported">
       <Icon name={entry.kind === "folder" ? "folder" : entry.kind} size={72} />
       <div className="name">{entry.name}</div>
       <div className="note">{title}</div>
       {info.mismatch && <MismatchNote entry={entry} info={info} />}
-      <div className="details">
-        {typeLabel(entry)} · {formatSize(entry.size)}
-        <br />
-        Modified {formatDate(entry.modified)}
-        {entry.created && (
-          <>
-            <br />
-            Created {formatDate(entry.created)}
-          </>
-        )}
-      </div>
-      {info.canOpen && (
+      <FactsPanel entry={entry} />
+      {info.canOpen && onOpen && (
         <button className="btn primary" onClick={onOpen}>
           <Icon name="external" size={14} /> Open in system
         </button>

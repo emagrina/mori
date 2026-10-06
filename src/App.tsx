@@ -9,6 +9,7 @@ import {
   resetThumbs,
   setPreviewOpen,
   startSimilarCaptureService,
+  type ConnectedDrive,
   type Entry,
   type InitInfo,
   type KindFilter,
@@ -87,6 +88,12 @@ export default function App() {
   const [result, setResult] = useState<QueryResult>(EMPTY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
+  /** The preview was opened with "Open in Isolation". */
+  const [previewIso, setPreviewIso] = useState(false);
+  /** A drive connected while Mori runs, offered for safe inspection. */
+  const [newDrive, setNewDrive] = useState<ConnectedDrive | null>(null);
+  /** The Safe Inspection banner was collapsed ("Browse metadata only"). */
+  const [safeCollapsed, setSafeCollapsed] = useState(false);
   /** Multi-selection (Cmd/Ctrl+Click, Shift+Click). `selectedId` is the focused item. */
   const [marked, setMarked] = useState<Set<string>>(() => new Set());
   /** `targets`: what the menu's actions apply to (the whole selection when right-clicking inside it). */
@@ -139,6 +146,7 @@ export default function App() {
     let timer: number | undefined;
     const unlisten = [
       listen<Status>("status", (e) => setStatus(e.payload)),
+      listen<ConnectedDrive>("drive-connected", (e) => setNewDrive(e.payload)),
       // Batch bursts of index updates during a scan.
       listen("index-changed", () => {
         if (timer) return;
@@ -162,6 +170,16 @@ export default function App() {
 
   // Background video decoding (thumbnail frames) pauses while previewing.
   useEffect(() => setPreviewOpen(previewId !== null), [previewId]);
+  useEffect(() => {
+    if (!previewId) setPreviewIso(false);
+  }, [previewId]);
+
+  // Safe Inspection Mode: keep the "Media decoded" counter current.
+  useEffect(() => {
+    if (!status?.safeMode) return;
+    const t = window.setInterval(() => api.status().then(setStatus, () => {}), 2000);
+    return () => window.clearInterval(t);
+  }, [status?.safeMode]);
 
   useEffect(() => {
     if (!status?.hasRoot) return;
@@ -380,8 +398,30 @@ export default function App() {
   const chooseRoot = async () => {
     // The native picker runs in Rust; the UI never handles a filesystem path.
     const s = await api.chooseRoot().catch(() => null);
-    if (!s) return;
+    if (s) rootChanged(s);
+  };
+
+  const inspectDriveSafely = async (d: ConnectedDrive) => {
+    setNewDrive(null);
+    const s = await api.openDriveSafely(d.key).catch((e) => (flash(String(e), 4000), null));
+    if (s) rootChanged(s);
+  };
+
+  const setDrivePreviews = async (on: boolean) => {
+    try {
+      await api.setDrivePreviews(on);
+      resetThumbs();
+      setSafeCollapsed(false);
+      setStatus(await api.status());
+      setIndexVersion((v) => v + 1);
+    } catch (e) {
+      flash(String(e), 4000);
+    }
+  };
+
+  const rootChanged = (s: Status) => {
     resetThumbs();
+    setSafeCollapsed(false);
     setStatus(s);
     setLoc({ scope: "folder", folder: "" });
     setHistory([]);
@@ -632,6 +672,27 @@ export default function App() {
           </button>
         </header>
 
+        {status.safeMode &&
+          (safeCollapsed ? (
+            <button className="safe-banner collapsed" onClick={() => setSafeCollapsed(false)} title="Safe Inspection Mode">
+              <Icon name="shield" size={12} /> Safe Inspection Mode
+            </button>
+          ) : (
+            <div className="safe-banner" role="status">
+              <Icon name="shield" size={13} />
+              <span className="safe-title">SAFE INSPECTION MODE</span>
+              <span className="safe-stat">Files indexed {status.fileCount.toLocaleString()}</span>
+              <span className="safe-stat">Media decoded {status.decoded.toLocaleString()}</span>
+              <span className="spacer" />
+              <button className="btn small" onClick={() => setDrivePreviews(true)} title="Allow thumbnails and previews for this drive">
+                Generate previews
+              </button>
+              <button className="btn small ghost" onClick={() => setSafeCollapsed(true)} title="Keep browsing names, sizes and dates only">
+                Browse metadata only
+              </button>
+            </div>
+          ))}
+
         <div className="page-head">
           <div className="crumbs">
             <button className="icon-btn back" onClick={goBack} disabled={!canGoBack} title="Back" aria-label="Back">
@@ -762,6 +823,7 @@ export default function App() {
           onClose={() => setPreviewId(null)}
           onCopyPath={copyPath}
           onError={flash}
+          isolated={previewIso}
         />
       )}
 
@@ -777,6 +839,10 @@ export default function App() {
           onInfo={() => setInspectId(menu.entry.id)}
           onProtect={() => (menu.entry.protected ? setDialog({ kind: "unprotect", entry: menu.entry }) : setProtected(menu.entry, true))}
           onPreview={() => (menu.entry.kind === "folder" ? navigate({ scope: "folder", folder: menu.entry.id }) : setPreviewId(menu.entry.id))}
+          onIsolate={() => {
+            setPreviewIso(true);
+            setPreviewId(menu.entry.id);
+          }}
           onCopy={() => copyPath(menu.entry)}
           onError={flash}
         />
@@ -881,6 +947,27 @@ export default function App() {
       )}
 
       {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} />}
+
+      {newDrive && (
+        <ModalFrame onCancel={() => setNewDrive(null)}>
+          <div className="dialog-icon">
+            <Icon name="drive" size={20} />
+          </div>
+          <h2>“{newDrive.label}” connected</h2>
+          <p>
+            Inspect it safely with Mori: only names, sizes and dates are indexed. Nothing on the drive is opened or decoded until you choose to generate
+            previews.
+          </p>
+          <div className="dialog-actions">
+            <button className="btn" onClick={() => setNewDrive(null)}>
+              Not Now
+            </button>
+            <button className="btn primary" onClick={() => inspectDriveSafely(newDrive)} autoFocus>
+              Inspect Safely with Mori
+            </button>
+          </div>
+        </ModalFrame>
+      )}
 
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -990,6 +1077,7 @@ function ContextMenu({
   entry,
   count,
   onPreview,
+  onIsolate,
   onCopy,
   onRename,
   onPrivacy,
@@ -1004,6 +1092,7 @@ function ContextMenu({
   /** Number of items the menu acts on (more than one: a multi-selection). */
   count: number;
   onPreview: () => void;
+  onIsolate: () => void;
   onCopy: () => void;
   onRename: () => void;
   onPrivacy: () => void;
@@ -1029,6 +1118,11 @@ function ContextMenu({
       {entry.kind !== "link" && (
         <button onClick={onPreview}>
           <Icon name={folder ? "folder" : "gallery"} size={14} /> {folder ? "Open Folder" : "Preview"}
+        </button>
+      )}
+      {!folder && entry.kind !== "link" && (
+        <button onClick={onIsolate} title="View worker-rendered copies only. The original is never opened or run.">
+          <Icon name="shield" size={14} /> Open in Isolation
         </button>
       )}
       {!folder && entry.kind !== "link" && (

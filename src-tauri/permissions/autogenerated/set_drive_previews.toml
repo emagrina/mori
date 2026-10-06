@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-drive-previews"
+description = "Enables the set_drive_previews command without any pre-configured scope."
+commands.allow = ["set_drive_previews"]
+
+[[permission]]
+identifier = "deny-set-drive-previews"
+description = "Denies the set_drive_previews command without any pre-configured scope."
+commands.deny = ["set_drive_previews"]

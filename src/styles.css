@@ -2696,3 +2696,353 @@ button.link:hover {
 .readonly-chip:hover {
   color: var(--text);
 }
+
+/* ------------------------------------------- isolation, PDF and archives */
+
+.iso-banner {
+  margin: 0 auto 6px;
+  padding: 5px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(760px, calc(100% - 32px));
+  border-radius: var(--r-control);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: 11.5px;
+  transition: opacity 220ms var(--ease);
+  position: relative;
+  z-index: 3;
+}
+
+.iso-banner strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.iso-banner svg {
+  flex-shrink: 0;
+}
+
+.preview.idle .iso-banner {
+  opacity: 0;
+}
+
+.safe-banner {
+  margin: 10px var(--pad-x) 0;
+  padding: 7px 8px 7px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-radius: var(--r-input);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.safe-banner .safe-title {
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.safe-banner .safe-stat::before {
+  content: "·";
+  margin-right: 12px;
+  color: var(--text-3);
+}
+
+.safe-banner .spacer {
+  flex: 1;
+}
+
+.safe-banner.collapsed {
+  align-self: flex-start;
+  padding: 0 10px;
+  height: 24px;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.safe-banner.collapsed:hover {
+  color: var(--text);
+}
+
+.btn.ghost {
+  background: transparent;
+  box-shadow: none;
+}
+
+.pdf-view {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  min-height: 0;
+}
+
+.pdf-strip {
+  width: 132px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 8px 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pdf-strip button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 6px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-strip button img {
+  width: 100%;
+  min-height: 40px;
+  background: var(--surface-inset);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.pdf-strip button.on {
+  background: var(--selected);
+  color: var(--text);
+}
+
+.pdf-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pdf-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 2px 0 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.pdf-count {
+  min-width: 112px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-active {
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--attention);
+  font-size: 11.5px;
+}
+
+.pdf-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 28px 24px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.pdf-page {
+  max-width: none;
+  width: auto;
+  flex-shrink: 0;
+  background: #fff;
+  border-radius: 2px;
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+}
+
+.archive-view {
+  width: min(900px, calc(100% - 56px));
+  height: 100%;
+  overflow-y: auto;
+  padding: 4px 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.archive-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-2);
+}
+
+.archive-head strong {
+  color: var(--text);
+}
+
+.findings.compact .finding {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.archive-table {
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  overflow: hidden;
+}
+
+.archive-table.nested {
+  margin: 2px 0 6px 22px;
+}
+
+.archive-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+  padding: 0 10px;
+  border-top: 1px solid var(--separator);
+}
+
+.archive-row:first-child {
+  border-top: none;
+}
+
+.archive-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.archive-name > svg {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.archive-flags {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.tag.attn {
+  color: var(--attention);
+}
+
+.archive-size {
+  width: 70px;
+  text-align: right;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.archive-more {
+  padding: 6px 10px;
+  border-top: 1px solid var(--separator);
+}
+
+.icon-btn.tiny {
+  width: 16px;
+  height: 16px;
+}
+
+.muted.small,
+.small.muted {
+  font-size: 11.5px;
+}
+
+.frame-view {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 28px 16px;
+}
+
+.frame-main {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.frame-main img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 3px;
+}
+
+.frame-strip {
+  display: flex;
+  gap: 6px;
+}
+
+.frame-strip button {
+  width: 76px;
+  height: 46px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface-inset);
+  display: grid;
+  place-items: center;
+  opacity: 0.6;
+}
+
+.frame-strip button.on {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--text);
+}
+
+.frame-strip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.facts {
+  width: 100%;
+  max-width: 420px;
+  text-align: left;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.facts dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 4px 12px;
+}
+
+.facts dt {
+  color: var(--text-3);
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--text);
+}

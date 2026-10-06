@@ -39,6 +39,10 @@ export interface Status {
   scanCount: number;
   fileCount: number;
   scannedAt: number;
+  /** Safe Inspection Mode: nothing on this drive is decoded automatically. */
+  safeMode: boolean;
+  /** Media decoded since this folder was opened. */
+  decoded: number;
 }
 
 export interface InitInfo {
@@ -149,10 +153,58 @@ export interface VideoInfo {
 
 export interface Inspection {
   detected: string;
-  preview: "image" | "video" | "text" | "none";
+  preview: "image" | "video" | "text" | "pdf" | "archive" | "none";
   canOpen: boolean;
   mismatch: boolean;
   video: VideoInfo | null;
+  /** Safe Inspection Mode: only explicit, isolated views are allowed. */
+  previewsOff: boolean;
+}
+
+export interface PdfInfo {
+  pages: number;
+  encrypted: boolean;
+  locked: boolean;
+  title: string | null;
+  author: string | null;
+  creator: string | null;
+  producer: string | null;
+  subject: string | null;
+  /** Present in the document. Mori never runs it. */
+  javascript: boolean;
+  openAction: boolean;
+  embeddedFiles: boolean;
+  forms: boolean;
+}
+
+export type ArchiveFlag = "traversal" | "absolute" | "drive-letter" | "control-chars" | "nested-archive" | "high-ratio";
+
+export interface ArchiveEntry {
+  path: string;
+  size: number;
+  compressed: number;
+  dir: boolean;
+  symlink: boolean;
+  encrypted: boolean;
+  flags: ArchiveFlag[];
+  nested?: ArchiveListing;
+}
+
+export interface ArchiveListing {
+  format: string;
+  entries: ArchiveEntry[];
+  totalEntries: number;
+  totalSize: number;
+  totalCompressed: number;
+  nestedDepth: number;
+  truncated: boolean;
+  findings: Finding[];
+}
+
+export interface ConnectedDrive {
+  key: string;
+  label: string;
+  path: string;
 }
 
 export interface Settings {
@@ -379,6 +431,13 @@ export const api = {
   /** Enforced by the backend mutation policy, not just the UI. */
   setReadOnly: (on: boolean) => invoke<void>("set_read_only", { on }),
   setFolderProtected: (id: string, isProtected: boolean) => invoke<void>("set_folder_protected", { id, protected: isProtected }),
+  /** Read by the sandboxed worker; active content is reported, never run. */
+  pdfInfo: (id: string, explicit: boolean) => invoke<PdfInfo>("pdf_info", { id, explicit }),
+  /** Listing only: nothing is extracted or written. */
+  archiveListing: (id: string) => invoke<ArchiveListing>("archive_listing", { id }),
+  openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
+  /** "Generate previews" for the current drive (or back to metadata only). */
+  setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
 };
 
 /**
@@ -410,13 +469,20 @@ export function startLivenessPing() {
 // ------------------------------------------------------------- mori:// URLs
 
 /** URL on Mori's own protocol. Only ids ever appear in it, never paths. */
-const moriUrl = (route: string, id: string) => convertFileSrc(`${route}/${id}`, "mori");
+const moriUrl = (route: string, id: string, iso = false) => convertFileSrc(`${iso ? "iso-" : ""}${route}/${id}`, "mori");
 
 export const thumbUrl = (id: string) => moriUrl("thumb", id);
-/** A re-encoded, size-limited copy produced by the sandboxed worker. */
-export const previewUrl = (id: string) => moriUrl("preview", id);
+/**
+ * A re-encoded, size-limited copy produced by the sandboxed worker. `iso`
+ * marks an explicit isolated-view request (allowed in Safe Inspection Mode).
+ */
+export const previewUrl = (id: string, iso = false) => moriUrl("preview", id, iso);
 /** Byte ranges of a video whose container was verified by magic bytes. */
-export const mediaUrl = (id: string) => moriUrl("media", id);
+export const mediaUrl = (id: string, iso = false) => moriUrl("media", id, iso);
+/** A PDF page rasterised by the sandboxed worker. */
+export const pdfPageUrl = (id: string, page: number, size: number, iso = false) => moriUrl("pdf", `${id}/${page}/${size}`, iso);
+/** Sampled video frame `k`, re-encoded by the sandboxed worker. */
+export const frameUrl = (id: string, k: number, iso = false) => moriUrl("frame", `${id}/${k}`, iso);
 
 // ------------------------------------------------------------- thumbnails
 
@@ -696,7 +762,7 @@ function grabSamples(src: string, times: number[], signal: AbortSignal) {
  */
 async function captureVideoThumb(e: Entry, signal: AbortSignal): Promise<boolean> {
   const info = await api.inspect(e.id).catch(() => null);
-  if (signal.aborted || info?.preview !== "video") return false;
+  if (signal.aborted || info?.preview !== "video" || info.previewsOff) return false;
   const end = await beginMediaSession(e.id).catch(() => null);
   if (!end) return false;
   let png: Uint8Array | undefined;
@@ -707,6 +773,114 @@ async function captureVideoThumb(e: Entry, signal: AbortSignal): Promise<boolean
   }
   if (!png || signal.aborted) return false;
   return invoke<boolean>("store_frame", png, { headers: { "mori-id": e.id } }).catch(() => false);
+}
+
+/**
+ * Sample `count` evenly spaced frames of a video for the isolated view (and
+ * the filmstrip). The webview decodes them; each is re-encoded by the
+ * sandboxed worker before it can be displayed, and the page only ever shows
+ * those copies. Calls `onFrame(k)` as each one is stored. Returns how many
+ * frames were stored.
+ */
+export async function captureFrames(id: string, count: number, explicit: boolean, signal: AbortSignal, onFrame: (k: number) => void): Promise<number> {
+  const end = await beginMediaSession(id).catch(() => null);
+  if (!end) return 0;
+  let stored = 0;
+  try {
+    await grabSequence(mediaUrl(id, explicit), count, signal, async (k, png) => {
+      const headers: Record<string, string> = { "mori-id": id, "mori-frame": String(k) };
+      if (explicit) headers["mori-explicit"] = "1";
+      if (await invoke<boolean>("store_frame", png, { headers }).catch(() => false)) {
+        stored++;
+        onFrame(k);
+      }
+    });
+  } finally {
+    end();
+  }
+  return stored;
+}
+
+/** Seek through a hidden video element and hand over each frame as PNG (≤480 px). */
+function grabSequence(src: string, count: number, signal: AbortSignal, onPng: (k: number, png: Uint8Array) => Promise<void>): Promise<void> {
+  return new Promise((resolve) => {
+    const v = document.createElement("video");
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+      v.remove();
+      resolve();
+    };
+    signal.addEventListener("abort", finish);
+    const timer = setTimeout(finish, 20000 + count * 4000);
+    const seek = (t: number) =>
+      new Promise<boolean>((r) => {
+        const to = setTimeout(() => r(false), 5000);
+        v.onseeked = () => {
+          clearTimeout(to);
+          r(true);
+        };
+        v.currentTime = t;
+      });
+    const presented = () =>
+      new Promise<void>((r) => {
+        const rvfc = (v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }).requestVideoFrameCallback;
+        let called = false;
+        const once = () => {
+          if (!called) {
+            called = true;
+            r();
+          }
+        };
+        if (rvfc) rvfc.call(v, once);
+        setTimeout(once, 500);
+      });
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    v.crossOrigin = "anonymous";
+    v.style.cssText = "position:fixed;left:-9999px;top:0;width:4px;height:4px;opacity:0;pointer-events:none";
+    v.onerror = finish;
+    v.onloadedmetadata = async () => {
+      const d = v.duration;
+      if (!isFinite(d) || d <= 0 || !v.videoWidth || !v.videoHeight) return finish();
+      const scale = Math.min(1, 480 / Math.max(v.videoWidth, v.videoHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(v.videoWidth * scale));
+      c.height = Math.max(1, Math.round(v.videoHeight * scale));
+      const ctx = c.getContext("2d", { willReadFrequently: true })!;
+      for (let k = 0; k < count; k++) {
+        if (finished) return;
+        if (!(await seek(Math.min((d * (k + 0.5)) / count, Math.max(0, d - 0.05))))) return finish();
+        await presented();
+        try {
+          ctx.globalCompositeOperation = "source-over";
+          ctx.clearRect(0, 0, c.width, c.height);
+          ctx.drawImage(v, 0, 0, c.width, c.height);
+          const px = ctx.getImageData(0, 0, c.width, c.height).data;
+          let painted = false;
+          for (let i = 3; i < px.length && !painted; i += 4 * 7) painted = px[i] > 0;
+          if (!painted) continue;
+          ctx.globalCompositeOperation = "destination-over";
+          ctx.fillStyle = "#000";
+          ctx.fillRect(0, 0, c.width, c.height);
+          const blob = await new Promise<Blob | null>((r) => c.toBlob(r, "image/png"));
+          if (blob && !finished) await onPng(k, new Uint8Array(await blob.arrayBuffer()));
+        } catch {
+          return finish();
+        }
+      }
+      finish();
+    };
+    document.body.appendChild(v);
+    v.src = src;
+  });
 }
 
 /** Decode one frame in a detached, always-cleaned-up video element. */

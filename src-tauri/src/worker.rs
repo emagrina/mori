@@ -52,6 +52,10 @@ pub enum Op {
     Probe,
     /// Normalized grayscale miniatures of a still image for similarity analysis.
     Fingerprint,
+    /// PDF facts (pages, info fields, presence of active content) as text.
+    PdfInfo,
+    /// One PDF page rendered to a bitmap (input: u32 LE page number + PDF).
+    PdfPage,
 }
 
 impl Op {
@@ -62,6 +66,8 @@ impl Op {
             Op::Frame => "frame",
             Op::Probe => "probe",
             Op::Fingerprint => "fingerprint",
+            Op::PdfInfo => "pdfinfo",
+            Op::PdfPage => "pdfpage",
         }
     }
     fn parse(s: &str) -> Option<Op> {
@@ -71,6 +77,8 @@ impl Op {
             "frame" => Op::Frame,
             "probe" => Op::Probe,
             "fingerprint" => Op::Fingerprint,
+            "pdfinfo" => Op::PdfInfo,
+            "pdfpage" => Op::PdfPage,
             _ => return None,
         })
     }
@@ -85,6 +93,8 @@ pub enum OutFormat {
     Probe = 4,
     /// `Op::Fingerprint`: FP_VARIANTS raw FP_SIDE×FP_SIDE grayscale planes.
     Raw = 5,
+    /// `Op::PdfInfo`: plain `key=value` lines.
+    Text = 6,
 }
 
 /// Side of the normalized grayscale miniatures made by `Op::Fingerprint`.
@@ -101,6 +111,7 @@ impl OutFormat {
             OutFormat::Gif => "image/gif",
             OutFormat::Probe => "text/plain",
             OutFormat::Raw => "application/octet-stream",
+            OutFormat::Text => "text/plain",
         }
     }
     pub fn ext(self) -> &'static str {
@@ -110,6 +121,7 @@ impl OutFormat {
             OutFormat::Gif => "gif",
             OutFormat::Probe => "txt",
             OutFormat::Raw => "bin",
+            OutFormat::Text => "txt",
         }
     }
 }
@@ -140,9 +152,17 @@ pub fn worker_main(args: &[String]) -> ! {
     // Lock down first; refuse to touch input if the sandbox can't be applied.
     restrict_resources();
     // HEIC jobs (flag set by the host from the magic bytes) need Apple's HEVC
-    // decoder service; everything else gets the strictest profile.
-    let heif = args.iter().skip(1).take(2).any(|a| a == "heif");
-    if !enter_sandbox(heif) {
+    // decoder service; PDF jobs need to read the system fonts; everything else
+    // gets the strictest profile.
+    let extra = |flag: &str| args.iter().skip(1).take(2).any(|a| a == flag);
+    let profile = if extra("heif") {
+        Profile::Heif
+    } else if matches!(args.first().map(String::as_str), Some("pdfinfo" | "pdfpage")) || extra("pdf") {
+        Profile::Pdf
+    } else {
+        Profile::Pure
+    };
+    if !enter_sandbox(profile) {
         std::process::exit(EXIT_SANDBOX);
     }
     if args.first().map(String::as_str) == Some("selftest") {
@@ -177,6 +197,8 @@ pub fn worker_main(args: &[String]) -> ! {
         ),
         Op::Probe => probe_video(&input),
         Op::Fingerprint => fingerprint(&input),
+        Op::PdfInfo => pdf_info(&input),
+        Op::PdfPage => pdf_page(&input, max),
     };
     match result {
         Ok(out) => {
@@ -289,6 +311,38 @@ fn decode_any_still(input: &[u8], max: u32) -> Result<(DynamicImage, u32, u32), 
     let img = decode_oriented(input, format)?;
     let (w, h) = (img.width(), img.height());
     Ok((img, w, h))
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_info(input: &[u8]) -> Result<Output, i32> {
+    if !input.starts_with(b"%PDF-") {
+        return Err(EXIT_UNSUPPORTED);
+    }
+    let text = crate::pdf::info(input).ok_or(EXIT_DECODE)?;
+    let bytes: Vec<u8> = text.into_bytes().into_iter().take(16 * 1024).collect();
+    Ok(Output { width: 0, height: 0, format: OutFormat::Text, bytes })
+}
+
+#[cfg(target_os = "macos")]
+fn pdf_page(input: &[u8], max: u32) -> Result<Output, i32> {
+    let (num, pdf) = input.split_at_checked(4).ok_or(EXIT_USAGE)?;
+    let page = u32::from_le_bytes(num.try_into().unwrap()) as usize;
+    if !pdf.starts_with(b"%PDF-") {
+        return Err(EXIT_UNSUPPORTED);
+    }
+    let rgba = crate::pdf::render(pdf, page, max).ok_or(EXIT_DECODE)?;
+    let (w, h) = (rgba.width(), rgba.height());
+    encode_still(DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(rgba).to_rgb8()), w, h)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pdf_info(_: &[u8]) -> Result<Output, i32> {
+    Err(EXIT_UNSUPPORTED)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pdf_page(_: &[u8], _: u32) -> Result<Output, i32> {
+    Err(EXIT_UNSUPPORTED)
 }
 
 /// The fingerprint operation without a separate process: tests only.
@@ -441,15 +495,35 @@ const HEIF_PROFILE: &str = r#"(version 1)
 (deny process-info* (target others))
 (deny system-info pseudo-tty lsopen system-kext*)"#;
 
+/// PDF jobs: CoreGraphics draws the standard PDF fonts (Helvetica, Times…)
+/// that documents reference without embedding from the system font files.
+/// Reading system fonts and frameworks is all that is added; no IPC service,
+/// no IOKit, no writes, no network, no processes.
 #[cfg(target_os = "macos")]
-fn enter_sandbox(heif: bool) -> bool {
+const PDF_PROFILE: &str = r#"(version 1)
+(deny default)
+(allow file-read* (subpath "/System/Library/Fonts") (subpath "/System/Library/Frameworks") (subpath "/System/Library/PrivateFrameworks") (subpath "/Library/Fonts") (subpath "/usr/share") (subpath "/private/var/db/dyld"))
+(allow file-read-metadata (literal "/") (literal "/private") (literal "/private/var") (literal "/private/var/db") (subpath "/System") (subpath "/Library") (subpath "/usr"))
+(allow sysctl-read)"#;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Profile {
+    Pure,
+    Heif,
+    Pdf,
+}
+
+#[cfg(target_os = "macos")]
+fn enter_sandbox(profile: Profile) -> bool {
     use std::ffi::{c_char, c_int, CString};
     extern "C" {
         fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
         fn sandbox_free_error(errorbuf: *mut c_char);
     }
     const SANDBOX_NAMED: u64 = 0x0001;
-    let custom = if heif {
+    let custom = if profile == Profile::Pdf {
+        CString::new(PDF_PROFILE).ok()
+    } else if profile == Profile::Heif {
         // Mori's own app bundle (or the executable's folder outside a bundle),
         // inserted literally; refused if it contains characters that would
         // need escaping.
@@ -485,7 +559,7 @@ fn enter_sandbox(heif: bool) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn enter_sandbox(_heif: bool) -> bool {
+fn enter_sandbox(_profile: Profile) -> bool {
     // Linux: rlimits + no_new_privs (see restrict_resources); Windows: Job object
     // applied by the host. The worker still never receives a path.
     true
@@ -616,6 +690,7 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         3 => OutFormat::Gif,
         4 => OutFormat::Probe,
         5 => OutFormat::Raw,
+        6 => OutFormat::Text,
         _ => return Err(WorkerError::Failed),
     };
     // Double-check the payload really is the format the worker claimed.
@@ -625,6 +700,9 @@ fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
         OutFormat::Gif => out[16..].starts_with(b"GIF8"),
         OutFormat::Probe => out.len() <= 16 + 512 && out[16..].starts_with(b"video="),
         OutFormat::Raw => out.len() == 16 + FP_LEN,
+        OutFormat::Text => {
+            out.len() <= 16 + 16 * 1024 && out[16..].starts_with(b"pages=") && std::str::from_utf8(&out[16..]).is_ok()
+        }
     };
     if !ok_magic {
         return Err(WorkerError::Failed);

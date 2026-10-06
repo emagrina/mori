@@ -1878,6 +1878,7 @@ name = "mori"
 version = "1.0.0"
 dependencies = [
  "blake3",
+ "flate2",
  "image",
  "libc",
  "objc2",
