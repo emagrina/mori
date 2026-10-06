@@ -82,4 +82,8 @@ First stable release. The features are listed by area rather than by development
 - **Diagnostics** with a self-test on synthetic files: media support, worker sandbox profiles, resource limits, malformed input, type detection, archive traversal, symlinks, Read-only enforcement, protected folders, network denial, ephemeral mode and logging.
 - Results are ✓ verified, △ limited, ✕ not working, or — a static fact, with no hard-coded check marks.
 
+### Fixed during release verification
+- Thumbnails didn't appear after **Generate previews** in Safe Inspection Mode or Private Inspection until the folder was reopened.
+- The macOS bundle is now signed ad hoc as a whole (it was only linker-signed), so a downloaded copy passes code-signature verification instead of being reported as damaged.
+
 [1.0.0]: https://github.com/emagrina/mori/releases/tag/v1.0.0
