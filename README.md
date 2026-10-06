@@ -120,9 +120,21 @@ src/                 React + TypeScript UI
 src-tauri/src/       Rust: index & search, path confinement, sandboxed worker,
                      mori:// protocol, video probing and recovery
 src-tauri/tests/     hostile-input tests for the worker
-assets/branding/     Mori icon sources (black and white variants)
+assets/branding/     Mori marks (dark/light folder) and the macOS app icon master
+scripts/             build-icons.py: regenerates every icon from the branding artwork
 docs/                design notes
 ```
+
+## Branding
+
+Mori's mark is a folder with a pixel-art incognito character, in two variants:
+- **Dark folder with a light character:** the primary mark and the app icon. It is used on light UI backgrounds.
+- **Light folder with a dark character:** used on dark UI backgrounds.
+
+All icons are generated from the original artwork by `python3 scripts/build-icons.py` (needs Pillow, NumPy and macOS `iconutil`). The original full-resolution artwork lives in `assets/branding/source/` and is not committed.
+- **macOS:** the icon follows Apple's icon grid (a squircle with transparent margins), so macOS 26 doesn't shrink it onto a grey plate.
+- **Windows and Linux:** the icons are the free-form folder.
+- **16–48 px:** these sizes get a tighter crop and light sharpening so the character stays recognisable.
 
 ## License
 
