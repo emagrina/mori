@@ -2097,6 +2097,12 @@ mod lab {
         let _ = fs::remove_dir_all(cache);
     }
 
+    #[cfg(not(unix))]
+    fn peak_rss_mb() -> f64 {
+        0.0 // benchmark only: not measured on Windows
+    }
+
+    #[cfg(unix)]
     fn peak_rss_mb() -> f64 {
         let mut u: libc::rusage = unsafe { std::mem::zeroed() };
         unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
