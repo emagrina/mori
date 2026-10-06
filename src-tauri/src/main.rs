@@ -26,6 +26,7 @@ mod sanitize;
 mod secure;
 mod similar;
 mod storage;
+mod tags;
 mod thumbs;
 mod video;
 mod worker;
@@ -97,6 +98,12 @@ pub struct AppState {
     pub decoded: AtomicU64,
     /// Drives connected while Mori runs, announced to the UI: key → (mount, label).
     connected: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// Favorites (files and folders), per volume like private folders.
+    favorites: privacy::Store,
+    /// Local tags (names in Mori's app data, never in the files).
+    tags: tags::Store,
+    /// Temporary session: nothing about the browsed folder is written to disk.
+    pub temp: AtomicBool,
     /// Screenshot corrections: never one / always one (per volume, like private folders).
     capture_not: privacy::Store,
     capture_yes: privacy::Store,
@@ -181,6 +188,22 @@ impl AppState {
 
     pub fn index(&self) -> Arc<Index> {
         self.index.read().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Thumbnails are kept per volume, so "Forget this drive" can remove
+    /// exactly that drive's thumbnails.
+    pub fn thumb_dir_for(&self, canon: &Path) -> PathBuf {
+        let key = drives::key_of(&privacy::volume_of(canon));
+        self.thumb_dir.join(format!("v{:016x}", thumbs::fnv(key.as_bytes())))
+    }
+
+    /// Changes to Mori's own records are refused in a temporary session.
+    fn persistent(&self) -> Result<(), String> {
+        if self.temp.load(Ordering::SeqCst) {
+            Err("Not available in a temporary session: Mori isn't saving anything about this folder.".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn index_dir(&self) -> PathBuf {
@@ -407,6 +430,8 @@ struct Status {
     safe_mode: bool,
     /// Media decoded since this root was opened.
     decoded: u64,
+    /// A temporary session: nothing about this folder is saved.
+    temporary: bool,
 }
 
 fn status(state: &AppState) -> Status {
@@ -421,6 +446,7 @@ fn status(state: &AppState) -> Status {
         scanned_at: idx.scanned_at,
         safe_mode: state.safe_mode.load(Ordering::SeqCst),
         decoded: state.decoded.load(Ordering::Relaxed),
+        temporary: state.temp.load(Ordering::SeqCst),
     }
 }
 
@@ -436,6 +462,7 @@ fn publish_index(app: &AppHandle, mut idx: Index) {
         idx.apply_boundaries(&state.privacy.boundaries(&root));
         idx.apply_protection(&state.protected.boundaries(&root), state.protected.covering(&root).is_some());
         idx.apply_capture(&state.capture_not.boundaries(&root), &state.capture_yes.boundaries(&root));
+        idx.apply_org(&state.favorites.boundaries(&root), &state.tags.for_root(&root));
     }
     *state.index.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(idx);
     let _ = app.emit("index-changed", ());
@@ -488,13 +515,15 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         if cancelled() {
             return;
         }
-        if index::save(&state.index_file(&root), &idx).is_err() {
-            debug_log!("mori: could not save index");
+        if !state.temp.load(Ordering::SeqCst) {
+            if index::save(&state.index_file(&root), &idx).is_err() {
+                debug_log!("mori: could not save index");
+            }
+            // Private folders moved or renamed outside Mori: follow them by inode.
+            let dirs: Vec<(&str, u64)> = idx.dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
+            state.privacy.reconcile(&root, &dirs);
+            state.protected.reconcile(&root, &dirs);
         }
-        // Private folders moved or renamed outside Mori: follow them by inode.
-        let dirs: Vec<(&str, u64)> = idx.dirs.iter().map(|d| (d.path.as_str(), d.ino)).collect();
-        state.privacy.reconcile(&root, &dirs);
-        state.protected.reconcile(&root, &dirs);
         publish_index(&app, idx);
         state.scanning.store(false, Ordering::SeqCst);
         emit_status(&app);
@@ -612,6 +641,7 @@ async fn choose_root(app: AppHandle) -> Result<Status, String> {
         return Err("cancelled".into());
     };
     let path = picked.into_path().map_err(|_| "That folder can't be opened")?;
+    app.state::<AppState>().temp.store(false, Ordering::SeqCst);
     open_root(&app, &path)?;
     let state = app.state::<AppState>();
     let canon = state.root_canon().unwrap();
@@ -841,7 +871,7 @@ async fn store_frame(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result
 
 /// Remove a file's cached thumbnails (it is about to disappear or change name).
 fn invalidate_thumbs(state: &AppState, canon: &Path, meta: &fs::Metadata) {
-    let stem = thumbs::stem(&state.thumb_dir, canon, meta, protocol::THUMB_SIZE);
+    let stem = thumbs::stem(&state.thumb_dir_for(canon), canon, meta, protocol::THUMB_SIZE);
     for ext in ["jpg", "png", "none"] {
         let _ = fs::remove_file(stem.with_extension(ext));
     }
@@ -852,7 +882,7 @@ fn apply_index_change(app: &AppHandle, change: impl FnOnce(&mut Index)) {
     let state = app.state::<AppState>();
     let mut idx = (*state.index()).clone();
     change(&mut idx);
-    if let Some(root) = state.root_canon() {
+    if let Some(root) = state.root_canon().filter(|_| !state.temp.load(Ordering::SeqCst)) {
         if index::save(&state.index_file(&root), &idx).is_err() {
             debug_log!("mori: could not save index");
         }
@@ -1010,6 +1040,8 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
         state.privacy.renamed(&path, &target);
         state.capture_not.renamed(&path, &target);
         state.capture_yes.renamed(&path, &target);
+        state.favorites.renamed(&path, &target);
+        state.tags.renamed(&path, &target);
     }
     let old_rel = loc.rel.clone();
     let new_rel = match old_rel.rsplit_once('/') {
@@ -1045,7 +1077,8 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
                 let head = secure::read_head(&mut f, secure::SNIFF_LEN);
                 let detected = secure::sniff(&head, &loc.ext);
                 let _ = std::io::Seek::rewind(&mut f);
-                ctx.decode_failed = thumbs::is_miss(&thumbs::stem(&state.thumb_dir, &canon, &m, protocol::THUMB_SIZE));
+                ctx.decode_failed =
+                    thumbs::is_miss(&thumbs::stem(&state.thumb_dir_for(&canon), &canon, &m, protocol::THUMB_SIZE));
                 if detected.is_video() {
                     let status = state.video_info(&canon, &m, detected).status;
                     ctx.media_blocked = status == video::VideoStatus::Blocked;
@@ -1065,6 +1098,315 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
     })
     .await
     .map_err(|_| "The report failed.".to_string())?
+}
+
+// ------------------------------------------------------- favorites, tags
+
+/// Canonical paths of browser items (files and folders, never through a link).
+fn browser_paths(state: &AppState, ids: &[String]) -> Result<Vec<PathBuf>, String> {
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let idx = state.index();
+    ids.iter()
+        .take(10_000)
+        .map(|id| {
+            let e = idx.get(id).ok_or("Unknown item")?;
+            if e.kind == index::Kind::Link
+                || Path::new(&e.path).components().any(|c| !matches!(c, Component::Normal(_)))
+            {
+                return Err("Links can't be tagged".to_string());
+            }
+            Ok(root.join(&e.path))
+        })
+        .collect()
+}
+
+/// Add or remove items from Favorites. Only Mori's records change.
+#[tauri::command]
+fn set_favorite(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>, on: bool) -> Result<(), String> {
+    state.persistent()?;
+    for p in browser_paths(&state, &ids)? {
+        state.favorites.set(&p, 0, on)?;
+    }
+    publish_index(&app, (*state.index()).clone());
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TagInfo {
+    id: u32,
+    name: String,
+    /// Items with this tag on the browsed drive (outside private folders).
+    count: usize,
+}
+
+#[tauri::command]
+fn tags_list(state: State<'_, AppState>) -> Vec<TagInfo> {
+    let idx = state.index();
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for e in idx.files.iter().chain(idx.dirs.iter()).filter(|e| e.visible_from("")) {
+        for t in &e.tags {
+            *counts.entry(*t).or_default() += 1;
+        }
+    }
+    state
+        .tags
+        .list()
+        .into_iter()
+        .map(|t| TagInfo {
+            count: counts.get(&t.id).copied().unwrap_or(0),
+            id: t.id,
+            name: secure::display_safe(&t.name),
+        })
+        .collect()
+}
+
+/// Add (`on`) or remove the tag called `name` on items. Never touches the files.
+#[tauri::command]
+fn tag_items(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    name: String,
+    on: bool,
+) -> Result<u32, String> {
+    state.persistent()?;
+    let paths = browser_paths(&state, &ids)?;
+    let id = state.tags.ensure(&name)?;
+    state.tags.assign(&paths, id, on)?;
+    publish_index(&app, (*state.index()).clone());
+    Ok(id)
+}
+
+#[tauri::command]
+fn tag_rename(app: AppHandle, state: State<'_, AppState>, id: u32, name: String) -> Result<(), String> {
+    state.persistent()?;
+    state.tags.rename(id, &name)?;
+    publish_index(&app, (*state.index()).clone());
+    Ok(())
+}
+
+/// Delete a tag everywhere (the tagged files are not touched).
+#[tauri::command]
+fn tag_delete(app: AppHandle, state: State<'_, AppState>, id: u32) -> Result<(), String> {
+    state.persistent()?;
+    state.tags.delete(id)?;
+    publish_index(&app, (*state.index()).clone());
+    Ok(())
+}
+
+// --------------------------------------------- sessions and forgetting
+
+/// Browse a folder without leaving anything behind: no index cache, no
+/// thumbnails on disk, no remembered folder, no records. Everything stays
+/// in memory and is gone when another folder is opened or Mori quits.
+#[tauri::command]
+async fn open_temporary(app: AppHandle) -> Result<Status, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().set_title("Browse without indexing").blocking_pick_folder().ok_or("cancelled")?;
+    let path = picked.into_path().map_err(|_| "That folder can't be opened")?;
+    let state = app.state::<AppState>();
+    state.temp.store(true, Ordering::SeqCst);
+    state.volatile_thumbs.clear();
+    open_root(&app, &path)?;
+    Ok(status(&state))
+}
+
+/// Leave a temporary session and go back to the last saved folder.
+#[tauri::command]
+fn end_temporary(app: AppHandle, state: State<'_, AppState>) -> Result<Status, String> {
+    if !state.temp.swap(false, Ordering::SeqCst) {
+        return Ok(status(&state));
+    }
+    state.volatile_thumbs.clear();
+    state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    let saved = read_settings(&state).root.map(PathBuf::from);
+    match saved {
+        Some(p) if open_root(&app, &p).is_ok() => {}
+        _ => {
+            *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+            publish_index(&app, Index::default());
+        }
+    }
+    Ok(status(&state))
+}
+
+/// Remove a file or folder Mori created in its own app directories. Refuses
+/// anything else, so nothing on a user's drive can ever be deleted here.
+fn remove_app_path(state: &AppState, p: &Path) {
+    let cache = state.thumb_dir.parent().unwrap_or(&state.thumb_dir);
+    if !inside_app_dirs(p, &state.data_dir, cache) {
+        return;
+    }
+    if p.is_dir() {
+        let _ = fs::remove_dir_all(p);
+    } else {
+        let _ = fs::remove_file(p);
+    }
+}
+
+/// Strictly inside one of Mori's own directories (never the directory
+/// itself, never through `..`).
+fn inside_app_dirs(p: &Path, data: &Path, cache: &Path) -> bool {
+    !p.components().any(|c| matches!(c, Component::ParentDir))
+        && [data, cache].iter().any(|d| p.starts_with(d) && p != *d && d.components().count() > 2)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Forgotten {
+    drive: String,
+    indexes: usize,
+}
+
+/// "Forget this drive": remove everything Mori knows about the current
+/// drive — its index caches, thumbnails, and its private, protected,
+/// favorite, tag and screenshot records — then close it. Nothing on the
+/// drive itself is read for this or changed.
+#[tauri::command]
+fn forget_drive(app: AppHandle, state: State<'_, AppState>) -> Result<Forgotten, String> {
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let forgotten = forget_data(&state, &root);
+    clear_session(&state);
+    *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+    write_settings(&state, |s| s.root = None)?;
+    publish_index(&app, Index::default());
+    emit_status(&app);
+    Ok(forgotten)
+}
+
+/// Remove Mori's own data about the volume holding `root`.
+fn forget_data(state: &AppState, root: &Path) -> Forgotten {
+    let vol = privacy::volume_of(root);
+    let drive = drive_of(root);
+    state.scan_gen.fetch_add(1, Ordering::SeqCst);
+    // Index caches of any folder on this volume (the cache records its root).
+    let mut indexes = 0;
+    if let Ok(rd) = fs::read_dir(state.index_dir()) {
+        for f in rd.flatten() {
+            let p = f.path();
+            let on_volume = fs::read(&p)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| v.get("root").and_then(|r| r.as_str()).map(PathBuf::from))
+                .is_some_and(|r| {
+                    r.starts_with(&vol.mount) && drives::key_of(&privacy::volume_of(&r)) == drives::key_of(&vol)
+                });
+            if on_volume {
+                remove_app_path(state, &p);
+                indexes += 1;
+            }
+        }
+    }
+    remove_app_path(state, &state.thumb_dir_for(root));
+    for store in [&state.privacy, &state.protected, &state.favorites, &state.capture_not, &state.capture_yes] {
+        store.forget_volume(&vol);
+    }
+    state.tags.forget_volume(&vol);
+    state.drives.forget(&drives::key_of(&vol));
+    Forgotten { drive, indexes }
+}
+
+/// Debug builds only: `MORI_DEBUG_ORG=<folder>` checks on the real app that a
+/// temporary session writes nothing, and that forgetting the folder's drive
+/// removes only Mori's data (the folder itself is compared before and after).
+/// Settings are never written.
+fn debug_org(app: &AppHandle) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(dir) = std::env::var_os("MORI_DEBUG_ORG").map(PathBuf::from) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let snap = |base: &Path| -> std::collections::BTreeMap<String, (u64, u128)> {
+            walkdir::WalkDir::new(base)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.file_type().is_file())
+                .filter_map(|e| {
+                    let m = e.metadata().ok()?;
+                    Some((e.path().to_string_lossy().into_owned(), (m.len(), dupes::mtime_ns(&m))))
+                })
+                .collect()
+        };
+        let cache = state.thumb_dir.parent().unwrap_or(&state.thumb_dir).to_path_buf();
+        let wait_scan = || {
+            std::thread::sleep(Duration::from_millis(300));
+            while state.scanning.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        std::thread::sleep(Duration::from_secs(2));
+        wait_scan();
+        let canon = fs::canonicalize(&dir).unwrap();
+        let _ = fs::remove_file(state.index_file(&canon));
+        let (data0, cache0, drive0) = (snap(&state.data_dir), snap(&cache), snap(&canon));
+        state.temp.store(true, Ordering::SeqCst);
+        open_root(&app, &canon).unwrap();
+        wait_scan();
+        let files = state.index().files.len();
+        let refused = state.persistent().is_err();
+        let (data1, cache1) = (snap(&state.data_dir), snap(&cache));
+        let diff = |a: &std::collections::BTreeMap<String, (u64, u128)>,
+                    b: &std::collections::BTreeMap<String, (u64, u128)>| {
+            b.iter().filter(|(k, v)| a.get(*k) != Some(v)).map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        };
+        eprintln!("mori: DEBUG org temp: indexed {files} files; app-data changes={:?} cache changes={:?} records-refused={refused}", diff(&data0, &data1), diff(&cache0, &cache1));
+        state.temp.store(false, Ordering::SeqCst);
+        open_root(&app, &canon).unwrap();
+        wait_scan();
+        let saved = state.index_file(&canon).exists();
+        let first = state.index().files.first().map(|e| canon.join(&e.path));
+        if let Some(f) = &first {
+            state.favorites.set(f, 0, true).unwrap();
+            let t = state.tags.ensure("debug-forget").unwrap();
+            state.tags.assign(std::slice::from_ref(f), t, true).unwrap();
+        }
+        let before_forget = (state.favorites.boundaries(&canon).len(), state.tags.for_root(&canon).len());
+        let r = forget_data(&state, &canon);
+        let after = (
+            state.favorites.boundaries(&canon).len(),
+            state.tags.for_root(&canon).len(),
+            state.index_file(&canon).exists(),
+            state.thumb_dir_for(&canon).exists(),
+        );
+        let drive1 = snap(&canon);
+        if let Some(t) = state.tags.list().iter().find(|t| t.name == "debug-forget") {
+            let _ = state.tags.delete(t.id);
+        }
+        eprintln!(
+            "mori: DEBUG org normal: index saved={saved}; before forget favorites/tags={before_forget:?}; forgot {} indexes; after (favorites, tags, index exists, thumbs exist)={after:?}; drive unchanged={}",
+            r.indexes,
+            drive0 == drive1
+        );
+        eprintln!("mori: DEBUG org done");
+    });
+}
+
+fn clear_session(state: &AppState) {
+    state.analysis_cancel.store(true, Ordering::SeqCst);
+    state.similar_cancel.store(true, Ordering::SeqCst);
+    state.meta_job.cancel();
+    state.health_job.cancel();
+    *state.analysis.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *state.meta_scan.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *state.health.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.connected.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.volatile_thumbs.clear();
+    state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
+}
+
+/// "Clear Session Data": forget what this session holds in memory — analysis
+/// results, folders picked for analysis, in-memory previews. Unlike Clear
+/// Cache it keeps thumbnails and indexes; unlike Forget Drive it keeps every
+/// record; it never touches files.
+#[tauri::command]
+fn clear_session_data(state: State<'_, AppState>) {
+    clear_session(&state);
 }
 
 // ---------------------------------------------------------------- storage
@@ -1143,6 +1485,7 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
 /// "auto" (Mori's guess), "not" or "yes". Only Mori's view changes.
 #[tauri::command]
 fn set_capture_override(app: AppHandle, state: State<'_, AppState>, id: String, mode: String) -> Result<(), String> {
+    state.persistent()?;
     let loc = state.locate(&id)?;
     if loc.is_dir || loc.is_link || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("Only files in the browsed folder can be corrected.".into());
@@ -1293,6 +1636,7 @@ fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) ->
         .get(&key)
         .cloned()
         .ok_or("That drive is no longer connected.")?;
+    state.temp.store(false, Ordering::SeqCst);
     state.drives.set(&key, &label, false);
     open_root(&app, &path)?;
     write_settings(&state, |s| s.root = Some(path.to_string_lossy().into_owned()))?;
@@ -1302,6 +1646,7 @@ fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) ->
 /// Allow (or stop) automatic previews for the current drive.
 #[tauri::command]
 fn set_drive_previews(app: AppHandle, state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    state.persistent()?;
     let root = state.root_canon().ok_or("No folder selected")?;
     let vol = privacy::volume_of(&root);
     let label = vol.mount.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1328,6 +1673,7 @@ fn set_read_only(state: State<'_, AppState>, on: bool) -> Result<(), String> {
 /// folder itself is not touched. Allowed in Read-only Mode.
 #[tauri::command]
 async fn set_folder_protected(app: AppHandle, id: String, protected: bool) -> Result<(), String> {
+    app.state::<AppState>().persistent()?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         if id.starts_with('x') || id.starts_with('y') {
@@ -1355,6 +1701,7 @@ async fn set_folder_protected(app: AppHandle, id: String, protected: bool) -> Re
 /// Only Mori's own records change; the folder itself is never touched.
 #[tauri::command]
 async fn set_folder_private(app: AppHandle, id: String, private: bool) -> Result<(), String> {
+    app.state::<AppState>().persistent()?;
     tauri::async_runtime::spawn_blocking(move || set_private(&app, &id, private))
         .await
         .map_err(|_| "The operation failed.".to_string())?
@@ -1908,7 +2255,8 @@ fn launch_similar(
             };
             let dismissed = similar::load_dismissed(&state.dismissed_file());
             let mut env = similar::Env {
-                cache_dir: Some(state.similar_dir()),
+                // A temporary session leaves no fingerprints behind either.
+                cache_dir: (!state.temp.load(Ordering::SeqCst)).then(|| state.similar_dir()),
                 decode: &decode,
                 capture: &mut capture,
                 registered: &mut registered,
@@ -2500,6 +2848,9 @@ fn main() {
                 safe_mode: AtomicBool::new(false),
                 decoded: AtomicU64::new(0),
                 connected: Mutex::new(HashMap::new()),
+                favorites: privacy::Store::load(data_dir_for_video.join("favorites.json")),
+                tags: tags::Store::load(data_dir_for_video.join("tags.json")),
+                temp: AtomicBool::new(false),
                 capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
                 capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
                 health: Mutex::new(None),
@@ -2537,6 +2888,7 @@ fn main() {
                 debug_similar_autorun(app.handle());
                 metascan::debug_autorun(app.handle());
                 health::debug_autorun(app.handle());
+                debug_org(app.handle());
                 debug_privacy(app.handle());
             }
             Ok(())
@@ -2592,6 +2944,15 @@ fn main() {
             set_drive_previews,
             set_capture_override,
             storage_report,
+            set_favorite,
+            tags_list,
+            tag_items,
+            tag_rename,
+            tag_delete,
+            open_temporary,
+            end_temporary,
+            forget_drive,
+            clear_session_data,
             empty_folders,
             trash_empty_folders,
             health::health_start,
@@ -2614,6 +2975,18 @@ fn main() {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    #[test]
+    fn forgetting_only_ever_removes_inside_mori_directories() {
+        let data = Path::new("/Users/x/Library/Application Support/app.mori.viewer");
+        let cache = Path::new("/Users/x/Library/Caches/app.mori.viewer");
+        assert!(super::inside_app_dirs(&data.join("index-v2/abc.json"), data, cache));
+        assert!(super::inside_app_dirs(&cache.join("thumbs/v1234"), data, cache));
+        assert!(!super::inside_app_dirs(data, data, cache), "never the directory itself");
+        assert!(!super::inside_app_dirs(Path::new("/Volumes/Drive/photo.jpg"), data, cache));
+        assert!(!super::inside_app_dirs(&data.join("../../../../Volumes/Drive"), data, cache));
+        assert!(!super::inside_app_dirs(Path::new("/x/y"), Path::new("/x"), cache), "a too-short base never qualifies");
+    }
+
     use super::*;
 
     #[test]

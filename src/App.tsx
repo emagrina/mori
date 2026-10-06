@@ -13,6 +13,8 @@ import {
   type Entry,
   type InitInfo,
   type KindFilter,
+  type TagInfo,
+  type ViewKind,
   type QueryResult,
   type Scope,
   type SortKey,
@@ -29,6 +31,7 @@ import { ModalFrame } from "./components/Modal";
 import { AnalysisCenter } from "./components/AnalysisCenter";
 import { HealthView } from "./components/HealthView";
 import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
+import { TagDialog, TagManager } from "./components/Organize";
 import { StorageView } from "./components/StorageView";
 import { Preview } from "./components/Preview";
 import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
@@ -56,6 +59,9 @@ const CAPTURE_FILTERS: { kind: KindFilter; label: string; icon: IconName }[] = [
 
 const filterIcon = (k: KindFilter) => [...FILTERS, ...CAPTURE_FILTERS].find((f) => f.kind === k)?.icon ?? "all";
 
+const viewTitle = (k: ViewKind, tags: TagInfo[]) =>
+  k === "favorites" ? "Favorites" : k.startsWith("tag:") ? tags.find((t) => `tag:${t.id}` === k)?.name ?? "Tag" : LIBRARY_TITLE[k as KindFilter];
+
 const LIBRARY_TITLE: Record<KindFilter, string> = {
   screenshot: "Screenshots",
   recording: "Screen Recordings",
@@ -80,7 +86,11 @@ type Dialog =
   | { kind: "trash"; entries: Entry[]; summary: TrashSummary }
   | { kind: "rename"; entry: Entry }
   | { kind: "private"; entry: Entry }
-  | { kind: "unprotect"; entry: Entry };
+  | { kind: "unprotect"; entry: Entry }
+  | { kind: "tags"; entries: Entry[] }
+  | { kind: "manageTags" }
+  | { kind: "forget" }
+  | { kind: "clearSession" };
 
 const EMPTY: QueryResult = { items: [], total: 0, truncated: false, crumbs: [] };
 
@@ -96,7 +106,8 @@ export default function App() {
   const [searchGlobal, setSearchGlobal] = useState(false);
   const [loc, setLoc] = useState<Location>({ scope: "folder", folder: "" });
   const [history, setHistory] = useState<Location[]>([]);
-  const [kind, setKind] = useState<KindFilter>("all");
+  const [kind, setKind] = useState<ViewKind>("all");
+  const [tags, setTags] = useState<TagInfo[]>([]);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [result, setResult] = useState<QueryResult>(EMPTY);
@@ -201,6 +212,7 @@ export default function App() {
     if (!status?.hasRoot) return;
     api.stats().then(setStats);
     api.subfolders("").then(setTopFolders);
+    api.tagsList().then(setTags, () => {});
   }, [indexVersion, status?.hasRoot, status?.rootName]);
 
   // --------------------------------------------------------------- query
@@ -361,6 +373,59 @@ export default function App() {
     }
   };
 
+  const setFavorite = async (targets: Entry[], on: boolean) => {
+    try {
+      await api.setFavorite(
+        targets.map((t) => t.id),
+        on,
+      );
+      flash(on ? `Added ${targets.length === 1 ? `“${targets[0].name}”` : plural(targets.length, "item")} to Favorites` : "Removed from Favorites", 2200);
+    } catch (e) {
+      flash(String(e), 4000);
+    }
+  };
+
+  const startTemporary = async () => {
+    const s = await api.openTemporary().catch((e) => (String(e) !== "cancelled" && flash(String(e), 4000), null));
+    if (s) rootChanged(s);
+  };
+
+  const endTemporary = async () => {
+    const s = await api.endTemporary().catch(() => null);
+    if (s) rootChanged(s);
+  };
+
+  const forgetDrive = async () => {
+    setDialog(null);
+    try {
+      const r = await api.forgetDrive();
+      try {
+        sessionStorage.clear();
+      } catch {
+        // nothing stored
+      }
+      resetThumbs();
+      flash(`Mori forgot “${r.drive}” (${plural(r.indexes, "index", "indexes")}, thumbnails and records). Nothing on the drive was changed.`, 6000);
+      setStatus(await api.status());
+    } catch (e) {
+      flash(String(e), 4000);
+    }
+  };
+
+  const clearSessionData = async () => {
+    setDialog(null);
+    await api.clearSessionData().catch(() => {});
+    try {
+      sessionStorage.clear();
+    } catch {
+      // nothing stored
+    }
+    setHistory([]);
+    setSearch("");
+    setAnalysisVersion((v) => v + 1);
+    flash("Session data cleared: analysis results and folders picked this session are forgotten", 3500);
+  };
+
   const toggleReadOnly = async () => {
     const next = !readOnly;
     try {
@@ -469,6 +534,14 @@ export default function App() {
         }
         return;
       }
+      if (!inInput && !previewId && !mod && !e.altKey && e.key === "f") {
+        const targets = selectionTargets().filter((t) => t.kind !== "link");
+        if (targets.length) {
+          e.preventDefault();
+          setFavorite(targets, !targets.every((t) => t.favorite));
+        }
+        return;
+      }
       if (mod && e.key.toLowerCase() === "f") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -529,14 +602,14 @@ export default function App() {
   const driveWide = !folderScope || (searching && searchGlobal);
   const recursiveView = folderScope && recursive;
   const searchPlaceholder = !folderScope
-    ? `Search ${LIBRARY_TITLE[kind].toLowerCase()} in ${status.rootName}…`
+    ? `Search ${viewTitle(kind, tags).toLowerCase()} in ${status.rootName}…`
     : searchGlobal
       ? `Search all of ${status.rootName}…`
       : recursive
         ? `Search in ${folderName} and subfolders…`
         : `Search in ${folderName}…`;
   const showLocation = recursiveView || searching || !folderScope;
-  const count = (k: KindFilter) => (stats ? (k === "all" ? stats.files : stats[k]) : undefined);
+  const count = (k: ViewKind) => (stats && !k.startsWith("tag:") && k !== "favorites" ? (k === "all" ? stats.files : stats[k as Exclude<KindFilter, "all">]) : undefined);
 
   const openPop = (kind: "sort" | "more") => (ev: React.MouseEvent) => {
     ev.stopPropagation();
@@ -549,7 +622,7 @@ export default function App() {
       resetThumbs();
       flash("Thumbnails and index cleared");
     });
-  const pageTitle = searching && driveWide ? `Results for “${debounced}”` : !folderScope ? LIBRARY_TITLE[kind] : folderName;
+  const pageTitle = searching && driveWide ? `Results for “${debounced}”` : !folderScope ? viewTitle(kind, tags) : folderName;
   const pageNote = searching && driveWide ? `in all of ${status.rootName}` : !folderScope ? `across ${status.rootName}` : searching ? `results for “${debounced}”` : "";
   const canGoBack = history.length > 0 || !!search || (loc.scope === "folder" && !!loc.folder);
   // Parent trail shown above the title (the current folder is the title itself).
@@ -603,6 +676,39 @@ export default function App() {
               <span className="count">{count(f.kind)?.toLocaleString()}</span>
             </button>
           ))}
+          <button
+            className={`side-item ${browsing && loc.scope === "library" && kind === "favorites" && !searching ? "on" : ""}`}
+            onClick={() => {
+              navigate({ scope: "library", folder: "" }, { keepKind: true });
+              setKind("favorites");
+            }}
+            title="Files and folders you marked as favorites"
+          >
+            <Icon name="star" />
+            <span>Favorites</span>
+          </button>
+          {tags.length > 0 && (
+            <div className="side-heading with-action">
+              Tags
+              <button className="icon-btn tiny" onClick={() => setDialog({ kind: "manageTags" })} title="Manage tags" aria-label="Manage tags">
+                <Icon name="more" size={12} />
+              </button>
+            </div>
+          )}
+          {tags.map((t) => (
+            <button
+              key={t.id}
+              className={`side-item ${browsing && loc.scope === "library" && kind === `tag:${t.id}` && !searching ? "on" : ""}`}
+              onClick={() => {
+                navigate({ scope: "library", folder: "" }, { keepKind: true });
+                setKind(`tag:${t.id}`);
+              }}
+            >
+              <Icon name="tag" />
+              <span className="truncate">{t.name}</span>
+              <span className="count">{t.count.toLocaleString()}</span>
+            </button>
+          ))}
           <button className={`side-heading as-button ${mode === "center" ? "on" : ""}`} onClick={() => setMode("center")} title="All analyses">
             Analyze
           </button>
@@ -644,6 +750,11 @@ export default function App() {
             }}
           />
         </nav>
+        {status.temporary && (
+          <button className="readonly-chip" onClick={endTemporary} title="Temporary session: no index, thumbnails or records are saved for this folder. Click to end it.">
+            <Icon name="clock" size={12} /> Temporary session · End
+          </button>
+        )}
         {readOnly && (
           <button className="readonly-chip" onClick={toggleReadOnly} title="Read-only Mode is on: Mori won't change any files. Click to turn it off.">
             <Icon name="shield" size={12} /> Read-only Mode
@@ -850,9 +961,9 @@ export default function App() {
           </div>
         ) : (
           <div className="empty">
-            <Icon name={filterIcon(kind)} size={34} stroke={1.3} />
+            <Icon name={kind === "favorites" ? "star" : kind.startsWith("tag:") ? "tag" : filterIcon(kind as KindFilter)} size={34} stroke={1.3} />
             <p>
-              No {LIBRARY_TITLE[kind].toLowerCase()} here{recursiveView ? " or in subfolders" : ""}.
+              No {viewTitle(kind, tags).toLowerCase()} here{recursiveView ? " or in subfolders" : ""}.
             </p>
           </div>
         )}
@@ -923,6 +1034,8 @@ export default function App() {
           onInfo={() => setInspectId(menu.entry.id)}
           onProtect={() => (menu.entry.protected ? setDialog({ kind: "unprotect", entry: menu.entry }) : setProtected(menu.entry, true))}
           onPreview={() => (menu.entry.kind === "folder" ? navigate({ scope: "folder", folder: menu.entry.id }) : setPreviewId(menu.entry.id))}
+          onFavorite={() => setFavorite(menu.targets, !menu.entry.favorite)}
+          onTags={() => setDialog({ kind: "tags", entries: menu.targets })}
           onCapture={async () => {
             const e = menu.entry;
             try {
@@ -1009,6 +1122,35 @@ export default function App() {
           >
             <Icon name="refresh" size={14} /> Clear Cache
           </button>
+          <div className="sep" />
+          <button
+            onClick={() => {
+              setPop(null);
+              startTemporary();
+            }}
+            title="Open a folder without saving an index, thumbnails or anything else about it"
+          >
+            <Icon name="clock" size={14} /> Browse Without Indexing…
+          </button>
+          <button
+            onClick={() => {
+              setPop(null);
+              setDialog({ kind: "clearSession" });
+            }}
+            title="Forget analysis results and folders picked in this session (files, caches and records are kept)"
+          >
+            <Icon name="close" size={14} /> Clear Session Data…
+          </button>
+          <button
+            disabled={status.temporary}
+            onClick={() => {
+              setPop(null);
+              setDialog({ kind: "forget" });
+            }}
+            title="Remove everything Mori stores about this drive (nothing on the drive is changed)"
+          >
+            <Icon name="drive" size={14} /> Forget This Drive…
+          </button>
         </div>
       )}
 
@@ -1031,6 +1173,73 @@ export default function App() {
             </button>
             <button className="btn primary" onClick={() => setProtected(dialog.entry, false)}>
               Remove Protection
+            </button>
+          </div>
+        </ModalFrame>
+      )}
+      {dialog?.kind === "tags" && (
+        <TagDialog
+          entries={dialog.entries.map((e) => items.find((x) => x.id === e.id) ?? e)}
+          tags={tags}
+          onClose={() => setDialog(null)}
+          onDone={(m) => {
+            flash(m, 2200);
+            api.tagsList().then(setTags);
+          }}
+        />
+      )}
+      {dialog?.kind === "manageTags" && (
+        <TagManager
+          tags={tags}
+          onClose={() => setDialog(null)}
+          onChanged={(m) => {
+            flash(m, 2200);
+            api.tagsList().then(setTags);
+            if (kind.startsWith("tag:") && !tags.some((t) => `tag:${t.id}` === kind)) setKind("all");
+          }}
+        />
+      )}
+      {dialog?.kind === "forget" && (
+        <ModalFrame onCancel={() => setDialog(null)}>
+          <div className="dialog-icon">
+            <Icon name="drive" size={20} />
+          </div>
+          <h2>Forget “{status.rootName}”?</h2>
+          <p>
+            Mori will remove everything it stores about this drive: its index, thumbnails, and its private, protected, favorite, tag and screenshot
+            records. Then the drive is closed.
+          </p>
+          <p className="dialog-note">
+            <strong>Nothing on the drive is deleted or changed.</strong> This only affects Mori's own data on this computer. Tag names themselves are
+            kept.
+          </p>
+          <div className="dialog-actions">
+            <button className="btn" onClick={() => setDialog(null)} autoFocus>
+              Cancel
+            </button>
+            <button className="btn primary" onClick={forgetDrive}>
+              Forget Drive
+            </button>
+          </div>
+        </ModalFrame>
+      )}
+      {dialog?.kind === "clearSession" && (
+        <ModalFrame onCancel={() => setDialog(null)}>
+          <h2>Clear session data?</h2>
+          <p>
+            Forgets what this session holds in memory: analysis results, folders picked for analysis, recent locations and search. Running analyses
+            are stopped.
+          </p>
+          <p className="dialog-note">
+            Not the same as Clear Cache (thumbnails and indexes), Forget This Drive (Mori's records about a drive) or deleting files — none of those
+            happen here.
+          </p>
+          <div className="dialog-actions">
+            <button className="btn" onClick={() => setDialog(null)} autoFocus>
+              Cancel
+            </button>
+            <button className="btn primary" onClick={clearSessionData}>
+              Clear Session Data
             </button>
           </div>
         </ModalFrame>
@@ -1171,6 +1380,8 @@ function ContextMenu({
   count,
   onPreview,
   onIsolate,
+  onFavorite,
+  onTags,
   onCapture,
   onCopy,
   onRename,
@@ -1187,6 +1398,8 @@ function ContextMenu({
   count: number;
   onPreview: () => void;
   onIsolate: () => void;
+  onFavorite: () => void;
+  onTags: () => void;
   onCapture: () => void;
   onCopy: () => void;
   onRename: () => void;
@@ -1201,13 +1414,20 @@ function ContextMenu({
     return (
       <div className="menu" style={{ left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 90) }} onContextMenu={(e) => e.preventDefault()}>
         <div className="menu-label">{plural(count, "item")} selected</div>
+        <button onClick={onFavorite}>
+          <Icon name="star" size={14} /> {entry.favorite ? "Remove from Favorites" : "Add to Favorites"}
+        </button>
+        <button onClick={onTags}>
+          <Icon name="tag" size={14} /> Tags…
+        </button>
+        <div className="sep" />
         <button className="danger" onClick={onTrash}>
           <Icon name="trash" size={14} /> Move {plural(count, "item")} to Trash
         </button>
       </div>
     );
   }
-  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 360) };
+  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.max(8, Math.min(y, window.innerHeight - 540)) };
   return (
     <div className="menu" style={style} onContextMenu={(e) => e.preventDefault()}>
       {entry.kind !== "link" && (
@@ -1240,6 +1460,18 @@ function ContextMenu({
           <Icon name={entry.kind === "video" ? "recording" : "screenshot"} size={14} />
           {entry.capture ? (entry.capture === 2 ? "Not a Screen Recording" : "Not a Screenshot") : entry.kind === "video" ? "Mark as Screen Recording" : "Mark as Screenshot"}
         </button>
+      )}
+      {entry.kind !== "link" && (
+        <>
+          <div className="sep" />
+          <button onClick={onFavorite}>
+            <Icon name="star" size={14} /> {entry.favorite ? "Remove from Favorites" : "Add to Favorites"}
+            <kbd className="menu-kbd">F</kbd>
+          </button>
+          <button onClick={onTags}>
+            <Icon name="tag" size={14} /> Tags…
+          </button>
+        </>
       )}
       <div className="sep" />
       <button onClick={onRename}>
@@ -1399,9 +1631,12 @@ interface SessionState {
   /** Only restored within the same app launch (i.e. after a UI reload). */
   launchId: number;
   loc: Location;
-  kind: KindFilter;
+  kind: ViewKind;
   search: string;
 }
+
+const validKind = (k: unknown): k is ViewKind =>
+  typeof k === "string" && ([...FILTERS, ...CAPTURE_FILTERS].some((f) => f.kind === k) || k === "favorites" || /^tag:\d{1,9}$/.test(k));
 
 function readSession(launchId: number): SessionState | null {
   try {
@@ -1409,7 +1644,7 @@ function readSession(launchId: number): SessionState | null {
     const v = raw ? (JSON.parse(raw) as SessionState) : null;
     if (!v || v.launchId !== launchId || typeof v.loc?.folder !== "string" || !["folder", "library"].includes(v.loc.scope)) return null;
     if (!/^[0-9a-f]{0,16}$/.test(v.loc.folder) || typeof v.search !== "string") return null;
-    return { launchId, loc: { scope: v.loc.scope, folder: v.loc.folder }, kind: FILTERS.some((f) => f.kind === v.kind) ? v.kind : "all", search: v.search.slice(0, 256) };
+    return { launchId, loc: { scope: v.loc.scope, folder: v.loc.folder }, kind: validKind(v.kind) ? v.kind : "all", search: v.search.slice(0, 256) };
   } catch {
     return null;
   }

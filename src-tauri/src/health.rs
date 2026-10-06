@@ -91,7 +91,7 @@ fn check(state: &AppState, root: &std::path::Path, job: &Job) -> Option<(Categor
                 };
             }
             // A thumbnail already made (or failed) for this exact version answers it.
-            let stem = thumbs::stem(&state.thumb_dir, &canon, &meta, crate::protocol::THUMB_SIZE);
+            let stem = thumbs::stem(&state.thumb_dir_for(&canon), &canon, &meta, crate::protocol::THUMB_SIZE);
             if thumbs::cached(&stem).is_some() {
                 return None;
             }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-temporary"
+description = "Enables the open_temporary command without any pre-configured scope."
+commands.allow = ["open_temporary"]
+
+[[permission]]
+identifier = "deny-open-temporary"
+description = "Denies the open_temporary command without any pre-configured scope."
+commands.deny = ["open_temporary"]
