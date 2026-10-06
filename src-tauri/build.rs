@@ -49,6 +49,7 @@ const COMMANDS: &[&str] = &[
     "archive_listing",
     "open_drive_safely",
     "set_drive_previews",
+    "set_capture_override",
     "file_metadata",
     "meta_start",
     "meta_pause",

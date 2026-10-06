@@ -56,6 +56,7 @@
     "allow-archive-listing",
     "allow-open-drive-safely",
     "allow-set-drive-previews",
+    "allow-set-capture-override",
     "allow-file-metadata",
     "allow-meta-start",
     "allow-meta-pause",

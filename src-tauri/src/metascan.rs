@@ -489,6 +489,69 @@ pub fn meta_places(state: State<'_, AppState>) -> Option<Places> {
     Some(p)
 }
 
+// ---------------------------------------------------------- capture times
+
+/// "2024:03:01 10:00:01" (EXIF) or "2024-03-01 10:00:01" → ms on a naive
+/// clock (only differences between shots of one camera are used).
+pub fn parse_exif_time(s: &str) -> Option<i64> {
+    let b = s.trim().as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| std::str::from_utf8(&b[r]).ok()?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, se) = (num(0..4)?, num(5..7)?, num(8..10)?, num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    // Days from civil (proleptic Gregorian).
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + h) * 60 + mi) * 60_000 + se * 1000)
+}
+
+/// Capture time (with sub-seconds) and camera of a parsed file.
+pub fn capture_of(m: &Meta) -> Option<(i64, String)> {
+    let get = |n: &str| m.fields.iter().find(|f| f.group == "EXIF" && f.name == n).map(|f| f.value.as_str());
+    let base = parse_exif_time(get("DateTimeOriginal").or(get("DateTime"))?)?;
+    let sub = get("SubSecTimeOriginal").or(get("SubSecTime")).and_then(|s| {
+        let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).take(3).collect();
+        let n: i64 = digits.parse().ok()?;
+        Some(n * 10i64.pow(3 - digits.len() as u32))
+    });
+    let camera = format!("{} {}", get("Make").unwrap_or(""), get("Model").unwrap_or("")).trim().to_owned();
+    Some((base + sub.unwrap_or(0), camera))
+}
+
+/// Capture times of some files (e.g. the photos of Similar Media groups),
+/// read by the worker. `files`: (id, root, record).
+pub fn capture_times(files: &[(usize, PathBuf, FileRec)]) -> HashMap<usize, (i64, String)> {
+    let mut out = HashMap::new();
+    for chunk in files.chunks(BATCH_FILES) {
+        let mut ids = Vec::new();
+        let mut inputs = Vec::new();
+        for (id, root, f) in chunk {
+            let Ok(mut file) = dupes::open_unchanged(root, f) else { continue };
+            if let Some(v) = input_for(&mut file, f.size, 1024 * 1024) {
+                ids.push(*id);
+                inputs.push(v);
+            }
+        }
+        if inputs.is_empty() {
+            continue;
+        }
+        for (id, m) in ids.into_iter().zip(run_batch(inputs)) {
+            if let Some(t) = m.as_ref().and_then(capture_of) {
+                out.insert(id, t);
+            }
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------- sanitized copies
 
 #[derive(Serialize)]
@@ -649,6 +712,32 @@ pub fn debug_autorun(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_times_from_exif() {
+        assert_eq!(
+            parse_exif_time("2024:03:01 10:00:01").unwrap() - parse_exif_time("2024:03:01 10:00:00").unwrap(),
+            1000
+        );
+        assert_eq!(
+            parse_exif_time("2024-03-02 00:00:00").unwrap() - parse_exif_time("2024:03:01 23:59:59").unwrap(),
+            1000
+        );
+        assert!(parse_exif_time("0000:00:00 00:00:00").is_none() && parse_exif_time("garbage").is_none());
+        let f = |n: &str, v: &str| Field { group: "EXIF".into(), name: n.into(), value: v.into(), sensitive: None };
+        let m = Meta {
+            fields: vec![
+                f("DateTimeOriginal", "2024:03:01 10:00:01"),
+                f("SubSecTimeOriginal", "25"),
+                f("Make", "Apple"),
+                f("Model", "iPhone 15"),
+            ],
+            ..Default::default()
+        };
+        let (t, cam) = capture_of(&m).unwrap();
+        assert_eq!(t - parse_exif_time("2024:03:01 10:00:01").unwrap(), 250);
+        assert_eq!(cam, "Apple iPhone 15");
+    }
 
     #[test]
     fn copy_names_never_lose_the_extension() {

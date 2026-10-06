@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
-export type KindFilter = "all" | Exclude<Kind, "folder" | "link">;
+export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
 export type ViewMode = "gallery" | "grid" | "list";
 export type SortKey = "name" | "modified" | "created" | "size" | "type";
 export type Scope = "folder" | "library";
@@ -30,6 +30,8 @@ export interface Entry {
   link?: string;
   /** The name alone shows a high-attention pattern (see the inspector). */
   flagged?: boolean;
+  /** 1 = screenshot, 2 = screen recording (Mori's guess, correctable). */
+  capture?: number;
 }
 
 export interface Status {
@@ -365,6 +367,8 @@ export interface DupGroup {
   unitSize: number;
   recoverable: number;
   suggested: number;
+  /** Why the suggested copy was picked. */
+  reasons: string[];
   members: DupMember[];
 }
 
@@ -436,6 +440,10 @@ export interface SimGroup {
   video: boolean;
   similarity: number;
   recoverable: number;
+  /** Why member 0 is preferred. */
+  reasons: string[];
+  /** Photos taken in quick succession by one camera. */
+  burst: { frames: number; spanMs: number } | null;
   /** Member 0 is Mori's suggested copy to keep. */
   members: SimMember[];
 }
@@ -514,6 +522,8 @@ export const api = {
   openDriveSafely: (key: string) => invoke<Status>("open_drive_safely", { key }),
   /** "Generate previews" for the current drive (or back to metadata only). */
   setDrivePreviews: (on: boolean) => invoke<void>("set_drive_previews", { on }),
+  /** Correct the screenshot / screen-recording guess: "auto", "not" or "yes". Only Mori's view changes. */
+  setCaptureOverride: (id: string, mode: "auto" | "not" | "yes") => invoke<void>("set_capture_override", { id, mode }),
   /** Read by the sandboxed worker. */
   fileMetadata: (id: string) => invoke<FileMeta>("file_metadata", { id }),
   metaStart: (locations: string[], recursive: boolean) => invoke<void>("meta_start", { locations, recursive }),
