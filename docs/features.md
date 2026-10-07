@@ -98,7 +98,10 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 - **Favorites** (files and folders): *Add to Favorites* in the menu, or press `F`. They're listed under Favorites in the sidebar.
 - **Tags**: *Tags…* in the menu, for one item or a selection. Items can have several tags.
   - Every tag appears in the sidebar with its count.
-  - **Manage Tags** lets you search, rename and delete them. Deleting a tag never touches the tagged files.
+  - **Right-click a tag in the sidebar** (or press the context-menu key / Shift+F10 on it) for **Rename Tag…** and **Delete Tag…**; right-clicking never opens the tag. **Manage Tags** also lets you search, rename and delete them.
+  - **Renaming** keeps the same tag, so every tagged item keeps it under the new name, and the count stays. Names are trimmed; an empty name, more than 60 characters, or the name of another tag (in any case) is refused. Tags are never merged. Changing only the case is fine.
+  - **Deleting a tag never deletes or changes a file.** It removes the tag and its associations only; the confirmation says how many items lose it ("This removes the tag from 127 items. No files are deleted or changed."). If that tag was open, Mori goes back to the drive.
+  - Counts and the open tag view update immediately, and the changes are kept after restarting Mori. Not available in temporary sessions (Mori keeps no records there).
   - Favorites and tags live in Mori's app data only. Files and their metadata are never modified.
   - Like private folders, they are stored per volume, so they survive remounts.
 - **Temporary Session…** (More menu) opens a folder without keeping anything; see [Private Inspection and Temporary Session](#private-inspection-and-temporary-session).

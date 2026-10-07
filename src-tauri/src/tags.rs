@@ -279,4 +279,63 @@ mod tests {
         assert_eq!(s.list().len(), 1, "tag names survive forgetting a drive");
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// Renaming keeps the tag (same id, so every association); deleting
+    /// removes the tag and its associations only. Both survive a restart.
+    #[test]
+    fn rename_and_delete_keep_files_and_identity() {
+        let dir = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-tags-rd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let files: Vec<PathBuf> = (0..84).map(|i| dir.join(format!("{i}.jpg"))).collect();
+        for f in &files {
+            fs::write(f, b"photo").unwrap();
+        }
+        let file = dir.join("tags.json");
+        let s = Store::load(file.clone());
+        let important = s.ensure("Important").unwrap();
+        let other = s.ensure("Other").unwrap();
+        let empty = s.ensure("Empty").unwrap();
+        s.assign(&files, important, true).unwrap();
+        s.assign(&files[..3], other, true).unwrap();
+        let tagged = |s: &Store, id: u32| s.for_root(&dir).values().filter(|t| t.contains(&id)).count();
+
+        // Populated rename: same id, all 84 associations, after a restart too.
+        s.rename(important, "  Archive  ").unwrap();
+        let s = Store::load(file.clone());
+        let t = s.list().into_iter().find(|t| t.id == important).unwrap();
+        assert_eq!(t.name, "Archive", "trimmed, same id");
+        assert_eq!(tagged(&s, important), 84);
+        assert!(s.list().iter().all(|t| t.name != "Important"), "no stale old name");
+        // Empty, whitespace-only, too long, duplicate (any case): refused, nothing changes.
+        for bad in ["", "   ", &"x".repeat(MAX_NAME + 1), "other", "OTHER", " Other "] {
+            assert!(s.rename(important, bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(s.list().len(), 3, "no tag was created or merged");
+        assert_eq!(tagged(&s, important), 84);
+        assert_eq!(tagged(&s, other), 3);
+        // Case-only rename of the same tag, and Unicode.
+        s.rename(important, "ARCHIVE").unwrap();
+        s.rename(other, "Viaje ✈️ 日本").unwrap();
+        s.rename(empty, "Vacío").unwrap();
+        let s = Store::load(file.clone());
+        let names: Vec<String> = s.list().into_iter().map(|t| t.name).collect();
+        assert!(
+            names.contains(&"ARCHIVE".into())
+                && names.contains(&"Viaje ✈️ 日本".into())
+                && names.contains(&"Vacío".into())
+        );
+        assert_eq!(tagged(&s, other), 3);
+        assert!(s.rename(9999, "Ghost").is_err(), "unknown tag");
+
+        // Delete an empty tag, then a populated one: associations go, files stay.
+        s.delete(empty).unwrap();
+        s.delete(important).unwrap();
+        let s = Store::load(file.clone());
+        assert!(s.list().iter().all(|t| t.id != empty && t.id != important));
+        assert_eq!(tagged(&s, important), 0);
+        assert_eq!(tagged(&s, other), 3, "other tags keep their items");
+        assert!(files.iter().all(|f| fs::read(f).unwrap() == b"photo"), "no file was deleted or changed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

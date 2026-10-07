@@ -2960,7 +2960,27 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
             has("Other/d2.jpg") && !has("Album/d2.jpg")
         );
 
-        // 11. Quick Cleanup sessions: saved in normal mode, never in a temporary session.
+        // 11. Tags: rename keeps the items (same id), delete removes only the tag; counts follow at once.
+        let st = || app.state::<AppState>();
+        let three: Vec<String> = ["Other/d1.jpg", "Other/d2.jpg", "Other/d3.jpg"].iter().map(|r| id(r)).collect();
+        let tag = tag_items(app.clone(), st(), three.clone(), "Test".into(), true).unwrap();
+        let count = |name: &str| tags_list(st()).into_iter().find(|t| t.name == name).map(|t| t.count);
+        let before = count("Test");
+        tag_rename(app.clone(), st(), tag, "Personal".into()).unwrap();
+        let renamed = (count("Test"), count("Personal"));
+        let dup = tag_items(app.clone(), st(), vec![id("Album/a.jpg")], "Other tag".into(), true).unwrap();
+        let refused = tag_rename(app.clone(), st(), dup, "personal".into()).is_err();
+        let item_has = state.index().get(&three[0]).is_some_and(|e| e.tags.contains(&tag));
+        tag_delete(app.clone(), st(), tag).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer tags: before={before:?} renamed={renamed:?} dup-refused={refused} item-kept-tag={item_has} after-delete={:?} item-untagged={} files-kept={}",
+            count("Personal"),
+            state.index().get(&three[0]).is_some_and(|e| !e.tags.contains(&tag)),
+            ["d1", "d2", "d3"].iter().all(|n| read(&format!("Other/{n}.jpg")) == *n)
+        );
+        tag_delete(app.clone(), st(), dup).unwrap();
+
+        // 12. Quick Cleanup sessions: saved in normal mode, never in a temporary session.
         let session = cleanup::Session {
             folder: id("Album"),
             options: cleanup::Options { recursive: false, kind: "all".into(), order: "browser".into() },
@@ -2985,7 +3005,7 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
         );
         let _ = end_temporary(app.clone(), app.state::<AppState>());
 
-        // 12. Private Inspection is read-only: a drop (or any move) is refused, nothing changes.
+        // 13. Private Inspection is read-only: a drop (or any move) is refused, nothing changes.
         begin_session(&state, true);
         open_root(&app, &dir).unwrap();
         settle();
