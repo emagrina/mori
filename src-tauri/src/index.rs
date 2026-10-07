@@ -813,6 +813,8 @@ pub struct Stats {
     pub links: usize,
     pub screenshot: usize,
     pub recording: usize,
+    /// Favorite files and folders (outside private folders).
+    pub favorites: usize,
     pub bytes: u64,
 }
 
@@ -822,6 +824,7 @@ pub fn stats(idx: &Index) -> Stats {
     let mut s = Stats {
         files: idx.files.iter().filter(visible).count(),
         folders: idx.dirs.iter().filter(visible).count(),
+        favorites: idx.files.iter().chain(idx.dirs.iter()).filter(visible).filter(|e| e.favorite).count(),
         ..Default::default()
     };
     for e in idx.files.iter().filter(visible) {
@@ -1119,9 +1122,17 @@ mod tests {
         assert_eq!(q(&idx, "tag:7"), ["Trips/Rome/a.jpg", "b.jpg"]);
         assert_eq!(q(&idx, "tag:9"), ["b.jpg"]);
         assert!(q(&idx, "tag:1").is_empty());
-        // Private folders stay boundaries for these views too.
+        // The sidebar's Favorites count: files and folders.
+        assert_eq!(stats(&idx).favorites, 2);
+        // Private folders stay boundaries for these views (and the count) too.
         idx.apply_boundaries(&["Trips".to_string()].into());
         assert_eq!(q(&idx, "tag:7"), ["b.jpg"]);
+        assert_eq!(q(&idx, "favorites"), ["b.jpg"]);
+        assert_eq!(stats(&idx).favorites, 1);
+        // Removing a favorite updates the view and the count.
+        idx.apply_org(&HashSet::new(), &tags);
+        assert!(q(&idx, "favorites").is_empty());
+        assert_eq!(stats(&idx).favorites, 0);
     }
 
     #[test]

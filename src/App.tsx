@@ -26,7 +26,8 @@ import {
   type TrashResult,
 } from "./api";
 import { click as clickSel, EMPTY_SELECTION, focusIndex, moveTo, neighborAfterRemoval, reconcile as reconcileSel, selectAll, selectedItems, selectOnly as only, type Selection } from "./selection";
-import { forgetRecentDestinations, TransferDialog } from "./components/Transfer";
+import { forgetRecentDestinations, TransferDialog, type Dest } from "./components/Transfer";
+import { beginDrag, canDropInto, dragged, dragSource, DRAG_TYPE, edgeScroll, endDrag, SPRING_MS } from "./dnd";
 import { Analyzer } from "./components/Analyzer";
 import { FileView } from "./components/FileView";
 import { Inspector } from "./components/Inspector";
@@ -100,7 +101,7 @@ type Dialog =
   | { kind: "forget" }
   | { kind: "clearSession" }
   | { kind: "op"; op: "trash" | "delete"; entries: Entry[] }
-  | { kind: "transfer"; op: TransferOp; entries: Entry[] }
+  | { kind: "transfer"; op: TransferOp; entries: Entry[]; dest?: Dest }
   | { kind: "history" }
   | { kind: "checksum"; entry: Entry }
   | { kind: "compare"; a: Entry; b: Entry }
@@ -458,6 +459,32 @@ export default function App() {
     else if (loc.scope === "folder") setCleanup({ id: loc.folder, name: crumbs.length ? crumbs[crumbs.length - 1].name : status?.rootName ?? "" });
   };
 
+  // ------------------------------------------------- drag and drop
+
+  /** A drag starts on `entry`: the selection if it's part of it, else just it (and it becomes the selection). */
+  const dragFrom = (entry: Entry): Entry[] => {
+    const { items: what, reselect } = dragSource(entry, selectedItems(sel, items));
+    if (reselect) selectOnly(entry.id);
+    return what;
+  };
+
+  const canDrop = (target: { id: string; path: string; kind?: string; guarded?: boolean }) =>
+    canDropInto(target, dragged() ?? [], { readOnly: !canModify });
+
+  /** Dropped on a folder: the same plan → (conflicts) → Move as "Move to…", run by the backend. */
+  const dropInto = (target: { id: string; name: string; path: string }, copy: boolean) => {
+    const what = dragged() as Entry[] | null;
+    endDrag();
+    if (!what?.length) return;
+    setMenu(null);
+    setDialog({
+      kind: "transfer",
+      op: copy ? "copy" : "move",
+      entries: what,
+      dest: { key: target.id, label: target.name, where: target.path ? `${status?.rootName ?? ""}/${target.path}` : status?.rootName ?? "" },
+    });
+  };
+
   const setPrivate = async (entry: Entry, isPrivate: boolean) => {
     setDialog(null);
     try {
@@ -488,6 +515,9 @@ export default function App() {
         targets.map((t) => t.id),
         on,
       );
+      // Show it right away; the index refresh that follows confirms it (and updates Favorites and its count).
+      const ids = new Set(targets.map((t) => t.id));
+      setResult((res) => ({ ...res, items: res.items.map((e) => (ids.has(e.id) ? { ...e, favorite: on } : e)) }));
       flash(on ? `Added ${targets.length === 1 ? `“${targets[0].name}”` : plural(targets.length, "item")} to Favorites` : "Removed from Favorites", 2200);
     } catch (e) {
       flash(String(e), 4000);
@@ -898,11 +928,12 @@ export default function App() {
             <span data-tauri-drag-region>Mori</span>
           </div>
         </div>
-        <nav>
+        <nav onDragOver={(e) => dragged() && edgeScroll(e.currentTarget, e.clientY)}>
           <button
             className={`side-item ${browsing && loc.scope === "folder" && !loc.folder && !searching ? "on" : ""}`}
             onClick={() => navigate({ scope: "folder", folder: "" })}
             title={status.rootName}
+            {...dropTarget({ id: "", name: status.rootName, path: "", kind: "folder" }, canDrop, dropInto)}
           >
             <Icon name="drive" />
             <span className="truncate">{status.rootName}</span>
@@ -947,6 +978,7 @@ export default function App() {
           >
             <Icon name="star" />
             <span>Favorites</span>
+            {(stats?.favorites ?? 0) > 0 && <span className="count">{stats!.favorites.toLocaleString()}</span>}
           </button>
           {tags.length > 0 && (
             <div className="side-heading with-action">
@@ -1003,6 +1035,8 @@ export default function App() {
             activeId={browsing && folderScope && !searching ? loc.folder : null}
             ancestors={folderScope ? crumbs.slice(0, -1).map((c) => c.id) : []}
             version={indexVersion}
+            canDrop={canDrop}
+            onDrop={(t, copy) => dropInto(t, copy)}
             onOpen={(id) => navigate({ scope: "folder", folder: id })}
             onContextMenu={(e, entry) => {
               e.preventDefault();
@@ -1231,6 +1265,10 @@ export default function App() {
               setPreviewId(e.id);
             }}
             onClickItem={clickItem}
+            onFavorite={status.temporary ? undefined : (i) => items[i] && items[i].kind !== "link" && setFavorite([items[i]], !items[i].favorite)}
+            onDragStartItem={(i) => (items[i] ? dragFrom(items[i]) : [])}
+            canDrop={canDrop}
+            onDrop={(t, copy) => dropInto(t, copy)}
             onContextMenu={(e, i) => {
               const entry = items[i];
               let targets = [entry];
@@ -1669,6 +1707,7 @@ export default function App() {
           entries={dialog.entries}
           rootName={status.rootName}
           current={loc.scope === "folder" ? loc.folder : ""}
+          dest={dialog.dest}
           onClose={() => setDialog(null)}
           onDone={(r, plan) => transferred(dialog.op, dialog.entries, r, plan)}
         />
@@ -1715,6 +1754,51 @@ export default function App() {
 }
 
 /**
+ * Drag-and-drop target props for a folder outside the file grid (sidebar
+ * rows, the drive). Sets `data-drop="ok" | "no"` while a Mori drag is over
+ * it; the drop itself goes through the backend Move.
+ */
+function dropTarget<T extends { id: string; name: string; path: string; kind?: string; guarded?: boolean }>(
+  target: T,
+  canDrop: (t: T) => { ok: true } | { ok: false; reason: string },
+  onDrop: (t: T, copy: boolean) => void,
+  onHover?: () => void,
+  onLeave?: (id: string) => void,
+) {
+  const mark = (el: HTMLElement, v: "ok" | "no" | null) => {
+    if (v) el.dataset.drop = v;
+    else delete el.dataset.drop;
+  };
+  return {
+    onDragOver: (e: React.DragEvent<HTMLElement>) => {
+      if (!dragged()) return;
+      const v = canDrop(target);
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = v.ok ? (e.altKey ? "copy" : "move") : "none";
+      mark(e.currentTarget, v.ok ? "ok" : "no");
+      e.currentTarget.title = v.ok ? `Move into “${target.name}”` : v.reason;
+      onHover?.();
+    },
+    onDragLeave: (e: React.DragEvent<HTMLElement>) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      mark(e.currentTarget, null);
+      e.currentTarget.title = target.name;
+      onLeave?.(target.id);
+    },
+    onDrop: (e: React.DragEvent<HTMLElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      mark(e.currentTarget, null);
+      e.currentTarget.title = target.name;
+      onLeave?.(target.id);
+      if (dragged() && canDrop(target).ok) onDrop(target, e.altKey);
+      endDrag();
+    },
+  };
+}
+
+/**
  * Expandable folder tree for the sidebar. Children come from the existing
  * index query (`subfolders`) and are loaded only when a node is expanded.
  */
@@ -1723,6 +1807,8 @@ function FolderTree({
   activeId,
   ancestors,
   version,
+  canDrop,
+  onDrop,
   onOpen,
   onContextMenu,
 }: {
@@ -1730,6 +1816,8 @@ function FolderTree({
   activeId: string | null;
   ancestors: string[];
   version: number;
+  canDrop: (target: Entry) => { ok: true } | { ok: false; reason: string };
+  onDrop: (target: Entry, copy: boolean) => void;
   onOpen: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, entry: Entry) => void;
 }) {
@@ -1770,6 +1858,26 @@ function FolderTree({
       return next;
     });
 
+  // Hovering a dragged item over a collapsed folder expands it after a moment
+  // (never while the pointer merely passes over).
+  const spring = useRef<{ id: string; timer: number } | null>(null);
+  const stopSpring = () => {
+    if (spring.current) window.clearTimeout(spring.current.timer);
+    spring.current = null;
+  };
+  useEffect(() => () => stopSpring(), []);
+  const hoverExpand = (f: Entry) => {
+    if (expanded.has(f.id) || spring.current?.id === f.id) return;
+    stopSpring();
+    spring.current = {
+      id: f.id,
+      timer: window.setTimeout(() => {
+        spring.current = null;
+        setExpanded((prev) => new Set(prev).add(f.id));
+      }, SPRING_MS),
+    };
+  };
+
   const rows: React.ReactNode[] = [];
   const INDENT = 14;
   const walk = (nodes: Entry[], depth: number) => {
@@ -1783,6 +1891,15 @@ function FolderTree({
           className={`tree-row ${activeId === f.id ? "on" : ""}`}
           style={{ paddingLeft: depth * INDENT }}
           onContextMenu={(e) => onContextMenu(e, f)}
+          {...dropTarget(f, canDrop, onDrop, () => !leaf && hoverExpand(f), (id) => spring.current?.id === id && stopSpring())}
+          draggable
+          onDragStart={(e) => {
+            // A sidebar folder can be dragged too (onto another folder).
+            beginDrag([f]);
+            e.dataTransfer.effectAllowed = "copyMove";
+            e.dataTransfer.setData(DRAG_TYPE, "1");
+          }}
+          onDragEnd={() => (endDrag(), stopSpring())}
         >
           {Array.from({ length: depth }, (_, k) => (
             <span key={k} className="guide" style={{ left: 11 + k * INDENT }} />

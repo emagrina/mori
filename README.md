@@ -52,7 +52,7 @@ It has no account, no cloud, no telemetry and no network functionality.
   - **Safe Inspection Mode** indexes new drives without decoding anything.
   - **Private Inspection** combines read-only, temporary and safe inspection in one step.
 - **Organize.** Tags and favorites, stored in Mori's own data and never in your files.
-- **Manage files like a file browser.** Click to select, Cmd/Ctrl/Shift for multi-selection, double-click to open; **Move to…** and **Copy to…** with a conflict plan (Keep Both / Replace into the Trash / Skip, never a silent overwrite); actions from the preview too.
+- **Manage files like a file browser.** Click to select, Cmd/Ctrl/Shift for multi-selection, double-click to open; **Move to…** and **Copy to…** with a conflict plan (Keep Both / Replace into the Trash / Skip, never a silent overwrite); drag and drop onto folders in the grid, list and sidebar; actions from the preview too.
 - **Quick Cleanup.** Go through a folder one file at a time with the keyboard: Keep or Mark for Trash. Marking only stages a decision; files move to the system Trash after you review them and confirm once.
 - **Change files carefully.**
   - Rename, Move to Trash, and Undo.

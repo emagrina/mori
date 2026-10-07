@@ -53,7 +53,7 @@ const PATHS = {
 
 export type IconName = keyof typeof PATHS;
 
-export function Icon({ name, size = 16, className, stroke = 1.6 }: { name: IconName; size?: number; className?: string; stroke?: number }) {
+export function Icon({ name, size = 16, className, stroke = 1.6, fill = false }: { name: IconName; size?: number; className?: string; stroke?: number; /** Solid shape (e.g. a set Favorite). */ fill?: boolean }) {
   // The dotted "more" glyph needs a heavier stroke to read as dots.
   const width = name === "more" ? 2.6 : stroke;
   return (
@@ -62,7 +62,7 @@ export function Icon({ name, size = 16, className, stroke = 1.6 }: { name: IconN
       width={size}
       height={size}
       viewBox="0 0 24 24"
-      fill="none"
+      fill={fill ? "currentColor" : "none"}
       stroke="currentColor"
       strokeWidth={width}
       strokeLinecap="round"

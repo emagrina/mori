@@ -2,13 +2,14 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { startLivenessPing } from "./api";
+import { installDragGuards } from "./dnd";
 import "./styles.css";
 
 // Mori is a viewer, not a web page: suppress the webview's default context menu
-// (our own menu is shown on files) and stray file drops navigating the window.
+// (our own menu is shown on files).
 window.addEventListener("contextmenu", (e) => e.preventDefault());
-window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("drop", (e) => e.preventDefault());
+// Drags: only Mori's own folders accept drops; nothing from outside is opened.
+installDragGuards();
 
 // Development only (removed from production builds): Ctrl+Alt+Shift+H freezes
 // the page for 60 s, to exercise Rust's hung-media-engine watchdog.
