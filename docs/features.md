@@ -140,7 +140,9 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 Shortcuts never fire while you type in a text field. *Keyboard Shortcuts* in the palette lists them all.
 
 - **Slideshow**: the play button in the preview steps through the photos every 4 seconds. Any key or click stops it.
-- **Filmstrip** under a playing video: eight frames along the video, re-encoded by the worker. Click one to jump there.
+- **Filmstrip** under a playing video: eight frames along the video, re-encoded by the worker. Click one to jump to the moment it shows.
+  - The strip has one fixed height and each frame keeps the video's **displayed** shape: a phone video (e.g. 352×640) gets narrow portrait frames, a 16:9 video wide ones. Whole frames are shown, never cropped; extreme ratios are letterboxed on black. A strip wider than the window scrolls sideways.
+  - Rotated phone videos (stored landscape with 90°/270° rotation metadata) count as portrait: frames are taken from what the player displays, and the video facts report the displayed size.
 - **Hover scrub**: moving the pointer across a video thumbnail shows those frames.
   - Only frames already sampled are used.
   - Lingering on a video asks for them in the background, through the thumbnail queue and never during a preview.

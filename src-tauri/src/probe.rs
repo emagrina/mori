@@ -121,12 +121,34 @@ pub fn mp4_moov(moov: &[u8]) -> Result<Probe, ()> {
                 // Visual sample entry: width/height at offsets 24/26 of the entry payload.
                 p.width = entry.get(24..26).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]) as u32);
                 p.height = entry.get(26..28).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]) as u32);
+                // Phone videos are often stored landscape with a 90°/270° rotation in the
+                // track header: report the size as displayed, like the player shows it.
+                if child(&t, b"tkhd").is_some_and(quarter_turn) {
+                    std::mem::swap(&mut p.width, &mut p.height);
+                }
             }
             b"soun" if p.audio.is_none() => p.audio = Some(clean_codec(codec)),
             _ => {}
         }
     }
     Ok(p)
+}
+
+/// The track header's transformation matrix rotates by 90° or 270° (so the
+/// displayed width and height are the stored ones swapped). The matrix is
+/// `[a b u; c d v; x y w]` in 16.16 fixed point; a quarter turn has `a = d = 0`
+/// and `b`, `c` of opposite signs.
+fn quarter_turn(tkhd: &[u8]) -> bool {
+    let at = match tkhd.first() {
+        Some(1) => 52,
+        Some(0) => 40,
+        _ => return false,
+    };
+    let m = |i: usize| be32(tkhd, at + i * 4).map(|v| v as i32);
+    match (m(0), m(1), m(3), m(4)) {
+        (Some(0), Some(b), Some(c), Some(0)) => b != 0 && c != 0 && (b > 0) != (c > 0),
+        _ => false,
+    }
 }
 
 // --------------------------------------------------------------------- WebM
@@ -302,6 +324,20 @@ mod tests {
     }
 
     fn moov(codec: &[u8; 4], handler: &[u8; 4]) -> Vec<u8> {
+        moov_rotated(codec, handler, None)
+    }
+
+    /// A track header (version 0) with the given matrix entries a, b, c, d (16.16).
+    fn tkhd(abcd: [i32; 4]) -> Vec<u8> {
+        let mut t = vec![0u8; 84];
+        for (i, v) in [(0usize, abcd[0]), (1, abcd[1]), (3, abcd[2]), (4, abcd[3])] {
+            t[40 + i * 4..44 + i * 4].copy_from_slice(&v.to_be_bytes());
+        }
+        t[72..76].copy_from_slice(&0x4000_0000i32.to_be_bytes()); // w = 1.0 (2.30)
+        t
+    }
+
+    fn moov_rotated(codec: &[u8; 4], handler: &[u8; 4], matrix: Option<[i32; 4]>) -> Vec<u8> {
         let mut entry = vec![0u8; 78];
         entry[24..26].copy_from_slice(&1920u16.to_be_bytes());
         entry[26..28].copy_from_slice(&1080u16.to_be_bytes());
@@ -316,7 +352,28 @@ mod tests {
         let mut mvhd = vec![0u8; 100];
         mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
         mvhd[16..20].copy_from_slice(&4500u32.to_be_bytes());
-        [bx(b"mvhd", &mvhd), bx(b"trak", &mdia)].concat()
+        let trak = match matrix {
+            Some(m) => [bx(b"tkhd", &tkhd(m)), bx(b"mdia", &mdia[8..])].concat(),
+            None => mdia,
+        };
+        [bx(b"mvhd", &mvhd), bx(b"trak", &trak)].concat()
+    }
+
+    #[test]
+    fn rotated_phone_videos_report_their_displayed_size() {
+        const ONE: i32 = 0x0001_0000;
+        let dims = |m: Option<[i32; 4]>| {
+            let p = mp4_moov(&moov_rotated(b"avc1", b"vide", m)).unwrap();
+            (p.width, p.height)
+        };
+        assert_eq!(dims(None), (1920, 1080));
+        assert_eq!(dims(Some([ONE, 0, 0, ONE])), (1920, 1080), "identity");
+        assert_eq!(dims(Some([0, ONE, -ONE, 0])), (1080, 1920), "90°");
+        assert_eq!(dims(Some([0, -ONE, ONE, 0])), (1080, 1920), "270°");
+        assert_eq!(dims(Some([-ONE, 0, 0, -ONE])), (1920, 1080), "180°");
+        // A nonsense matrix (a shear, not a rotation) changes nothing.
+        assert_eq!(dims(Some([0, ONE, ONE, 0])), (1920, 1080));
+        assert!(!quarter_turn(&[]) && !quarter_turn(&[0; 20]) && !quarter_turn(&[9; 90]));
     }
 
     #[test]
@@ -348,5 +405,16 @@ mod tests {
         assert_eq!(clean_codec(b"hvc1"), "hvc1");
         assert_eq!(clean_codec(b"V_VP9"), "V_VP9");
         assert_eq!(clean_codec(b"<b>\n"), "b");
+    }
+
+    /// Real files written by ffmpeg with display-rotation metadata (64×36 stored).
+    #[test]
+    fn real_rotated_mp4_files() {
+        for name in ["rotated-90.mp4", "rotated-270.mp4"] {
+            let data = std::fs::read(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+            let top = children(&data).unwrap();
+            let p = mp4_moov(child(&top, b"moov").unwrap()).unwrap();
+            assert_eq!((p.width, p.height), (36, 64), "{name} is displayed portrait");
+        }
     }
 }

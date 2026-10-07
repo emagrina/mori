@@ -17,6 +17,7 @@ import {
   type FileReport,
   type PdfInfo,
 } from "../api";
+import { aspectOf, frameFraction, frameWidth } from "../filmstrip";
 import { Icon } from "./Icon";
 
 // ------------------------------------------------------------------- PDF
@@ -231,13 +232,16 @@ function ArchiveRow({ e, depth }: { e: ArchiveEntry; depth: number }) {
 // ----------------------------------------------------------- video frames
 
 const FRAMES = SCRUB_FRAMES;
+const ISO_STRIP_H = 46;
 
 /**
  * Isolated video view: no <video> element is shown. Frames are sampled once,
  * re-encoded by the sandboxed worker, and displayed as still images.
  */
-export function FrameView({ entry, onFail }: { entry: Entry; onFail: () => void }) {
+export function FrameView({ entry, aspect: hint, onFail }: { entry: Entry; aspect?: number | null; onFail: () => void }) {
   const [ready, setReady] = useState<number[]>([]);
+  const { aspect, onFrame } = useFrameAspect(entry.id, hint);
+  const w = frameWidth(aspect, ISO_STRIP_H);
   const [done, setDone] = useState(false);
   const [current, setCurrent] = useState(0);
   useEffect(() => {
@@ -257,8 +261,19 @@ export function FrameView({ entry, onFail }: { entry: Entry; onFail: () => void 
       </div>
       <div className="frame-strip">
         {Array.from({ length: FRAMES }, (_, k) => (
-          <button key={k} className={k === shown ? "on" : ""} disabled={!ready.includes(k)} onClick={() => setCurrent(k)} title={`Frame ${k + 1} of ${FRAMES}`}>
-            {ready.includes(k) ? <img src={frameUrl(entry.id, k, true)} alt="" draggable={false} /> : !done && <span className="dot-spinner" />}
+          <button
+            key={k}
+            className={k === shown ? "on" : ""}
+            style={{ width: w, height: ISO_STRIP_H }}
+            disabled={!ready.includes(k)}
+            onClick={() => setCurrent(k)}
+            title={`Frame ${k + 1} of ${FRAMES}`}
+          >
+            {ready.includes(k) ? (
+              <img src={frameUrl(entry.id, k, true)} alt="" draggable={false} onLoad={(e) => onFrame(e.currentTarget)} />
+            ) : (
+              !done && <span className="dot-spinner" />
+            )}
           </button>
         ))}
       </div>
@@ -442,9 +457,28 @@ export function AudioView({ entry, iso, onFail }: { entry: Entry; iso: boolean; 
  * Frames along a video under the player. Uses frames already sampled
  * (sanitized by the worker); sampling more is an explicit click.
  */
-export function Filmstrip({ entry, onSeek }: { entry: Entry; onSeek: (fraction: number) => void }) {
+/** Height of the preview's filmstrip; each frame's width follows the video's displayed aspect ratio. */
+const STRIP_H = 42;
+
+/**
+ * The displayed aspect ratio of a video's frames: measured from the stored
+ * frames themselves (taken from what the player shows, rotation applied),
+ * falling back to the probe's display size until one has loaded.
+ */
+function useFrameAspect(id: string, fallback: number | null | undefined) {
+  const [measured, setMeasured] = useState<number | null>(null);
+  useEffect(() => setMeasured(null), [id]);
+  const onFrame = (img: HTMLImageElement) => {
+    const a = aspectOf(img.naturalWidth, img.naturalHeight);
+    if (a) setMeasured((cur) => cur ?? a);
+  };
+  return { aspect: measured ?? fallback ?? null, onFrame };
+}
+
+export function Filmstrip({ entry, aspect: hint, onSeek }: { entry: Entry; aspect?: number | null; onSeek: (fraction: number) => void }) {
   const [ready, setReady] = useState<Set<number>>(() => new Set());
   const [state, setState] = useState<"checking" | "none" | "busy" | "done">("checking");
+  const { aspect, onFrame } = useFrameAspect(entry.id, hint);
   useEffect(() => {
     let alive = true;
     setReady(new Set());
@@ -456,7 +490,7 @@ export function Filmstrip({ entry, onSeek }: { entry: Entry; onSeek: (fraction: 
         (_, k) =>
           new Promise<number | null>((r) => {
             const i = new Image();
-            i.onload = () => r(k);
+            i.onload = () => (alive && onFrame(i), r(k));
             i.onerror = () => r(null);
             i.src = frameUrl(entry.id, k);
           }),
@@ -484,13 +518,21 @@ export function Filmstrip({ entry, onSeek }: { entry: Entry; onSeek: (fraction: 
       </button>
     );
   }
+  const w = frameWidth(aspect, STRIP_H);
   return (
-    <div className="filmstrip">
-      {Array.from({ length: SCRUB_FRAMES }, (_, k) => (
-        <button key={k} disabled={!ready.has(k)} onClick={() => onSeek((k + 0.5) / SCRUB_FRAMES)} title={`Jump to ${Math.round(((k + 0.5) / SCRUB_FRAMES) * 100)}%`}>
-          {ready.has(k) ? <img src={frameUrl(entry.id, k)} alt="" draggable={false} /> : state === "busy" && <span className="dot-spinner" />}
-        </button>
-      ))}
+    <div className="filmstrip" data-aspect={aspect ? aspect.toFixed(3) : undefined}>
+      {Array.from({ length: SCRUB_FRAMES }, (_, k) => {
+        const at = frameFraction(k, SCRUB_FRAMES);
+        return (
+          <button key={k} style={{ width: w, height: STRIP_H }} disabled={!ready.has(k)} onClick={() => onSeek(at)} title={`Jump to ${Math.round(at * 100)}%`}>
+            {ready.has(k) ? (
+              <img src={frameUrl(entry.id, k)} alt="" draggable={false} onLoad={(e) => onFrame(e.currentTarget)} />
+            ) : (
+              state === "busy" && <span className="dot-spinner" />
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }
