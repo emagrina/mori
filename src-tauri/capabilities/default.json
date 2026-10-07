@@ -99,6 +99,13 @@
     "allow-meta-clear",
     "allow-meta-results",
     "allow-meta-places",
-    "allow-sanitize-copies"
+    "allow-sanitize-copies",
+    "allow-plan-transfer",
+    "allow-transfer-items",
+    "allow-transfer-cancel",
+    "allow-transfer-choose-folder",
+    "allow-cleanup-saved",
+    "allow-cleanup-save",
+    "allow-cleanup-discard"
   ]
 }

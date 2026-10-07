@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cleanup-discard"
+description = "Enables the cleanup_discard command without any pre-configured scope."
+commands.allow = ["cleanup_discard"]
+
+[[permission]]
+identifier = "deny-cleanup-discard"
+description = "Denies the cleanup_discard command without any pre-configured scope."
+commands.deny = ["cleanup_discard"]

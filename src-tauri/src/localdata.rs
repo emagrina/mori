@@ -150,7 +150,9 @@ pub fn paths(d: &Dirs, c: Category) -> Vec<PathBuf> {
             v.extend(d.webkit.clone());
             v
         }
-        Category::Analysis => vec![data("similar-dismissed.bin"), data("blocked-media.json")],
+        Category::Analysis => {
+            vec![data("similar-dismissed.bin"), data("blocked-media.json"), data("cleanup-sessions.json")]
+        }
         Category::History => vec![data("drives.json"), data("last-panic.txt")],
         Category::Organization => {
             vec![data("tags.json"), data("favorites.json"), data("capture-not.json"), data("capture-yes.json")]
@@ -170,7 +172,7 @@ pub fn describe(c: Category) -> (&'static str, &'static str, &'static str) {
         ),
         Category::Analysis => (
             "Analysis data",
-            "“Not duplicates” decisions (pairs of content hashes) and the list of videos that stopped the system media engine (opaque hashes).",
+            "“Not duplicates” decisions (pairs of content hashes), the list of videos that stopped the system media engine (opaque hashes), and unfinished Quick Cleanup sessions (opaque item ids with Keep / Mark for Trash decisions, never saved in temporary sessions).",
             "No names or paths.",
         ),
         Category::History => (

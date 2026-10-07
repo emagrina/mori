@@ -3,6 +3,7 @@
 
 mod archive;
 mod capture;
+mod cleanup;
 mod diagnostics;
 mod drives;
 mod dupes;
@@ -130,6 +131,11 @@ pub struct AppState {
     integrity_running: AtomicBool,
     /// Undo history of file operations (this session, memory only).
     history: history::History,
+    /// Move/Copy destinations picked this session outside the browsed folder.
+    transfer_dests: Mutex<Vec<PathBuf>>,
+    transfer_cancel: AtomicBool,
+    /// Unfinished Quick Cleanup sessions (opaque ids only; never in a temporary session).
+    cleanup: cleanup::Store,
     /// Media Health results (memory only).
     health: Mutex<Option<health::Store>>,
     health_running: AtomicBool,
@@ -1105,14 +1111,15 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
         ),
         vec![history::Change::Renamed { from: path.clone(), to: target.clone() }],
     );
+    // Mori's records follow the item: a private folder keeps its privacy, a
+    // favorite or tagged file or folder keeps its favorite and tags.
     if meta.is_dir() {
-        // A private folder (or one containing private folders) keeps its privacy.
         state.privacy.renamed(&path, &target);
-        state.capture_not.renamed(&path, &target);
-        state.capture_yes.renamed(&path, &target);
-        state.favorites.renamed(&path, &target);
-        state.tags.renamed(&path, &target);
     }
+    state.capture_not.renamed(&path, &target);
+    state.capture_yes.renamed(&path, &target);
+    state.favorites.renamed(&path, &target);
+    state.tags.renamed(&path, &target);
     let old_rel = loc.rel.clone();
     let new_rel = match old_rel.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/{name}"),
@@ -1120,6 +1127,517 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
     };
     apply_index_change(&app, |idx| idx.rename_path(&old_rel, &new_rel));
     Ok(index::id_str(index::id_for(&new_rel)))
+}
+
+// ------------------------------------------------------------ move & copy
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DestInfo {
+    /// Opaque key for `plan_transfer` / `transfer_items` ("d0", "d1"…).
+    key: String,
+    label: String,
+    path: String,
+    drive: String,
+}
+
+/// Native folder picker (runs in Rust) for a Move/Copy destination outside
+/// the browsed folder. Remembered for this session only, as an opaque key.
+#[tauri::command]
+async fn transfer_choose_folder(app: AppHandle) -> Result<DestInfo, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().set_title("Choose a destination folder").blocking_pick_folder();
+    forget_open_panel_location();
+    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| "That folder can't be opened")?;
+    let canon = fs::canonicalize(path).ok().filter(|c| c.is_dir()).ok_or("That folder can't be opened")?;
+    let state = app.state::<AppState>();
+    let key = {
+        let mut list = state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = list.iter().position(|p| *p == canon).unwrap_or_else(|| {
+            list.push(canon.clone());
+            list.len() - 1
+        });
+        format!("d{n}")
+    };
+    let label =
+        canon.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| secure::plain_path(&canon));
+    Ok(DestInfo { key, label: secure::display_safe(&label), path: pretty_path(&app, &canon), drive: drive_of(&canon) })
+}
+
+/// Resolve a destination: a browser folder id ("" = the root) or a folder
+/// picked this session ("d0"…). Always canonical and a real folder (never a
+/// link to one); browser folders stay inside the root.
+fn transfer_dest(state: &AppState, dest: &str) -> Result<(PathBuf, String), String> {
+    let gone = "The destination folder is no longer available.";
+    // Browser ids are 16 hex digits (and may start with "d" themselves).
+    let (path, inside_root) = if dest.is_empty() || index::parse_id(dest).is_some() {
+        if !dest.is_empty() && state.index().folder_path(dest).is_none() {
+            return Err("Unknown destination.".into());
+        }
+        (state.path_by_id(dest)?, true)
+    } else {
+        let i: usize = dest.strip_prefix('d').and_then(|n| n.parse().ok()).ok_or("Unknown destination.")?;
+        let p = state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner).get(i).cloned();
+        (p.ok_or("Unknown destination.")?, false)
+    };
+    let canon = fs::canonicalize(&path).map_err(|_| gone)?;
+    if !fs::symlink_metadata(&canon).is_ok_and(|m| m.is_dir()) {
+        return Err(gone.into());
+    }
+    if inside_root && !state.root_canon().is_some_and(|r| canon.starts_with(r)) {
+        return Err(gone.into());
+    }
+    let name =
+        canon.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| secure::plain_path(&canon));
+    Ok((canon, secure::display_safe(&name)))
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TransferEntry {
+    id: String,
+    name: String,
+    path: String,
+    kind: &'static str,
+    bytes: u64,
+    files: u64,
+    /// Something with this name is already in the destination: "file",
+    /// "folder" or "link" (or another selected item has the same name: "batch").
+    conflict: Option<&'static str>,
+    /// Replace is offered: both are regular files, the existing one may go
+    /// to the Trash, and it isn't the item itself.
+    replaceable: bool,
+    /// Refused (policy, folder into itself, already there…), with the reason.
+    blocked: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferPlan {
+    op: String,
+    dest_name: String,
+    /// Another volume: a move copies, verifies, then moves the original to the Trash.
+    cross_volume: bool,
+    entries: Vec<TransferEntry>,
+    total_bytes: u64,
+    total_files: u64,
+    blocked: usize,
+    conflicts: usize,
+}
+
+const ALREADY_HERE: &str = "Already in this folder.";
+
+/// A dry run of Move/Copy: per item, what would happen and what's refused.
+/// Nothing changes. Returns the plan, each item's source path (None when
+/// unavailable) and the destination folder.
+fn transfer_plan(
+    state: &AppState,
+    op: &str,
+    ids: &[String],
+    dest: &str,
+) -> Result<(TransferPlan, Vec<Option<PathBuf>>, PathBuf), String> {
+    let moving = match op {
+        "move" => true,
+        "copy" => false,
+        _ => return Err("Unknown operation".into()),
+    };
+    let (dest_dir, dest_name) = transfer_dest(state, dest)?;
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let policy = state.policy();
+    let idx = state.index();
+    let dest_vol = drives::key_of(&privacy::volume_of(&dest_dir));
+    let mut entries = Vec::new();
+    let mut paths = Vec::new();
+    let mut names: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut cross_volume = false;
+    for id in ids.iter().take(100_000) {
+        // Browser items only, each once.
+        if index::parse_id(id).is_none() || !seen.insert(id.as_str()) {
+            continue;
+        }
+        let Some(e) = idx.get(id) else { continue };
+        let shown = secure::display_safe(&e.path);
+        let mut entry = TransferEntry {
+            id: id.clone(),
+            name: secure::display_safe(&e.name),
+            path: shown,
+            kind: "file",
+            bytes: 0,
+            files: 0,
+            conflict: None,
+            replaceable: false,
+            blocked: None,
+            note: None,
+        };
+        let (path, meta) = match fileops::confined_item(&root, &e.path) {
+            Ok(v) => v,
+            Err(err) => {
+                entry.blocked = Some(err);
+                entries.push(entry);
+                paths.push(None);
+                continue;
+            }
+        };
+        let ft = meta.file_type();
+        (entry.kind, entry.bytes, entry.files) = if ft.is_symlink() {
+            ("link", 0, 0)
+        } else if ft.is_dir() {
+            let prefix = format!("{}/", e.path);
+            let (b, n) =
+                idx.files.iter().filter(|f| f.path.starts_with(&prefix)).fold((0, 0), |(b, n), f| (b + f.size, n + 1));
+            ("folder", b, n)
+        } else {
+            ("file", meta.len(), 1)
+        };
+        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let target = dest_dir.join(&file_name);
+        let same_folder = path.parent() == Some(dest_dir.as_path());
+        entry.blocked = if moving && same_folder {
+            Some(ALREADY_HERE.into())
+        } else if fileops::is_within(&dest_dir, &path) {
+            Some(format!("A folder can't be {} into itself.", if moving { "moved" } else { "copied" }))
+        } else {
+            moving
+                .then(|| policy.check(policy::Op::Move, &path).err())
+                .flatten()
+                .or_else(|| policy.check(policy::Op::Create, &target).err())
+        };
+        let other_volume = drives::key_of(&privacy::volume_of(&path)) != dest_vol;
+        if entry.blocked.is_none() {
+            if let Ok(existing) = fs::symlink_metadata(&target) {
+                let et = existing.file_type();
+                entry.conflict = Some(if et.is_symlink() {
+                    "link"
+                } else if et.is_dir() {
+                    "folder"
+                } else {
+                    "file"
+                });
+                entry.replaceable =
+                    !same_folder && ft.is_file() && et.is_file() && policy.check(policy::Op::Trash, &target).is_ok();
+            } else if !names.insert(index::fold(&file_name)) {
+                entry.conflict = Some("batch");
+            }
+            if moving && other_volume {
+                cross_volume = true;
+            }
+            entry.note = if ft.is_symlink() {
+                Some("Only the link itself is transferred; what it points to is never touched.".into())
+            } else if moving && other_volume {
+                Some("Another drive: copied and checked, then the original goes to the Trash.".into())
+            } else {
+                None
+            };
+        }
+        entries.push(entry);
+        paths.push(Some(path));
+    }
+    let ok = || entries.iter().filter(|e| e.blocked.is_none());
+    let plan = TransferPlan {
+        op: op.to_owned(),
+        dest_name,
+        cross_volume,
+        total_bytes: ok().map(|e| e.bytes).sum(),
+        total_files: ok().map(|e| e.files).sum(),
+        blocked: entries.iter().filter(|e| e.blocked.is_some()).count(),
+        conflicts: ok().filter(|e| e.conflict.is_some()).count(),
+        entries,
+    };
+    Ok((plan, paths, dest_dir))
+}
+
+#[tauri::command]
+async fn plan_transfer(app: AppHandle, op: String, ids: Vec<String>, dest: String) -> Result<TransferPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || transfer_plan(&app.state::<AppState>(), &op, &ids, &dest).map(|p| p.0))
+        .await
+        .map_err(|_| "The plan couldn't be made.".to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Transferred {
+    id: String,
+    /// The item's id at its new place, when that's inside the browsed folder.
+    new_id: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TransferResult {
+    done: Vec<Transferred>,
+    bytes: u64,
+    skipped: usize,
+    failed: Vec<dupes::Failure>,
+    /// Copied but the original couldn't be moved to the Trash (both exist).
+    originals_kept: Vec<dupes::Failure>,
+    cancelled: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TransferProgress {
+    done: usize,
+    total: usize,
+}
+
+/// Move or copy items into a folder. Re-plans and re-checks everything
+/// here. Conflicts are resolved per item id: "keepBoth" (a free name),
+/// "replace" (only when the plan offers it: the existing file goes to the
+/// Trash first) or "skip"; an unresolved conflict is skipped. Nothing is
+/// ever overwritten in place.
+#[tauri::command]
+async fn transfer_items(
+    app: AppHandle,
+    op: String,
+    ids: Vec<String>,
+    dest: String,
+    resolutions: HashMap<String, String>,
+) -> Result<TransferResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.transfer_cancel.store(false, Ordering::SeqCst);
+        let (plan, paths, dest_dir) = transfer_plan(&state, &op, &ids, &dest)?;
+        let moving = op == "move";
+        let policy = state.policy();
+        let cancel = || state.transfer_cancel.load(Ordering::SeqCst);
+        let mut out = TransferResult::default();
+        let mut changes = Vec::new();
+        let (mut removed, mut renamed, mut added) = (Vec::new(), Vec::new(), Vec::new());
+        let mut gone = Vec::new();
+        let mut rescan = false;
+        // Names this batch created, never replaced by a later item of the same batch.
+        let mut created: HashSet<PathBuf> = HashSet::new();
+        let total = plan.entries.len();
+        let mut last_emit = std::time::Instant::now();
+        for (k, (e, src)) in plan.entries.iter().zip(paths).enumerate() {
+            if last_emit.elapsed() > Duration::from_millis(150) {
+                last_emit = std::time::Instant::now();
+                let _ = app.emit("transfer-progress", TransferProgress { done: k, total });
+            }
+            let fail = |reason: String| dupes::Failure { path: e.path.clone(), reason };
+            if let Some(b) = &e.blocked {
+                if b == ALREADY_HERE {
+                    out.skipped += 1;
+                } else {
+                    out.failed.push(fail(b.clone()));
+                }
+                continue;
+            }
+            let Some(src) = src else { continue };
+            if cancel() {
+                out.cancelled = true;
+                out.skipped += 1;
+                continue;
+            }
+            let file_name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut target = dest_dir.join(&file_name);
+            let mut replaced: Option<(PathBuf, Option<PathBuf>)> = None;
+            let is_dir = fs::symlink_metadata(&src).is_ok_and(|m| m.is_dir());
+            if fs::symlink_metadata(&target).is_ok() {
+                match resolutions.get(&e.id).map(String::as_str) {
+                    Some("keepBoth") => {
+                        let free =
+                            fileops::free_name(&file_name, is_dir, &|c| fs::symlink_metadata(dest_dir.join(c)).is_ok());
+                        match free {
+                            Some(n) => target = dest_dir.join(n),
+                            None => {
+                                out.failed.push(fail("no free name was found".into()));
+                                continue;
+                            }
+                        }
+                    }
+                    Some("replace") if e.replaceable && !created.contains(&target) => {
+                        if !fs::symlink_metadata(&target).is_ok_and(|m| m.is_file()) {
+                            out.failed.push(fail("what's there now isn't a file, so it wasn't replaced".into()));
+                            continue;
+                        }
+                        if let Ok(m) = fs::symlink_metadata(&target) {
+                            invalidate_thumbs(&state, &target, &m);
+                        }
+                        match fileops::move_to_trash(&policy, &target) {
+                            Ok(t) => replaced = Some((target.clone(), t)),
+                            Err(r) => {
+                                out.failed.push(fail(format!("the existing item couldn't be moved to the Trash: {r}")));
+                                continue;
+                            }
+                        }
+                    }
+                    Some("replace") => {
+                        out.failed.push(fail("Replace isn't available for this item.".into()));
+                        continue;
+                    }
+                    _ => {
+                        out.skipped += 1;
+                        continue;
+                    }
+                }
+            }
+            let src_meta = fs::symlink_metadata(&src).ok();
+            if moving {
+                if let Some(m) = src_meta.as_ref().filter(|m| m.is_file()) {
+                    invalidate_thumbs(&state, &src, m);
+                }
+            }
+            let r = if moving {
+                fileops::move_item(&policy, &src, &target, &cancel)
+            } else {
+                fileops::copy_item(&policy, &src, &target, &cancel)
+                    .map(|bytes| fileops::Moved::Copied { bytes, trashed: None })
+            };
+            let outcome = match r {
+                Ok(m) => m,
+                Err(reason) => {
+                    // Put a replaced item back where it was (when the platform says where it went).
+                    if let Some((orig, Some(t))) = &replaced {
+                        let _ = fileops::restore_from_trash(&policy, t, orig);
+                    } else if replaced.is_some() {
+                        out.originals_kept.push(fail("the item it was to replace is in the Trash".into()));
+                    }
+                    if reason == "cancelled" {
+                        out.cancelled = true;
+                        out.skipped += 1;
+                    } else {
+                        out.failed.push(fail(reason));
+                    }
+                    continue;
+                }
+            };
+            created.insert(target.clone());
+            if let Some((orig, t)) = replaced {
+                if let Some(rel) = browser_rel(&state, &orig) {
+                    removed.push(rel);
+                }
+                gone.push(orig.clone());
+                changes.push(history::Change::Trashed { original: orig, trashed: t });
+            }
+            let src_rel = browser_rel(&state, &src);
+            let dest_rel = browser_rel(&state, &target);
+            match (&outcome, moving) {
+                (fileops::Moved::Renamed, _) => {
+                    changes.push(history::Change::Renamed { from: src.clone(), to: target.clone() });
+                    // Mori's own records follow the item (same volume).
+                    for s in [&state.privacy, &state.favorites, &state.capture_not, &state.capture_yes] {
+                        s.renamed(&src, &target);
+                    }
+                    state.tags.renamed(&src, &target);
+                    match (&src_rel, &dest_rel) {
+                        (Some(a), Some(b)) => renamed.push((a.clone(), b.clone())),
+                        (Some(a), None) => removed.push(a.clone()),
+                        (None, Some(_)) => rescan = true,
+                        (None, None) => {}
+                    }
+                    gone.push(src.clone());
+                }
+                (fileops::Moved::Copied { bytes, trashed }, true) => {
+                    out.bytes += bytes;
+                    changes.push(history::Change::CrossMoved {
+                        from: src.clone(),
+                        to: target.clone(),
+                        trashed: trashed.clone(),
+                    });
+                    if let Some(a) = &src_rel {
+                        removed.push(a.clone());
+                    }
+                    gone.push(src.clone());
+                }
+                (fileops::Moved::Copied { bytes, .. }, false) => {
+                    out.bytes += bytes;
+                    changes.push(history::Change::Created { path: target.clone() });
+                }
+                (fileops::Moved::CopiedOriginalKept { bytes, reason }, _) => {
+                    out.bytes += bytes;
+                    changes.push(history::Change::Created { path: target.clone() });
+                    out.originals_kept.push(fail(format!("copied, but the original stayed: {reason}")));
+                }
+            }
+            let copied_in = !matches!(outcome, fileops::Moved::Renamed);
+            if let (true, Some(rel)) = (copied_in, &dest_rel) {
+                match fs::symlink_metadata(&target) {
+                    Ok(m) if m.is_file() => added.push(index::make_entry(
+                        rel.clone(),
+                        target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                        false,
+                        &m,
+                    )),
+                    _ => rescan = true,
+                }
+            }
+            out.done.push(Transferred { id: e.id.clone(), new_id: dest_rel.map(|r| index::id_str(index::id_for(&r))) });
+        }
+        if !(removed.is_empty() && renamed.is_empty() && added.is_empty()) {
+            apply_index_change(&app, |idx| {
+                idx.remove_paths(&removed);
+                for (a, b) in &renamed {
+                    idx.rename_path(a, b);
+                }
+                for e in added {
+                    idx.add_file(e);
+                }
+            });
+        }
+        forget_removed(&state, &gone);
+        if rescan {
+            start_scan(&app);
+        }
+        let n = out.done.len();
+        let what = match plan.entries.iter().find(|e| out.done.first().is_some_and(|d| d.id == e.id)) {
+            Some(e) if n == 1 => format!("“{}”", e.name),
+            _ => format!("{n} items"),
+        };
+        state
+            .history
+            .record(format!("{} {what} to “{}”", if moving { "Moved" } else { "Copied" }, plan.dest_name), changes);
+        let _ = app.emit("transfer-progress", TransferProgress { done: total, total });
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "The operation stopped unexpectedly.".to_string())?
+}
+
+/// Stop a running Move/Copy after the current item (a partly copied item
+/// is removed again).
+#[tauri::command]
+fn transfer_cancel(state: State<'_, AppState>) {
+    state.transfer_cancel.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------- quick cleanup
+
+/// The hashes a saved cleanup session is filed under (the root and its volume).
+fn cleanup_keys(state: &AppState) -> Result<(String, String), String> {
+    state.persistent()?;
+    let root = state.root_canon().ok_or("No folder selected")?;
+    let vol = drives::key_of(&privacy::volume_of(&root));
+    Ok((
+        format!("{:016x}", thumbs::fnv(root.to_string_lossy().as_bytes())),
+        format!("{:016x}", thumbs::fnv(vol.as_bytes())),
+    ))
+}
+
+/// An unfinished Quick Cleanup of `folder`, if one was saved. Never in a
+/// temporary session (nothing is saved there).
+#[tauri::command]
+fn cleanup_saved(state: State<'_, AppState>, folder: String) -> Option<cleanup::Session> {
+    let (root, _) = cleanup_keys(&state).ok()?;
+    state.cleanup.get(&root, &folder)
+}
+
+/// Save Quick Cleanup decisions so the session can be resumed. Only opaque
+/// ids and Keep / Mark decisions; refused in a temporary session. This never
+/// touches any file.
+#[tauri::command]
+fn cleanup_save(state: State<'_, AppState>, session: cleanup::Session) -> Result<(), String> {
+    let (root, vol) = cleanup_keys(&state)?;
+    state.cleanup.put(&root, &vol, session)
+}
+
+#[tauri::command]
+fn cleanup_discard(state: State<'_, AppState>, folder: String) {
+    if let Ok((root, _)) = cleanup_keys(&state) {
+        state.cleanup.discard(&root, &folder);
+    }
 }
 
 // ----------------------------------------------------------- inspection
@@ -1254,6 +1772,7 @@ fn clear_categories(app: &AppHandle, state: &AppState, cats: &[localdata::Catego
     }
     if cats.contains(&C::Analysis) {
         state.video.clear();
+        state.cleanup.clear();
     }
     if cats.contains(&C::History) {
         state.drives.clear();
@@ -1894,6 +2413,13 @@ async fn history_undo(app: AppHandle, id: Option<u64>) -> Result<history::UndoOu
         let state = app.state::<AppState>();
         let id = id.or_else(|| state.history.last_undoable()).ok_or("Nothing to undo.")?;
         let out = state.history.undo(id, &state.policy())?;
+        // Renamed or moved back: Mori's own records follow the item again.
+        for (now, back) in &out.moved_back {
+            for s in [&state.privacy, &state.favorites, &state.capture_not, &state.capture_yes] {
+                s.renamed(now, back);
+            }
+            state.tags.renamed(now, back);
+        }
         // Restored or renamed items: let the index pick them up.
         if out.touched.iter().any(|p| state.root_canon().is_some_and(|r| p.starts_with(r))) {
             start_scan(&app);
@@ -2167,6 +2693,7 @@ fn forget_data(state: &AppState, root: &Path) -> Forgotten {
         store.forget_volume(&vol);
     }
     state.tags.forget_volume(&vol);
+    state.cleanup.forget_volume(&format!("{:016x}", thumbs::fnv(drives::key_of(&vol).as_bytes())));
     state.drives.forget(&drives::key_of(&vol));
     Forgotten { drive, indexes }
 }
@@ -2235,6 +2762,213 @@ fn debug_ops(app: &AppHandle) {
         );
         eprintln!("mori: DEBUG ops done");
     });
+}
+
+/// Debug builds only, for `tests/transfer.rs`: `MORI_DEBUG_TRANSFER=<scratch
+/// folder>` (and `MORI_DEBUG_TRANSFER_OUT=<folder outside it>`) builds a
+/// small tree and runs Move / Copy, conflicts, Replace + Undo, refusals,
+/// partial failure and the Quick Cleanup store through the real commands,
+/// printing one line per step, then quits.
+fn debug_transfer(app: &AppHandle) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(dir) = std::env::var_os("MORI_DEBUG_TRANSFER").map(PathBuf::from) else { return };
+    let out_dir = std::env::var_os("MORI_DEBUG_TRANSFER_OUT").map(PathBuf::from);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if catch_unwind(AssertUnwindSafe(|| debug_transfer_steps(&app, &dir, out_dir.as_deref()))).is_err() {
+            eprintln!("mori: DEBUG transfer failed");
+            app.exit(1);
+        }
+    });
+}
+
+fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
+    {
+        let app = app.clone();
+        let state = app.state::<AppState>();
+        let _ = fs::remove_dir_all(dir);
+        for d in ["Album/Sub", "Other", "Guarded", "Private"] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        fs::write(dir.join("Album/a.jpg"), b"album-a").unwrap();
+        fs::write(dir.join("Album/b.jpg"), b"album-b").unwrap();
+        fs::write(dir.join("Album/Sub/c.jpg"), b"sub-c").unwrap();
+        fs::write(dir.join("Other/a.jpg"), b"other-a").unwrap();
+        fs::write(dir.join("Other/x.txt"), b"x").unwrap();
+        fs::write(dir.join("Guarded/g.jpg"), b"g").unwrap();
+        fs::write(dir.join("Private/p.jpg"), b"p").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("Album/a.jpg"), dir.join("link.jpg")).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let dir = fs::canonicalize(dir).unwrap();
+        open_root(&app, &dir).unwrap();
+        let settle = || {
+            std::thread::sleep(Duration::from_millis(300));
+            while state.scanning.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        settle();
+        state.protected.set(&dir.join("Guarded"), 0, true).unwrap();
+        state.privacy.set(&dir.join("Private"), 0, true).unwrap();
+        publish_index(&app, (*state.index()).clone());
+        let id = |rel: &str| index::id_str(index::id_for(rel));
+        let has = |rel: &str| state.index().get(&id(rel)).is_some();
+        let read = |rel: &str| fs::read_to_string(dir.join(rel)).unwrap_or_else(|_| "-".into());
+        let run = |op: &str, ids: &[&str], dest: &str, res: &[(&str, &str)]| {
+            let ids = ids.iter().map(|r| id(r)).collect();
+            let res = res.iter().map(|(r, c)| (id(r), c.to_string())).collect();
+            tauri::async_runtime::block_on(transfer_items(app.clone(), op.into(), ids, dest.into(), res))
+        };
+
+        // 1. Plans: conflict + Replace offered, protected source, into itself, already there.
+        let (p, _, _) =
+            transfer_plan(&state, "move", &[id("Album/a.jpg"), id("Album/b.jpg"), id("Guarded/g.jpg")], &id("Other"))
+                .unwrap();
+        let e = |n: usize| &p.entries[n];
+        eprintln!(
+            "mori: DEBUG transfer plan: conflict={:?} replaceable={} free={:?} guarded-blocked={}",
+            e(0).conflict,
+            e(0).replaceable,
+            e(1).conflict,
+            e(2).blocked.as_deref().is_some_and(|b| b.contains("protected"))
+        );
+        let (p, _, _) = transfer_plan(&state, "move", &[id("Album")], &id("Album/Sub")).unwrap();
+        let (q, _, _) = transfer_plan(&state, "move", &[id("Album/b.jpg")], &id("Album")).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer refusals: into-itself={} already-here={}",
+            p.entries[0].blocked.as_deref().is_some_and(|b| b.contains("into itself")),
+            q.entries[0].blocked.as_deref() == Some(ALREADY_HERE)
+        );
+
+        // 2. Move without resolving the conflict: the conflicting item is skipped, never overwritten.
+        let r = run("move", &["Album/a.jpg", "Album/b.jpg"], &id("Other"), &[]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer move: done={} skipped={} other-a={} moved-b={} index-old={} index-new={}",
+            r.done.len(),
+            r.skipped,
+            read("Other/a.jpg"),
+            read("Other/b.jpg"),
+            has("Album/b.jpg"),
+            has("Other/b.jpg")
+        );
+
+        // 3. Favorites follow a move.
+        state.favorites.set(&dir.join("Other/b.jpg"), 0, true).unwrap();
+        publish_index(&app, (*state.index()).clone());
+        run("move", &["Other/b.jpg"], &id("Album"), &[]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer favorite-follows={}",
+            state.index().get(&id("Album/b.jpg")).is_some_and(|e| e.favorite)
+        );
+
+        // 4. Copy with Keep Both.
+        let r = run("copy", &["Album/a.jpg"], &id("Other"), &[("Album/a.jpg", "keepBoth")]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer keep-both: done={} copy={} original={} indexed={}",
+            r.done.len(),
+            read("Other/a 2.jpg"),
+            read("Album/a.jpg"),
+            has("Other/a 2.jpg")
+        );
+
+        // 5. Replace (the existing file goes to the Trash), then Undo puts both back.
+        let r = run("move", &["Album/a.jpg"], &id("Other"), &[("Album/a.jpg", "replace")]).unwrap();
+        let replaced = read("Other/a.jpg");
+        let u = tauri::async_runtime::block_on(history_undo(app.clone(), None)).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer replace: done={} now={replaced} undo={} back-album={} back-other={}",
+            r.done.len(),
+            u.restored,
+            read("Album/a.jpg"),
+            read("Other/a.jpg")
+        );
+        settle();
+
+        // 6. A folder copy, and a link copied as a link.
+        let r = run("copy", &["Album"], &id("Other"), &[]).unwrap();
+        #[cfg(unix)]
+        let link = {
+            run("copy", &["link.jpg"], &id("Other"), &[]).unwrap();
+            fs::symlink_metadata(dir.join("Other/link.jpg")).is_ok_and(|m| m.file_type().is_symlink())
+        };
+        #[cfg(not(unix))]
+        let link = true;
+        settle();
+        eprintln!(
+            "mori: DEBUG transfer folder-copy: done={} nested={} source-kept={} indexed={} link-is-link={link}",
+            r.done.len(),
+            read("Other/Album/Sub/c.jpg"),
+            read("Album/Sub/c.jpg"),
+            has("Other/Album/Sub/c.jpg")
+        );
+
+        // 7. Read-only Mode and a protected destination refuse; nothing is created.
+        state.read_only.store(true, Ordering::SeqCst);
+        let ro = run("copy", &["Album/b.jpg"], &id("Other"), &[]).unwrap();
+        state.read_only.store(false, Ordering::SeqCst);
+        let pr = run("copy", &["Album/b.jpg"], &id("Guarded"), &[]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer policy: read-only={} protected={} created={}",
+            ro.failed.first().is_some_and(|f| f.reason == policy::READ_ONLY),
+            pr.failed.first().is_some_and(|f| f.reason.contains("protected")),
+            dir.join("Guarded/b.jpg").exists() || dir.join("Other/b.jpg").exists()
+        );
+
+        // 8. Partial failure: one item vanished from disk after indexing.
+        fs::remove_file(dir.join("Other/x.txt")).unwrap();
+        let r = run("move", &["Other/x.txt", "Album/b.jpg"], &id("Album/Sub"), &[]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer partial: done={} failed={} moved={}",
+            r.done.len(),
+            r.failed.len(),
+            read("Album/Sub/b.jpg")
+        );
+
+        // 9. A destination outside the browsed folder.
+        if let Some(out) = out_dir {
+            fs::create_dir_all(out).unwrap();
+            state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner).push(fs::canonicalize(out).unwrap());
+            let r = run("move", &["Album/Sub/c.jpg"], "d0", &[]).unwrap();
+            eprintln!(
+                "mori: DEBUG transfer outside: done={} new-id={} arrived={} left-index={}",
+                r.done.len(),
+                r.done.first().is_some_and(|d| d.new_id.is_some()),
+                fs::read_to_string(out.join("c.jpg")).unwrap_or_default(),
+                !has("Album/Sub/c.jpg")
+            );
+        }
+
+        // 10. Quick Cleanup sessions: saved in normal mode, never in a temporary session.
+        let session = cleanup::Session {
+            folder: id("Album"),
+            options: cleanup::Options { recursive: false, kind: "all".into(), order: "browser".into() },
+            kept: vec![id("Album/a.jpg")],
+            marked: vec![id("Album/Sub/b.jpg")],
+            cursor: 2,
+            saved_at: 0,
+        };
+        let saved = cleanup_save(app.state::<AppState>(), session.clone()).is_ok();
+        let resumed = cleanup_saved(app.state::<AppState>(), id("Album")).is_some_and(|s| s.marked == session.marked);
+        cleanup_discard(app.state::<AppState>(), id("Album"));
+        let discarded = cleanup_saved(app.state::<AppState>(), id("Album")).is_none();
+        begin_session(&state, false);
+        open_root(&app, &dir).unwrap();
+        settle();
+        let temp_save = cleanup_save(app.state::<AppState>(), session.clone());
+        let temp_read = cleanup_saved(app.state::<AppState>(), id("Album"));
+        eprintln!(
+            "mori: DEBUG transfer cleanup-store: saved={saved} resumed={resumed} discarded={discarded} temp-refused={} temp-none={}",
+            temp_save.is_err(),
+            temp_read.is_none()
+        );
+        let _ = end_temporary(app.clone(), app.state::<AppState>());
+        let files_left = walkdir::WalkDir::new(&dir).into_iter().flatten().filter(|e| e.file_type().is_file()).count();
+        eprintln!("mori: DEBUG transfer done files={files_left}");
+        app.exit(0);
+    }
 }
 
 /// Debug builds only, for `tests/ephemeral.rs`:
@@ -2443,6 +3177,7 @@ fn clear_session(state: &AppState) {
     *state.meta_scan.lock().unwrap_or_else(PoisonError::into_inner) = None;
     *state.health.lock().unwrap_or_else(PoisonError::into_inner) = None;
     state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner).clear();
     state.connected.lock().unwrap_or_else(PoisonError::into_inner).clear();
     state.history.clear();
     state.checksums.clear();
@@ -3946,6 +4681,9 @@ fn main() {
                 capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
                 capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
                 history: history::History::default(),
+                transfer_dests: Mutex::new(Vec::new()),
+                transfer_cancel: AtomicBool::new(false),
+                cleanup: cleanup::Store::load(data_dir_for_video.join("cleanup-sessions.json")),
                 checksums: integrity::Cache::default(),
                 checksum_cancel: AtomicBool::new(false),
                 integrity: integrity::Store::new(data_dir_for_video.join("integrity")),
@@ -3988,6 +4726,7 @@ fn main() {
                 health::debug_autorun(app.handle());
                 debug_org(app.handle());
                 debug_ops(app.handle());
+                debug_transfer(app.handle());
                 debug_privacy(app.handle());
                 debug_ephemeral(app.handle());
                 if std::env::var_os("MORI_DEBUG_DIAG").is_some() {
@@ -4008,6 +4747,13 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            plan_transfer,
+            transfer_items,
+            transfer_cancel,
+            transfer_choose_folder,
+            cleanup_saved,
+            cleanup_save,
+            cleanup_discard,
             init,
             update_settings,
             choose_root,
