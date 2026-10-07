@@ -5092,3 +5092,213 @@ button.dest-row:not(:disabled):hover,
     gap: 8px;
   }
 }
+
+/* ------------------------------------------------------------- favorites */
+
+/* The star sits on the thumbnail, top-right, in a small translucent disc so
+   it reads on light and dark images. Filled and persistent for favorites;
+   an outline that appears on hover otherwise. */
+.tile.grid .frame {
+  position: relative;
+}
+
+.fav-star {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(10, 10, 10, 0.46);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transform: scale(0.92);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.fav-star.on {
+  opacity: 1;
+  transform: none;
+  color: #fff;
+}
+
+.tile:hover .fav-star,
+.fav-star:focus-visible {
+  opacity: 1;
+  transform: none;
+}
+
+.fav-star:not(.static):hover {
+  background: rgba(10, 10, 10, 0.68);
+}
+
+.tile.gallery .fav-star {
+  top: 8px;
+  right: 8px;
+}
+
+/* List view: a dedicated slot at the end of the name, not an overlay. */
+.c-name .fav-slot {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+.row .fav-star {
+  position: static;
+  width: 22px;
+  height: 22px;
+  background: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: var(--text-3);
+}
+
+.row .fav-star.on {
+  color: var(--text);
+}
+
+.row:hover .fav-star {
+  opacity: 1;
+  transform: none;
+}
+
+.row .fav-star:not(.static):hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------- drag and drop */
+
+/* A folder that will take the drop: a quiet ring and tint, Mori's own
+   tokens, no new colours. A folder that refuses it: dimmed and dashed. */
+.tile[data-drop="ok"],
+.row[data-drop="ok"],
+.tree-row[data-drop="ok"],
+.side-item[data-drop="ok"] {
+  background: var(--selected);
+  box-shadow: inset 0 0 0 2px var(--sel-ring);
+}
+
+.tile.gallery[data-drop="ok"]::after {
+  box-shadow: inset 0 0 0 3px var(--text);
+}
+
+.tile.grid[data-drop="ok"] .frame {
+  border-color: transparent;
+}
+
+.tree-row[data-drop="ok"] .label,
+.tree-row[data-drop="ok"] .label svg,
+.side-item[data-drop="ok"] {
+  color: var(--text);
+}
+
+.tile[data-drop="no"],
+.row[data-drop="no"],
+.tree-row[data-drop="no"],
+.side-item[data-drop="no"] {
+  opacity: 0.55;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  outline: 1px dashed var(--text-3);
+  outline-offset: -3px;
+}
+
+.drop-reason {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-pop);
+  pointer-events: none;
+}
+
+.row .drop-reason {
+  position: static;
+  margin-left: 8px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  box-shadow: none;
+  background: var(--surface-inset);
+}
+
+.tile[draggable="true"],
+.row[draggable="true"] {
+  -webkit-user-drag: element;
+}
+
+/* The drag image: one picture and "5 items", built off-screen. */
+.drag-ghost {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px 6px 6px;
+  border-radius: 10px;
+  font: 600 12.5px var(--font);
+  color: var(--text);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-pop);
+  max-width: 260px;
+}
+
+.drag-ghost-pic {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--glyph);
+}
+
+.drag-ghost-pic img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.drag-ghost > span:not(.drag-ghost-badge) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drag-ghost-badge {
+  position: absolute;
+  top: -6px;
+  left: 34px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-size: 10.5px;
+  color: var(--primary-text);
+  background: var(--primary-bg);
+}

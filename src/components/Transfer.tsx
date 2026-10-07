@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   formatSize,
@@ -16,7 +16,7 @@ import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 
 /** A destination: a folder of the browsed drive ("" = its root) or one picked elsewhere. */
-interface Dest {
+export interface Dest {
   key: string;
   label: string;
   /** Shown under the label (where it is). */
@@ -42,6 +42,7 @@ export function TransferDialog({
   entries,
   rootName,
   current,
+  dest: preset,
   onClose,
   onDone,
 }: {
@@ -50,6 +51,8 @@ export function TransferDialog({
   rootName: string;
   /** The folder being browsed (pre-selected as a starting point). */
   current: string;
+  /** Dropped onto a folder: skip the picker, plan the move into it straight away. */
+  dest?: Dest;
   onClose: () => void;
   onDone: (result: TransferResult, plan: TransferPlan) => void;
 }) {
@@ -121,6 +124,15 @@ export function TransferDialog({
   const replacing = conflicts.filter((e) => res[e.id] === "replace").length;
   const applyAll = (r: Resolution) => setRes(Object.fromEntries(conflicts.map((e) => [e.id, r === "replace" && !e.replaceable ? "keepBoth" : r])));
 
+  // A drop: plan at once (and run straight away if nothing needs a decision).
+  // Exactly once, even when React mounts effects twice (StrictMode): this can move files.
+  const started = useRef(false);
+  useEffect(() => {
+    if (!preset || started.current) return;
+    started.current = true;
+    choose(preset);
+  }, []);
+
   if (progress) {
     return (
       <ModalFrame onCancel={() => {}}>
@@ -136,6 +148,22 @@ export function TransferDialog({
         <div className="dialog-actions">
           <button className="btn" onClick={() => api.transferCancel()} title="Stops after the current item; a partly copied item is removed again">
             Stop
+          </button>
+        </div>
+      </ModalFrame>
+    );
+  }
+
+  if (preset && !plan) {
+    return (
+      <ModalFrame onCancel={() => !busy && onClose()}>
+        <h2>
+          {verb(op)} {what} to “{preset.label}”
+        </h2>
+        {error ? <p className="field-error">{error}</p> : <div className="dot-spinner" />}
+        <div className="dialog-actions">
+          <button className="btn" onClick={onClose} disabled={busy && !error}>
+            {error ? "Close" : "Cancel"}
           </button>
         </div>
       </ModalFrame>
@@ -234,9 +262,11 @@ export function TransferDialog({
         {conflicts.some((e) => !res[e.id]) && <p className="muted small">Conflicts left undecided are skipped. Nothing is overwritten.</p>}
         {error && <p className="field-error">{error}</p>}
         <div className="dialog-actions">
-          <button className="btn" onClick={() => (setPlan(null), setDest(null))} disabled={busy}>
-            Back
-          </button>
+          {!preset && (
+            <button className="btn" onClick={() => (setPlan(null), setDest(null))} disabled={busy}>
+              Back
+            </button>
+          )}
           <button className="btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>

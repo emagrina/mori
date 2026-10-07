@@ -7,7 +7,9 @@
 //! file goes to the Trash) and its Undo, folder copies, links copied as
 //! links, Read-only Mode and protected folders refusing, a partial failure,
 //! a destination outside the browsed folder, favorites following a move,
-//! and Quick Cleanup sessions never being saved in a temporary session.
+//! Quick Cleanup sessions never being saved in a temporary session, a
+//! three-item drop (drag and drop uses this same command) and Private
+//! Inspection refusing moves.
 //!
 //! macOS only (it opens Mori's window for a few seconds; Replace + Undo
 //! round-trips through the system Trash). Set `MORI_SKIP_GUI_TESTS=1` to skip.
@@ -67,7 +69,10 @@ fn move_and_copy_through_the_real_commands() {
     has("transfer policy: read-only=true protected=true created=false");
     has("transfer partial: done=1 failed=1 moved=album-b");
     has("transfer outside: done=1 new-id=false arrived=sub-c left-index=true");
+    // A multi-selection drop: every selected item moves, the index follows.
+    has("transfer drop-three: done=3 arrived=true left=false indexed=true");
     has("transfer cleanup-store: saved=true resumed=true discarded=true temp-refused=true temp-none=true");
+    has("transfer private-inspection: refused=true stayed=true");
 
     // Nothing was left in the Trash's place: the Replace was undone.
     assert_eq!(fs::read(tree.join("Other/a.jpg")).unwrap(), b"other-a");

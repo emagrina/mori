@@ -3,6 +3,7 @@ import { formatDate, formatShortDate, formatSize, isMac, parentOf, PRIVATE_HINT,
 
 /** Folder an item came from, relative to the view ("" = the viewed folder itself). */
 const locationOf = (e: Entry) => (e.location ?? parentOf(e.path)).split("/").join(" / ");
+import { beginDrag, DRAG_TYPE, dragGhost, dragged, edgeScroll, endDrag, SPRING_MS, type DragItem } from "../dnd";
 import { Icon } from "./Icon";
 import { Thumb } from "./Thumb";
 
@@ -34,7 +35,17 @@ interface Props {
   /** A click selects (it never opens): Cmd/Ctrl toggles, Shift extends a range. */
   onClickItem: (i: number, mods: { toggle: boolean; range: boolean }) => void;
   onContextMenu: (e: React.MouseEvent, i: number) => void;
+  /** The star on a card: toggle Favorite. Absent where favorites can't be saved (temporary sessions). */
+  onFavorite?: (i: number) => void;
+  /** A drag starts on item `i`: what is dragged (the selection, or just that item). */
+  onDragStartItem: (i: number) => DragItem[];
+  /** Whether the dragged items may go into folder `target` (visual feedback only; the backend decides). */
+  canDrop: (target: Entry) => { ok: true } | { ok: false; reason: string };
+  /** Dropped on folder `target`. `copy`: Option/Alt held. */
+  onDrop: (target: Entry, copy: boolean) => void;
 }
+
+type DropState = { ok: true } | { ok: false; reason: string };
 
 // Keep in sync with --pad-x in styles.css.
 const PAD = 28;
@@ -128,11 +139,68 @@ export function FileView(p: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [p.keyboardActive, p.items, p.focus, cols, p.view]);
 
+  // Drag and drop: the folder under the pointer, and spring-loading into it.
+  const [dropAt, setDropAt] = useState<{ id: string; state: DropState } | null>(null);
+  const spring = useRef<{ id: string; timer: number } | null>(null);
+  const stopSpring = () => {
+    if (spring.current) window.clearTimeout(spring.current.timer);
+    spring.current = null;
+  };
+  useEffect(() => () => stopSpring(), []);
+  useEffect(() => {
+    setDropAt(null);
+    stopSpring();
+  }, [p.locationKey]);
+
   // Stable handlers for the memoized tiles: a selection change re-renders
   // only the tiles whose own state changed, never every visible card.
   const latest = useRef(p);
   latest.current = p;
   const events = useRef<TileEvents>({
+    fav: (i) => latest.current.onFavorite?.(i),
+    dragStart: (i, ev) => {
+      const items = latest.current.onDragStartItem(i);
+      if (!items.length) return ev.preventDefault();
+      beginDrag(items);
+      ev.dataTransfer.effectAllowed = "copyMove";
+      // Only an opaque marker: what is dragged stays in Mori's memory, never a path.
+      ev.dataTransfer.setData(DRAG_TYPE, String(items.length));
+      dragGhost(ev.dataTransfer, items.length, latest.current.items[i]?.name ?? "", (ev.currentTarget as HTMLElement).querySelector(".thumb, .c-name"));
+    },
+    dragEnd: () => {
+      endDrag();
+      stopSpring();
+      setDropAt(null);
+    },
+    dragOver: (i, ev) => {
+      const t = latest.current.items[i];
+      if (!dragged() || !t || t.kind !== "folder") return;
+      const state = latest.current.canDrop(t);
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.dataTransfer.dropEffect = state.ok ? (ev.altKey ? "copy" : "move") : "none";
+      setDropAt((cur) => (cur?.id === t.id && cur.state.ok === state.ok ? cur : { id: t.id, state }));
+      if (state.ok && spring.current?.id !== t.id) {
+        stopSpring();
+        // Spring-loaded folder: linger to open it and keep dragging deeper.
+        spring.current = { id: t.id, timer: window.setTimeout(() => (spring.current = null, latest.current.onActivate(i)), SPRING_MS * 1.4) };
+      }
+    },
+    dragLeave: (i, ev) => {
+      if ((ev.currentTarget as HTMLElement).contains(ev.relatedTarget as Node | null)) return;
+      const id = latest.current.items[i]?.id;
+      setDropAt((cur) => (cur?.id === id ? null : cur));
+      if (spring.current?.id === id) stopSpring();
+    },
+    drop: (i, ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const t = latest.current.items[i];
+      stopSpring();
+      setDropAt(null);
+      if (dragged() && t?.kind === "folder" && latest.current.canDrop(t).ok) latest.current.onDrop(t, ev.altKey);
+      endDrag();
+    },
     click: (i, ev) => latest.current.onClickItem(i, { toggle: isMac ? ev.metaKey : ev.ctrlKey, range: ev.shiftKey }),
     open: (i) => latest.current.onActivate(i),
     menu: (i, ev) => {
@@ -167,6 +235,8 @@ export function FileView(p: Props) {
           showLocation={p.showLocation}
           baseLabel={p.baseLabel}
           events={events}
+          drop={dropAt?.id === e.id ? dropAt.state : undefined}
+          canFavorite={!!p.onFavorite}
         />,
       );
     }
@@ -185,6 +255,7 @@ export function FileView(p: Props) {
       ref={scroller}
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       onClick={(e) => e.target === e.currentTarget && p.onClear()}
+      onDragOver={(e) => dragged() && edgeScroll(e.currentTarget, e.clientY)}
     >
       {p.view === "list" && (
         <div className="list-header" style={{ paddingLeft: PAD + 10, paddingRight: PAD + 10 }}>
@@ -206,6 +277,12 @@ interface TileEvents {
   click: (i: number, ev: React.MouseEvent) => void;
   open: (i: number) => void;
   menu: (i: number, ev: React.MouseEvent) => void;
+  fav: (i: number) => void;
+  dragStart: (i: number, ev: React.DragEvent) => void;
+  dragEnd: () => void;
+  dragOver: (i: number, ev: React.DragEvent) => void;
+  dragLeave: (i: number, ev: React.DragEvent) => void;
+  drop: (i: number, ev: React.DragEvent) => void;
 }
 
 interface TileProps {
@@ -222,22 +299,76 @@ interface TileProps {
   showLocation: boolean;
   baseLabel: string;
   events: TileEvents;
+  /** A drag is over this folder: will it accept the drop? */
+  drop?: DropState;
+  canFavorite: boolean;
+}
+
+/**
+ * The Favorite star: a filled star that stays while an item is a favorite,
+ * an outline on hover otherwise. Its own control: clicking it never opens,
+ * selects or drags the item.
+ */
+function FavStar({ e, i, events, can, size }: { e: Entry; i: number; events: TileEvents; can: boolean; size: number }) {
+  const label = e.favorite ? "Remove from Favorites" : "Add to Favorites";
+  if (!can) {
+    return e.favorite ? (
+      <span className="fav-star on static" title="Favorite" role="img" aria-label="Favorite">
+        <Icon name="star" size={size} fill />
+      </span>
+    ) : null;
+  }
+  const stop = (ev: React.SyntheticEvent) => ev.stopPropagation();
+  return (
+    <button
+      className={`fav-star ${e.favorite ? "on" : ""}`}
+      title={`${label} (F)`}
+      aria-label={label}
+      aria-pressed={!!e.favorite}
+      // Draggable itself (and the drag cancelled), so grabbing the star never drags the card.
+      draggable
+      onDragStart={(ev) => (ev.preventDefault(), ev.stopPropagation())}
+      onMouseDown={stop}
+      onDoubleClick={stop}
+      onContextMenu={stop}
+      onClick={(ev) => {
+        ev.stopPropagation();
+        events.fav(i);
+      }}
+    >
+      <Icon name="star" size={size} fill={!!e.favorite} stroke={1.8} />
+    </button>
+  );
 }
 
 /** One card or row. Memoized: re-renders only when its own props change. */
-const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, selected, focused, showLocation, baseLabel, events }: TileProps) {
+const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, selected, focused, showLocation, baseLabel, events, drop, canFavorite }: TileProps) {
+  const folder = e.kind === "folder";
   const common = {
     style: { top, left, width: tileW, height } as React.CSSProperties,
     "data-selected": selected || undefined,
     "data-focus": focused || undefined,
+    "data-drop": drop ? (drop.ok ? "ok" : "no") : undefined,
+    draggable: true,
+    onDragStart: (ev: React.DragEvent) => events.dragStart(i, ev),
+    onDragEnd: () => events.dragEnd(),
+    ...(folder
+      ? {
+          onDragOver: (ev: React.DragEvent) => events.dragOver(i, ev),
+          onDragEnter: (ev: React.DragEvent) => events.dragOver(i, ev),
+          onDragLeave: (ev: React.DragEvent) => events.dragLeave(i, ev),
+          onDrop: (ev: React.DragEvent) => events.drop(i, ev),
+        }
+      : {}),
     "aria-selected": selected,
     role: "option",
     onClick: (ev: React.MouseEvent) => events.click(i, ev),
     onDoubleClick: (ev: React.MouseEvent) => !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && events.open(i),
     onMouseDown: (ev: React.MouseEvent) => (ev.shiftKey || ev.detail > 1) && ev.preventDefault(), // no text selection on Shift/double click
     onContextMenu: (ev: React.MouseEvent) => events.menu(i, ev),
-    title: e.name,
+    title: drop && !drop.ok ? drop.reason : e.name,
   };
+  const reject = drop && !drop.ok ? <span className="drop-reason">{drop.reason}</span> : null;
   if (view === "list") {
     return (
       <div className={`row ${e.kind === "folder" ? "folder" : ""}`} {...common}>
@@ -254,17 +385,16 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
               <Icon name="shield" size={11} />
             </span>
           )}
-          {e.favorite && (
-            <span className="private-mark" title="Favorite">
-              <Icon name="star" size={11} />
-            </span>
-          )}
           {e.link && <span className="link-target truncate">→ {e.link}</span>}
           {e.private && (
             <span className="private-mark" title={PRIVATE_HINT}>
               <Icon name="lock" size={11} />
             </span>
           )}
+          <span className="fav-slot">
+            <FavStar e={e} i={i} events={events} can={canFavorite} size={14} />
+          </span>
+          {reject}
         </span>
         <span className="c-type">{typeLabel(e)}</span>
         <span className="c-size">{e.kind === "folder" ? "—" : formatSize(e.size)}</span>
@@ -276,6 +406,8 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
     return (
       <div className={`tile gallery ${isMedia(e) ? "" : "plain"}`} {...common}>
         <Thumb entry={e} fit={e.kind === "folder" ? "contain" : "cover"} iconSize={e.kind === "folder" ? Math.round(tileW * 0.22) : 40} />
+        <FavStar e={e} i={i} events={events} can={canFavorite} size={15} />
+        {reject}
         <div className="caption-overlay">
           <div className="truncate">
             {e.private && (
@@ -294,17 +426,14 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
       <div className={`tile grid ${e.kind === "folder" ? "folder" : ""}`} {...common}>
         <div className="frame" style={{ height: Math.round(tileW - GRID_CHROME) }}>
           <Thumb entry={e} fit={isMedia(e) ? "cover" : "contain"} iconSize={e.kind === "folder" ? Math.round((tileW - GRID_CHROME) * 0.27) : 36} />
+          <FavStar e={e} i={i} events={events} can={canFavorite} size={15} />
+          {reject}
         </div>
         <div className="caption">
           <div className="name truncate">
             {e.flagged && (
               <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
                 <Icon name="warning" size={11} />{" "}
-              </span>
-            )}
-            {e.favorite && (
-              <span className="private-mark" title="Favorite">
-                <Icon name="star" size={10} />{" "}
               </span>
             )}
             {e.name}

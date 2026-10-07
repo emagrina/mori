@@ -2941,7 +2941,26 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
             );
         }
 
-        // 10. Quick Cleanup sessions: saved in normal mode, never in a temporary session.
+        // 10. A drop of three selected files onto a folder: the same command, one batch.
+        for n in ["d1", "d2", "d3"] {
+            fs::write(dir.join(format!("Album/{n}.jpg")), n).unwrap();
+        }
+        settle();
+        publish_index(&app, (*state.index()).clone());
+        while !has("Album/d3.jpg") {
+            start_scan(&app);
+            settle();
+        }
+        let r = run("move", &["Album/d1.jpg", "Album/d2.jpg", "Album/d3.jpg"], &id("Other"), &[]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer drop-three: done={} arrived={} left={} indexed={}",
+            r.done.len(),
+            ["d1", "d2", "d3"].iter().all(|n| read(&format!("Other/{n}.jpg")) == *n),
+            ["d1", "d2", "d3"].iter().any(|n| dir.join(format!("Album/{n}.jpg")).exists()),
+            has("Other/d2.jpg") && !has("Album/d2.jpg")
+        );
+
+        // 11. Quick Cleanup sessions: saved in normal mode, never in a temporary session.
         let session = cleanup::Session {
             folder: id("Album"),
             options: cleanup::Options { recursive: false, kind: "all".into(), order: "browser".into() },
@@ -2963,6 +2982,18 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
             "mori: DEBUG transfer cleanup-store: saved={saved} resumed={resumed} discarded={discarded} temp-refused={} temp-none={}",
             temp_save.is_err(),
             temp_read.is_none()
+        );
+        let _ = end_temporary(app.clone(), app.state::<AppState>());
+
+        // 12. Private Inspection is read-only: a drop (or any move) is refused, nothing changes.
+        begin_session(&state, true);
+        open_root(&app, &dir).unwrap();
+        settle();
+        let r = run("move", &["Other/d1.jpg"], &id("Album"), &[]).unwrap();
+        eprintln!(
+            "mori: DEBUG transfer private-inspection: refused={} stayed={}",
+            r.failed.first().is_some_and(|f| f.reason == policy::READ_ONLY),
+            read("Other/d1.jpg") == "d1" && !dir.join("Album/d1.jpg").exists()
         );
         let _ = end_temporary(app.clone(), app.state::<AppState>());
         let files_left = walkdir::WalkDir::new(&dir).into_iter().flatten().filter(|e| e.file_type().is_file()).count();

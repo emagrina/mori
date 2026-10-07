@@ -172,7 +172,7 @@ export interface QueryResult {
   protectedScope?: boolean;
 }
 
-export type Stats = Record<"files" | "folders" | "bytes" | "links" | Exclude<KindFilter, "all">, number>;
+export type Stats = Record<"files" | "folders" | "bytes" | "links" | "favorites" | Exclude<KindFilter, "all">, number>;
 
 // ------------------------------------------------------------- inspection
 
