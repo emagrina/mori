@@ -24,6 +24,9 @@ pub enum Op {
     Create,
     /// Putting a trashed item back (undo).
     Restore,
+    /// Moving an item to another folder (the source side; the destination
+    /// is checked as `Create`).
+    Move,
 }
 
 pub struct Policy<'a> {
@@ -52,7 +55,7 @@ impl Policy<'_> {
                 name(&folder)
             ));
         }
-        if matches!(op, Op::Trash | Op::Rename | Op::Delete) && self.protected.any_below(path) {
+        if matches!(op, Op::Trash | Op::Rename | Op::Delete | Op::Move) && self.protected.any_below(path) {
             return Err("This folder contains a protected folder (Never Modify), so Mori won't change it.".into());
         }
         Ok(())
@@ -82,6 +85,10 @@ mod tests {
         assert!(p.check(Op::Create, &base.join("Photos/Archive/new.jpg")).is_err());
         assert!(p.check(Op::Create, &base.join("Photos/Loose/new.jpg")).is_ok());
         assert!(p.check(Op::Trash, &base.join("Photos/Loose")).is_ok());
+        // Moving out of (or a folder containing) a protected folder is refused.
+        assert!(p.check(Op::Move, &photo).is_err());
+        assert!(p.check(Op::Move, &base.join("Photos")).unwrap_err().contains("contains a protected"));
+        assert!(p.check(Op::Move, &base.join("Photos/Loose")).is_ok());
         let ro = Policy { read_only: true, protected: &store };
         assert_eq!(ro.check(Op::Trash, &base.join("Photos/Loose")).unwrap_err(), READ_ONLY);
         fs::remove_dir_all(base).unwrap();

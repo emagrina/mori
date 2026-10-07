@@ -119,10 +119,14 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
 const mod = isMac ? "⌘" : "Ctrl+";
 
 export const SHORTCUTS: [string, string][] = [
-  ["↑ ↓ ← →", "Move the selection"],
-  ["Return", "Open (folder or preview)"],
+  ["Click", "Select"],
+  [isMac ? "⌘-Click" : "Ctrl+Click", "Add to / remove from the selection"],
+  ["Shift-Click", "Select a range"],
+  [`${mod}A`, "Select all"],
+  ["↑ ↓ ← →", "Move the selection (with Shift: extend it)"],
+  ["Double-click  Return", "Open (folder or preview)"],
   ["Space", "Quick Look (Mori's own, never the system one)"],
-  ["Esc", "Close / clear"],
+  ["Esc", "Close / clear the selection"],
   ["I", "Get Info"],
   ["F", "Add to / remove from Favorites"],
   [`${mod}F`, "Search"],
@@ -130,6 +134,8 @@ export const SHORTCUTS: [string, string][] = [
   [`${mod}1  ${mod}2  ${mod}3`, "List · Grid · Gallery"],
   ["← →  (preview)", "Previous / next file"],
   [`${mod}+  ${mod}−  ${mod}0`, "Zoom in / out / fit (preview)"],
+  ["M  ⇧M", "Move to… / Copy to…"],
+  ["F2", "Rename"],
   [isMac ? "⌘⌫" : "Delete", "Move to Trash"],
   [`${mod}Z`, "Undo the last file operation"],
   [`${mod}↑  ⌫`, "Parent folder / back"],

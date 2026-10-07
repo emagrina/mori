@@ -1,7 +1,7 @@
 //! The only operations through which Mori changes the filesystem: moving
-//! items to the OS Trash / Recycle Bin (and restoring them), renaming without
-//! ever overwriting, creating new files, and — only on explicit, confirmed
-//! request — deleting permanently. Every mutation takes a `&Policy`
+//! items to the OS Trash / Recycle Bin (and restoring them), renaming and
+//! moving without ever overwriting, copying and creating new files, and —
+//! only on explicit, confirmed request — deleting permanently. Every mutation takes a `&Policy`
 //! (read-only mode, protected folders) and checks it first. Symbolic links
 //! are always acted on as themselves; their targets are never touched.
 
@@ -343,9 +343,391 @@ fn platform_rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::rename(from, to)
 }
 
+// ------------------------------------------------------------ move & copy
+
+/// Deepest folder tree a copy descends into (like the index's own limit).
+const MAX_COPY_DEPTH: usize = 64;
+
+/// `dest` is `src` itself or somewhere inside it (moving or copying a
+/// folder into itself would never end).
+pub fn is_within(dest: &Path, src: &Path) -> bool {
+    dest == src || dest.starts_with(src)
+}
+
+/// A name for `name` that is free in `dir`, Finder-style: "photo.jpg" →
+/// "photo 2.jpg", "photo 3.jpg"… (folders and extensionless names get the
+/// number at the end). `taken` says whether a candidate is already used.
+pub fn free_name(name: &str, is_dir: bool, taken: &dyn Fn(&str) -> bool) -> Option<String> {
+    if !taken(name) {
+        return Some(name.to_owned());
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && !is_dir => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    // "photo 2.jpg" kept again becomes "photo 3.jpg", not "photo 2 2.jpg".
+    let stem = match stem.rsplit_once(' ') {
+        Some((base, n)) if !base.is_empty() && n.len() <= 4 && n.parse::<u32>().is_ok_and(|n| n >= 2) => base,
+        _ => stem,
+    };
+    (2..10_000).map(|n| format!("{stem} {n}{ext}")).find(|c| c.len() <= 255 && !taken(c))
+}
+
+/// How a move was carried out.
+#[derive(Debug, PartialEq)]
+pub enum Moved {
+    /// Renamed in place (same volume): atomic, nothing copied.
+    Renamed,
+    /// Another volume: copied and verified, then the original went to the
+    /// Trash (`Some` = where, when the platform says so). Never a permanent
+    /// delete of the original.
+    Copied { bytes: u64, trashed: Option<PathBuf> },
+    /// Copied and verified, but the original couldn't be moved to the Trash:
+    /// both now exist. The reason is reported, nothing is lost.
+    CopiedOriginalKept { bytes: u64, reason: String },
+}
+
+/// Move `src` (a file, folder or link, acted on as itself) to the new path
+/// `dest` (which must not exist). Same volume: an atomic no-replace rename.
+/// Across volumes: a verified copy, then the original to the Trash.
+/// `cancel` is polled between files of a cross-volume copy.
+pub fn move_item(policy: &Policy, src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<Moved, String> {
+    policy.check(Op::Move, src)?;
+    policy.check(Op::Create, dest)?;
+    if is_within(dest, src) {
+        return Err("A folder can't be moved into itself.".into());
+    }
+    fs::symlink_metadata(src).map_err(|_| "item no longer exists".to_string())?;
+    match platform_rename_excl(src, dest) {
+        Ok(()) => Ok(Moved::Renamed),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TAKEN.into()),
+        Err(e) if cross_device(&e) => {
+            let bytes = copy_checked(src, dest, cancel)?;
+            match move_to_trash(policy, src) {
+                Ok(trashed) => Ok(Moved::Copied { bytes, trashed }),
+                Err(reason) => Ok(Moved::CopiedOriginalKept { bytes, reason }),
+            }
+        }
+        Err(e) => Err(transfer_reason(&e)),
+    }
+}
+
+/// Copy `src` (file, folder or link) to the new path `dest`, which must not
+/// exist. Links are recreated as links (what they point to is never read or
+/// copied). Nothing is ever replaced; a copy that fails or is cancelled
+/// half-way is removed again (only what this copy created). Returns bytes.
+pub fn copy_item(policy: &Policy, src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<u64, String> {
+    policy.check(Op::Create, dest)?;
+    if is_within(dest, src) {
+        return Err("A folder can't be copied into itself.".into());
+    }
+    copy_checked(src, dest, cancel)
+}
+
+const TAKEN: &str = "An item with that name is already there.";
+
+fn cross_device(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::EXDEV)
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_NOT_SAME_DEVICE: MoveFileExW without MOVEFILE_COPY_ALLOWED.
+        e.raw_os_error() == Some(17)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = e;
+        false
+    }
+}
+
+fn transfer_reason(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+        std::io::ErrorKind::NotFound => "the item or the destination is no longer available".into(),
+        std::io::ErrorKind::AlreadyExists => TAKEN.into(),
+        std::io::ErrorKind::StorageFull => "the destination is full".into(),
+        std::io::ErrorKind::ReadOnlyFilesystem => "the destination is read-only".into(),
+        _ => "the item couldn't be transferred".into(),
+    }
+}
+
+/// Copy, then check every regular file arrived with its full size; undo the
+/// partial copy on any failure.
+fn copy_checked(src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<u64, String> {
+    let mut created = Vec::new();
+    let r = copy_tree(src, dest, 0, cancel, &mut created);
+    if r.is_err() {
+        // Only our own new items, newest first (files before their folders).
+        for p in created.iter().rev() {
+            match fs::symlink_metadata(p) {
+                Ok(m) if m.is_dir() => {
+                    let _ = fs::remove_dir(p);
+                }
+                Ok(_) => {
+                    let _ = fs::remove_file(p);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    r
+}
+
+fn copy_tree(
+    src: &Path,
+    dest: &Path,
+    depth: usize,
+    cancel: &dyn Fn() -> bool,
+    created: &mut Vec<PathBuf>,
+) -> Result<u64, String> {
+    if cancel() {
+        return Err("cancelled".into());
+    }
+    if depth > MAX_COPY_DEPTH {
+        return Err("the folder is nested too deeply to copy".into());
+    }
+    let meta = fs::symlink_metadata(src).map_err(|_| "item no longer exists".to_string())?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        copy_link(src, dest, &meta)?;
+        created.push(dest.to_path_buf());
+        return Ok(0);
+    }
+    if ft.is_file() {
+        let bytes = copy_file(src, dest, &meta, created)?;
+        return Ok(bytes);
+    }
+    if !ft.is_dir() {
+        return Err("it contains an item that isn't a file, folder or link".into());
+    }
+    fs::create_dir(dest).map_err(|e| transfer_reason(&e))?;
+    created.push(dest.to_path_buf());
+    let mut names: Vec<_> = fs::read_dir(src)
+        .map_err(|_| "a folder couldn't be read".to_string())?
+        .map(|e| e.map(|e| e.file_name()).map_err(|_| "a folder couldn't be read".to_string()))
+        .collect::<Result<_, _>>()?;
+    names.sort();
+    let mut bytes = 0;
+    for n in names {
+        bytes += copy_tree(&src.join(&n), &dest.join(&n), depth + 1, cancel, created)?;
+    }
+    let _ = fs::set_permissions(dest, meta.permissions());
+    Ok(bytes)
+}
+
+fn copy_file(src: &Path, dest: &Path, meta: &fs::Metadata, created: &mut Vec<PathBuf>) -> Result<u64, String> {
+    let mut open = fs::OpenOptions::new();
+    open.read(true);
+    let mut make = fs::OpenOptions::new();
+    make.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Never read through, or write through, a link swapped in meanwhile.
+        open.custom_flags(libc::O_NOFOLLOW);
+        make.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut from = open.open(src).map_err(|e| transfer_reason(&e))?;
+    let mut to = make.open(dest).map_err(|e| transfer_reason(&e))?;
+    created.push(dest.to_path_buf());
+    let n = std::io::copy(&mut from, &mut to).map_err(|e| transfer_reason(&e))?;
+    to.sync_all().map_err(|e| transfer_reason(&e))?;
+    if n != meta.len() || to.metadata().map(|m| m.len()).ok() != Some(meta.len()) {
+        return Err("the copy is incomplete (the file changed or the destination failed)".into());
+    }
+    let _ = to.set_permissions(meta.permissions());
+    if let Ok(t) = meta.modified() {
+        let _ = to.set_modified(t);
+    }
+    Ok(n)
+}
+
+/// Recreate a link with the same link text; its target is never touched.
+fn copy_link(src: &Path, dest: &Path, meta: &fs::Metadata) -> Result<(), String> {
+    let target = fs::read_link(src).map_err(|_| "a link couldn't be read".to_string())?;
+    #[cfg(unix)]
+    {
+        let _ = meta;
+        std::os::unix::fs::symlink(&target, dest).map_err(|e| transfer_reason(&e))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        let r = if meta.file_type().is_symlink_dir() {
+            std::os::windows::fs::symlink_dir(&target, dest)
+        } else {
+            std::os::windows::fs::symlink_file(&target, dest)
+        };
+        r.map_err(|_| "links can't be created here (Windows needs Developer Mode for that)".to_string())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, dest, meta);
+        Err("links can't be copied on this platform".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lab(name: &str) -> PathBuf {
+        let d = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const NEVER: &dyn Fn() -> bool = &|| false;
+
+    #[test]
+    fn free_names_follow_finder() {
+        let taken = |set: &'static [&'static str]| move |n: &str| set.contains(&n);
+        assert_eq!(free_name("a.jpg", false, &taken(&[])).unwrap(), "a.jpg");
+        assert_eq!(free_name("a.jpg", false, &taken(&["a.jpg"])).unwrap(), "a 2.jpg");
+        assert_eq!(free_name("a.jpg", false, &taken(&["a.jpg", "a 2.jpg"])).unwrap(), "a 3.jpg");
+        assert_eq!(free_name("a 2.jpg", false, &taken(&["a 2.jpg"])).unwrap(), "a 3.jpg");
+        assert_eq!(free_name("Album.2024", true, &taken(&["Album.2024"])).unwrap(), "Album.2024 2");
+        assert_eq!(free_name("README", false, &taken(&["README"])).unwrap(), "README 2");
+        assert_eq!(free_name("2024", true, &taken(&["2024"])).unwrap(), "2024 2");
+    }
+
+    #[test]
+    fn copy_never_replaces_and_copies_folders_completely() {
+        let d = lab("copy");
+        fs::create_dir_all(d.join("src/Album/Sub")).unwrap();
+        fs::write(d.join("src/Album/a.jpg"), vec![7u8; 5000]).unwrap();
+        fs::write(d.join("src/Album/Sub/b.txt"), b"b").unwrap();
+        fs::write(d.join("src/Album/.hidden"), b"h").unwrap();
+        fs::create_dir_all(d.join("dst")).unwrap();
+        fs::write(d.join("dst/a.jpg"), b"existing").unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        // An existing destination is never replaced.
+        assert!(copy_item(&p, &d.join("src/Album/a.jpg"), &d.join("dst/a.jpg"), NEVER).is_err());
+        assert_eq!(fs::read(d.join("dst/a.jpg")).unwrap(), b"existing");
+        // A folder copies with everything inside (hidden files too), source untouched.
+        assert_eq!(copy_item(&p, &d.join("src/Album"), &d.join("dst/Album"), NEVER).unwrap(), 5002);
+        assert_eq!(fs::read(d.join("dst/Album/Sub/b.txt")).unwrap(), b"b");
+        assert!(d.join("dst/Album/.hidden").exists() && d.join("src/Album/a.jpg").exists());
+        assert_eq!(
+            fs::metadata(d.join("dst/Album/a.jpg")).unwrap().modified().unwrap(),
+            fs::metadata(d.join("src/Album/a.jpg")).unwrap().modified().unwrap(),
+            "dates are kept"
+        );
+        // Into itself: refused before anything is created.
+        assert!(copy_item(&p, &d.join("src/Album"), &d.join("src/Album/Sub/Album"), NEVER).is_err());
+        assert!(!d.join("src/Album/Sub/Album").exists());
+        // Read-only and a protected destination refuse.
+        let ro = Policy { read_only: true, protected: &store };
+        assert_eq!(
+            copy_item(&ro, &d.join("src/Album/a.jpg"), &d.join("dst/x.jpg"), NEVER).unwrap_err(),
+            crate::policy::READ_ONLY
+        );
+        store.set(&d.join("dst"), 0, true).unwrap();
+        assert!(copy_item(&p, &d.join("src/Album/a.jpg"), &d.join("dst/y.jpg"), NEVER)
+            .unwrap_err()
+            .contains("protected"));
+        assert!(!d.join("dst/x.jpg").exists() && !d.join("dst/y.jpg").exists());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_or_failed_copy_leaves_nothing_behind() {
+        let d = lab("copy-cancel");
+        fs::create_dir_all(d.join("src/Album/Sub")).unwrap();
+        for i in 0..6 {
+            fs::write(d.join(format!("src/Album/Sub/{i}.jpg")), vec![1u8; 100]).unwrap();
+        }
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        let polls = std::cell::Cell::new(0);
+        let cancel = || {
+            polls.set(polls.get() + 1);
+            polls.get() > 4
+        };
+        assert_eq!(copy_item(&p, &d.join("src/Album"), &d.join("Copy"), &cancel).unwrap_err(), "cancelled");
+        assert!(!d.join("Copy").exists(), "the partial copy was removed");
+        assert_eq!(fs::read_dir(d.join("src/Album/Sub")).unwrap().count(), 6, "the source is untouched");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_copied_and_moved_as_links() {
+        let d = lab("copy-links");
+        fs::create_dir_all(d.join("Elsewhere")).unwrap();
+        fs::write(d.join("Elsewhere/precious.txt"), b"keep").unwrap();
+        fs::create_dir_all(d.join("Album")).unwrap();
+        std::os::unix::fs::symlink(d.join("Elsewhere"), d.join("Album/to-elsewhere")).unwrap();
+        std::os::unix::fs::symlink(d.join("Elsewhere/precious.txt"), d.join("link.txt")).unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        assert_eq!(copy_item(&p, &d.join("Album"), &d.join("Album copy"), NEVER).unwrap(), 0);
+        let m = fs::symlink_metadata(d.join("Album copy/to-elsewhere")).unwrap();
+        assert!(m.file_type().is_symlink(), "a link inside a folder stays a link");
+        assert_eq!(fs::read_link(d.join("Album copy/to-elsewhere")).unwrap(), d.join("Elsewhere"));
+        assert!(!d.join("Album copy/to-elsewhere/precious.txt").symlink_metadata().unwrap().is_dir());
+        assert_eq!(move_item(&p, &d.join("link.txt"), &d.join("Album/link.txt"), NEVER).unwrap(), Moved::Renamed);
+        assert!(fs::symlink_metadata(d.join("Album/link.txt")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(d.join("Elsewhere/precious.txt")).unwrap(), b"keep", "the target never moved");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn moves_never_overwrite_and_obey_the_policy() {
+        let d = lab("move");
+        fs::create_dir_all(d.join("A/Inner")).unwrap();
+        fs::create_dir_all(d.join("B")).unwrap();
+        fs::write(d.join("A/x.jpg"), b"x").unwrap();
+        fs::write(d.join("B/x.jpg"), b"other").unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        assert!(move_item(&p, &d.join("A/x.jpg"), &d.join("B/x.jpg"), NEVER).is_err());
+        assert_eq!(fs::read(d.join("B/x.jpg")).unwrap(), b"other");
+        assert!(d.join("A/x.jpg").exists());
+        assert!(move_item(&p, &d.join("A"), &d.join("A/Inner/A"), NEVER).unwrap_err().contains("into itself"));
+        let ro = Policy { read_only: true, protected: &store };
+        assert_eq!(
+            move_item(&ro, &d.join("A/x.jpg"), &d.join("B/y.jpg"), NEVER).unwrap_err(),
+            crate::policy::READ_ONLY
+        );
+        // Protected source, protected destination, a folder containing a protected one.
+        store.set(&d.join("A/Inner"), 0, true).unwrap();
+        assert!(move_item(&p, &d.join("A"), &d.join("B/A"), NEVER).unwrap_err().contains("contains a protected"));
+        store.set(&d.join("A/Inner"), 0, false).unwrap();
+        store.set(&d.join("B"), 0, true).unwrap();
+        assert!(move_item(&p, &d.join("A/x.jpg"), &d.join("B/y.jpg"), NEVER).unwrap_err().contains("protected"));
+        store.set(&d.join("B"), 0, false).unwrap();
+        assert_eq!(move_item(&p, &d.join("A/x.jpg"), &d.join("B/y.jpg"), NEVER).unwrap(), Moved::Renamed);
+        assert_eq!(fs::read(d.join("B/y.jpg")).unwrap(), b"x");
+        assert!(move_item(&p, &d.join("A/missing.jpg"), &d.join("B/z.jpg"), NEVER).is_err());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A real cross-volume move (copy, verify, original to the Trash). Needs
+    /// a second volume: `MORI_XVOL_TEST_DIR=/Volumes/MoriTest cargo test -- --ignored cross_volume`
+    #[test]
+    #[ignore]
+    fn cross_volume_move_copies_then_trashes_the_original() {
+        let other = PathBuf::from(std::env::var_os("MORI_XVOL_TEST_DIR").expect("MORI_XVOL_TEST_DIR"));
+        let d = lab("xvol");
+        let dest = fs::canonicalize(&other).unwrap().join(format!("mori-xvol-{}", std::process::id()));
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(d.join("Album/Sub")).unwrap();
+        fs::write(d.join("Album/Sub/a.jpg"), vec![3u8; 4096]).unwrap();
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        let r = move_item(&p, &d.join("Album"), &dest.join("Album"), NEVER).unwrap();
+        assert!(matches!(r, Moved::Copied { bytes: 4096, .. }), "{r:?}");
+        assert_eq!(fs::read(dest.join("Album/Sub/a.jpg")).unwrap(), vec![3u8; 4096]);
+        assert!(!d.join("Album").exists(), "the original went to the Trash");
+        fs::remove_dir_all(&dest).unwrap();
+        fs::remove_dir_all(&d).unwrap();
+    }
 
     #[test]
     fn validates_names() {

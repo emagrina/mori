@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-choose-folder"
+description = "Enables the transfer_choose_folder command without any pre-configured scope."
+commands.allow = ["transfer_choose_folder"]
+
+[[permission]]
+identifier = "deny-transfer-choose-folder"
+description = "Denies the transfer_choose_folder command without any pre-configured scope."
+commands.deny = ["transfer_choose_folder"]

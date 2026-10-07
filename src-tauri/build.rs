@@ -93,6 +93,13 @@ const COMMANDS: &[&str] = &[
     "meta_results",
     "meta_places",
     "sanitize_copies",
+    "plan_transfer",
+    "transfer_items",
+    "transfer_cancel",
+    "transfer_choose_folder",
+    "cleanup_saved",
+    "cleanup_save",
+    "cleanup_discard",
 ];
 
 fn main() {

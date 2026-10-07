@@ -31,11 +31,12 @@ Cache: `~/Library/Caches/app.mori.viewer/` (Windows `%LOCALAPPDATA%\app.mori.vie
 | Tags, favorites, screenshot corrections | data `tags.json`, `favorites.json`, `capture-*.json` | Organization | Clear Mori Data (tags & favorites), Forget Drive, Reset | Paths of tagged items, tag names |
 | "Not duplicates" decisions | data `similar-dismissed.bin` | Don't suggest them again | Clear Mori Data (analysis), Reset | Pairs of content hashes only |
 | Media-engine blocklist | data `blocked-media.json` | Never reload a video that froze the system engine | Clear Mori Data (analysis), Reset | Opaque hashes only |
+| Unfinished Quick Cleanup sessions (normal sessions only) | data `cleanup-sessions.json` | Resume a cleanup later | Discard in Quick Cleanup, finishing it, Clear Mori Data (analysis), Forget Drive, Reset | Opaque item and folder ids with Keep / Mark for Trash decisions; hashes of the root and volume. No names or paths |
 | Integrity snapshots | data `integrity/` | Verify files later (opt-in) | Delete in Integrity Snapshots, Clear Mori Data, Reset | Relative paths, sizes, SHA-256 |
 | Crash marker | data `last-panic.txt` | Diagnose crashes | Clear History, Reset | Time, thread, source-code line (no message, path or name) |
 | macOS preferences | `~/Library/Preferences/app.mori.viewer.plist` | Window state | Reset | The folder picker's last folder is removed after each use, at quit and at launch |
 
-**In memory only** (gone at quit): previews, PDF pages, archive listings, metadata results, checksums, analysis results, undo history, recent locations, search.
+**In memory only** (gone at quit): previews, PDF pages, archive listings, metadata results, checksums, analysis results, undo history, recent locations, Move/Copy destinations picked this session, search.
 
 There are **no logs** in release builds. Developer builds print diagnostics only when explicitly enabled with `MORI_DEBUG_*` environment variables, and those may contain paths.
 
@@ -43,7 +44,7 @@ There are **no logs** in release builds. Developer builds print diagnostics only
 
 During a session, Mori:
 - keeps the index, thumbnails, previews, frames, PDF pages, metadata, checksums, analysis results, undo history and search in memory;
-- refuses to save tags, favorites, folder rules, integrity snapshots, drive settings and "not duplicates" decisions;
+- refuses to save tags, favorites, folder rules, integrity snapshots, drive settings, "not duplicates" decisions and Quick Cleanup queues (cleanup decisions stay in memory and end with the session);
 - uses no fingerprint cache;
 - doesn't open files in other apps or reveal them in Finder.
 

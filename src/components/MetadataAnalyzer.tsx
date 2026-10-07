@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   api,
   CATEGORY_LABEL,
@@ -18,9 +18,11 @@ import {
 import { LocationList, ProgressBar } from "./Analyzer";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
-import { PlacesMap } from "./PlacesMap";
 import { Preview } from "./Preview";
 import { Thumb } from "./Thumb";
+
+/** The offline world map is only loaded when Places is opened. */
+const PlacesMap = lazy(() => import("./PlacesMap").then((m) => ({ default: m.PlacesMap })));
 
 const PAGE = 200;
 const CATEGORIES: MetaCategory[] = ["location", "person", "device", "software", "comment", "identifier"];
@@ -368,6 +370,7 @@ export function MetadataAnalyzer({
 
         {phase === "results" && view && mode === "map" &&
           (places && places.ids.length ? (
+            <Suspense fallback={<div className="dot-spinner" />}>
             <PlacesMap
               places={places}
               onOpen={(i, members) => {
@@ -375,6 +378,7 @@ export function MetadataAnalyzer({
                 setPreview({ items, index: Math.max(0, members.indexOf(i)) });
               }}
             />
+            </Suspense>
           ) : (
             <div className="empty">
               <Icon name="check" size={34} stroke={1.3} />

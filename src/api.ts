@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { SavedSession } from "./cleanup";
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
 export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
@@ -28,6 +29,8 @@ export interface Entry {
   private?: boolean;
   /** A protected folder ("Never Modify"). */
   protected?: boolean;
+  /** Inside a protected folder (or one itself): Mori won't change it. */
+  guarded?: boolean;
   /** Symbolic links: where the link points (never followed). */
   link?: string;
   /** The name alone shows a high-attention pattern (see the inspector). */
@@ -495,6 +498,54 @@ export interface TrashResult {
   failed: Failure[];
 }
 
+export type TransferOp = "move" | "copy";
+/** How to resolve a name conflict: a free name, the existing file to the Trash, or leave it. */
+export type Resolution = "keepBoth" | "replace" | "skip";
+
+export interface TransferEntry {
+  id: string;
+  name: string;
+  path: string;
+  kind: "file" | "folder" | "link";
+  bytes: number;
+  files: number;
+  /** Something with the same name is already there ("batch": another selected item). */
+  conflict: "file" | "folder" | "link" | "batch" | null;
+  /** Replace is offered (file over file, the existing one may go to the Trash). */
+  replaceable: boolean;
+  blocked: string | null;
+  note: string | null;
+}
+
+export interface TransferPlan {
+  op: TransferOp;
+  destName: string;
+  crossVolume: boolean;
+  entries: TransferEntry[];
+  totalBytes: number;
+  totalFiles: number;
+  blocked: number;
+  conflicts: number;
+}
+
+export interface TransferResult {
+  done: { id: string; newId: string | null }[];
+  bytes: number;
+  skipped: number;
+  failed: Failure[];
+  /** Copied, but the original couldn't go to the Trash: both exist. */
+  originalsKept: Failure[];
+  cancelled: boolean;
+}
+
+/** A destination picked outside the browsed folder (opaque key for this session). */
+export interface DestInfo {
+  key: string;
+  label: string;
+  path: string;
+  drive: string;
+}
+
 // ------------------------------------------------------ duplicate analyzer
 
 export type AnalysisKind = "images" | "videos" | "documents" | "audio" | "other";
@@ -770,6 +821,18 @@ export const api = {
   metaPlaces: () => invoke<Places | null>("meta_places"),
   /** New files next to the originals; originals are never modified. */
   sanitizeCopies: (ids: string[]) => invoke<SanitizeOutcome[]>("sanitize_copies", { ids }),
+  /** Dry run of Move / Copy into `dest` (a folder id, "" = the root, or a picked key). Nothing changes. */
+  planTransfer: (op: TransferOp, ids: string[], dest: string) => invoke<TransferPlan>("plan_transfer", { op, ids, dest }),
+  /** Re-checked by the backend. Never overwrites: conflicts follow `resolutions` (unresolved = skipped). */
+  transferItems: (op: TransferOp, ids: string[], dest: string, resolutions: Record<string, Resolution>) =>
+    invoke<TransferResult>("transfer_items", { op, ids, dest, resolutions }),
+  transferCancel: () => invoke<void>("transfer_cancel"),
+  transferChooseFolder: () => invoke<DestInfo>("transfer_choose_folder"),
+  /** An unfinished Quick Cleanup of this folder (never in a temporary session). */
+  cleanupSaved: (folder: string) => invoke<SavedSession | null>("cleanup_saved", { folder }),
+  /** Ids and decisions only. Refused in a temporary session. Never touches files. */
+  cleanupSave: (session: SavedSession) => invoke<void>("cleanup_save", { session }),
+  cleanupDiscard: (folder: string) => invoke<void>("cleanup_discard", { folder }),
 };
 
 /**

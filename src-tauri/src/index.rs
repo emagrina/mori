@@ -177,6 +177,9 @@ pub struct Item {
     /// A protected folder ("Never Modify").
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub protected: bool,
+    /// Inside (or equal to) a protected folder: Mori won't change it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub guarded: bool,
     /// Symbolic links: where the link points (display only, never followed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
@@ -207,6 +210,7 @@ impl From<&Entry> for Item {
             location: None,
             private: e.private,
             protected: e.protected,
+            guarded: e.guarded,
             link: e.link.as_deref().map(display_safe),
             flagged: crate::risk::name_findings(&e.name).iter().any(|f| f.level == crate::risk::Level::High),
             capture: e.capture,

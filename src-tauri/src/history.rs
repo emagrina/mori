@@ -3,7 +3,11 @@
 //!
 //! - **Move to Trash**: put back from the Trash when the platform reported
 //!   where the item went (macOS) and the original place is still free.
-//! - **Rename**: rename back, never over an existing item.
+//! - **Rename / move on the same volume**: rename back, never over an
+//!   existing item.
+//! - **Move to another volume** (a verified copy, then the original to the
+//!   Trash): put the original back from the Trash, and only then move the
+//!   copy to the Trash.
 //! - **Created a file** (sanitized copy): move the copy to the Trash.
 //! - **Deleted permanently / overwritten**: listed, but never undoable —
 //!   Mori says so instead of pretending.
@@ -18,10 +22,26 @@ const MAX_RECORDS: usize = 200;
 
 #[derive(Clone, Debug)]
 pub enum Change {
-    Trashed { original: PathBuf, trashed: Option<PathBuf> },
-    Renamed { from: PathBuf, to: PathBuf },
-    Created { path: PathBuf },
-    Deleted { path: PathBuf },
+    Trashed {
+        original: PathBuf,
+        trashed: Option<PathBuf>,
+    },
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Created {
+        path: PathBuf,
+    },
+    Deleted {
+        path: PathBuf,
+    },
+    /// Moved across volumes: `to` is the copy, the original went to the Trash.
+    CrossMoved {
+        from: PathBuf,
+        to: PathBuf,
+        trashed: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -60,13 +80,20 @@ pub struct UndoOutcome {
     /// Paths that changed (for refreshing views).
     #[serde(skip)]
     pub touched: Vec<PathBuf>,
+    /// Items now back at their old path: (where they were, where they are
+    /// again), so Mori's own records (privacy, favorites, tags) follow.
+    #[serde(skip)]
+    pub moved_back: Vec<(PathBuf, PathBuf)>,
 }
 
 fn why_not(changes: &[Change]) -> Option<String> {
     if changes.iter().any(|c| matches!(c, Change::Deleted { .. })) {
         return Some("Deleted permanently: this can't be undone.".into());
     }
-    if changes.iter().any(|c| matches!(c, Change::Trashed { trashed: None, .. })) {
+    if changes
+        .iter()
+        .any(|c| matches!(c, Change::Trashed { trashed: None, .. } | Change::CrossMoved { trashed: None, .. }))
+    {
         return Some(
             "Restore it from the system Trash (Mori wasn't told where the item went on this platform).".into(),
         );
@@ -130,9 +157,21 @@ impl History {
                 Change::Trashed { original, trashed: Some(t) } => {
                     fileops::restore_from_trash(policy, t, original).map(|_| original.clone())
                 }
-                Change::Renamed { from, to } => fileops::rename_no_replace(policy, to, from).map(|_| from.clone()),
+                Change::Renamed { from, to } => fileops::rename_no_replace(policy, to, from).map(|_| {
+                    out.moved_back.push((to.clone(), from.clone()));
+                    from.clone()
+                }),
                 Change::Created { path } => fileops::move_to_trash(policy, path).map(|_| path.clone()),
-                Change::Trashed { trashed: None, .. } | Change::Deleted { .. } => continue,
+                // The copy only goes once the original is safely back.
+                Change::CrossMoved { from, to, trashed: Some(t) } => fileops::restore_from_trash(policy, t, from)
+                    .and_then(|_| {
+                        fileops::move_to_trash(policy, to)
+                            .map_err(|e| format!("the original is back, but the copy stayed ({e})"))
+                    })
+                    .map(|_| from.clone()),
+                Change::Trashed { trashed: None, .. }
+                | Change::CrossMoved { trashed: None, .. }
+                | Change::Deleted { .. } => continue,
             };
             match r {
                 Ok(p) => {
@@ -142,7 +181,7 @@ impl History {
                 Err(e) => {
                     let name = match c {
                         Change::Trashed { original, .. } => original,
-                        Change::Renamed { to, .. } => to,
+                        Change::Renamed { to, .. } | Change::CrossMoved { to, .. } => to,
                         Change::Created { path } | Change::Deleted { path } => path,
                     };
                     out.failed.push(format!(
@@ -228,5 +267,43 @@ mod tests {
         assert_eq!(r.restored, 1, "{:?}", r.failed);
         assert_eq!(fs::read(d.join("note.txt")).unwrap(), b"keep me");
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Undo of a move to another volume: the original comes back from the
+    /// Trash first, and only then does the copy go to the Trash.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cross_volume_move_undo_restores_the_original_before_removing_the_copy() {
+        let d = lab("xmove");
+        let store = crate::privacy::Store::load(d.join("protected.json"));
+        let p = Policy { read_only: false, protected: &store };
+        fs::create_dir_all(d.join("dest")).unwrap();
+        fs::write(d.join("photo.jpg"), b"original").unwrap();
+        fileops::copy_item(&p, &d.join("photo.jpg"), &d.join("dest/photo.jpg"), &|| false).unwrap();
+        let t = fileops::move_to_trash(&p, &d.join("photo.jpg")).unwrap();
+        let h = History::default();
+        h.record(
+            "Moved".into(),
+            vec![Change::CrossMoved { from: d.join("photo.jpg"), to: d.join("dest/photo.jpg"), trashed: t }],
+        );
+        // Something took the original's place: nothing is undone, the copy stays.
+        fs::write(d.join("photo.jpg"), b"newcomer").unwrap();
+        let id = h.last_undoable().unwrap();
+        assert_eq!(h.undo(id, &p).unwrap().failed.len(), 1);
+        assert!(d.join("dest/photo.jpg").exists(), "the copy is kept when the original can't come back");
+        fs::remove_file(d.join("photo.jpg")).unwrap();
+        let r = h.undo(id, &p).unwrap();
+        assert_eq!(r.restored, 1, "{:?}", r.failed);
+        assert_eq!(fs::read(d.join("photo.jpg")).unwrap(), b"original");
+        assert!(!d.join("dest/photo.jpg").exists());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_cross_volume_move_without_a_known_trash_place_is_not_undoable() {
+        let h = History::default();
+        h.record("Moved".into(), vec![Change::CrossMoved { from: "/a".into(), to: "/b".into(), trashed: None }]);
+        assert!(!h.list()[0].undoable);
+        assert_eq!(h.last_undoable(), None);
     }
 }
