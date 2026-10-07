@@ -98,7 +98,10 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 - **Favorites** (files and folders): *Add to Favorites* in the menu, or press `F`. They're listed under Favorites in the sidebar.
 - **Tags**: *Tags…* in the menu, for one item or a selection. Items can have several tags.
   - Every tag appears in the sidebar with its count.
-  - **Manage Tags** lets you search, rename and delete them. Deleting a tag never touches the tagged files.
+  - **Right-click a tag in the sidebar** (or press the context-menu key / Shift+F10 on it) for **Rename Tag…** and **Delete Tag…**; right-clicking never opens the tag. **Manage Tags** also lets you search, rename and delete them.
+  - **Renaming** keeps the same tag, so every tagged item keeps it under the new name, and the count stays. Names are trimmed; an empty name, more than 60 characters, or the name of another tag (in any case) is refused. Tags are never merged. Changing only the case is fine.
+  - **Deleting a tag never deletes or changes a file.** It removes the tag and its associations only; the confirmation says how many items lose it ("This removes the tag from 127 items. No files are deleted or changed."). If that tag was open, Mori goes back to the drive.
+  - Counts and the open tag view update immediately, and the changes are kept after restarting Mori. Not available in temporary sessions (Mori keeps no records there).
   - Favorites and tags live in Mori's app data only. Files and their metadata are never modified.
   - Like private folders, they are stored per volume, so they survive remounts.
 - **Temporary Session…** (More menu) opens a folder without keeping anything; see [Private Inspection and Temporary Session](#private-inspection-and-temporary-session).
@@ -212,7 +215,7 @@ For folders with hundreds or thousands of photos (or any files) where you want t
 Open it with **Quick Cleanup** in the folder header, *Quick Cleanup…* in a folder's context menu (also in the sidebar), or the command palette.
 
 1. **Setup**: include subfolders or not; a type filter (All, Photos, Videos, GIFs, Documents, Audio, Other); an order (the current sort, oldest first, newest first, largest first, smallest first). The queue comes from the same index query as the browser, so **private folders inside the folder stay out**; started inside a private folder, its contents are included, as when browsing it.
-2. **Review**, one file at a time with a large preview, through the same safe preview paths as Mori's preview (worker-rendered images, guarded video, isolated views in Safe Inspection Mode, file facts for anything that can't be previewed). The header shows **124 / 836** and **Kept 78 · Marked 46**.
+2. **Review**, one file at a time with a large preview, shown exactly as in Mori's preview (the same media stage: the whole photo or video is always fitted, never cropped to fill the window), through the same safe preview paths as Mori's preview (worker-rendered images, guarded video, isolated views in Safe Inspection Mode, file facts for anything that can't be previewed). The header shows **124 / 836** and **Kept 78 · Marked 46**.
 3. **Review Marked** (any time with `R`, and automatically after the last file): every item marked for Trash with its total size (**46 items marked · 2.8 GB**). Select some and **Keep Selected**, or **Keep All**, or double-click one to look at it again.
 4. **Move 46 Items to Trash** asks **once** to confirm, showing anything the backend will refuse (protected, gone). Then the files go to the **system Trash** through the same command as every other Move to Trash, with one Undo for the whole batch.
 

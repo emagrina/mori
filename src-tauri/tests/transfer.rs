@@ -71,6 +71,9 @@ fn move_and_copy_through_the_real_commands() {
     has("transfer outside: done=1 new-id=false arrived=sub-c left-index=true");
     // A multi-selection drop: every selected item moves, the index follows.
     has("transfer drop-three: done=3 arrived=true left=false indexed=true");
+    // Tags: a rename keeps the items and the count, a duplicate name is refused,
+    // deleting removes the tag (and its associations) but no file.
+    has("transfer tags: before=Some(3) renamed=(None, Some(3)) dup-refused=true item-kept-tag=true after-delete=None item-untagged=true files-kept=true");
     has("transfer cleanup-store: saved=true resumed=true discarded=true temp-refused=true temp-none=true");
     has("transfer private-inspection: refused=true stayed=true");
 

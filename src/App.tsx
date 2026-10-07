@@ -36,7 +36,7 @@ import { ModalFrame } from "./components/Modal";
 import { AnalysisCenter } from "./components/AnalysisCenter";
 import { HealthView } from "./components/HealthView";
 import { MetadataAnalyzer } from "./components/MetadataAnalyzer";
-import { TagDialog, TagManager } from "./components/Organize";
+import { TagDeleteDialog, TagDialog, TagList, TagManager, TagRenameDialog } from "./components/Organize";
 import { HistoryPanel, OperationPreview } from "./components/Operations";
 import { ChecksumDialog, CompareDialog, IntegrityPanel } from "./components/Integrity";
 import { Diagnostics } from "./components/Diagnostics";
@@ -98,6 +98,8 @@ type Dialog =
   | { kind: "unprotect"; entry: Entry }
   | { kind: "tags"; entries: Entry[] }
   | { kind: "manageTags" }
+  | { kind: "renameTag"; tag: TagInfo }
+  | { kind: "deleteTag"; tag: TagInfo }
   | { kind: "forget" }
   | { kind: "clearSession" }
   | { kind: "op"; op: "trash" | "delete"; entries: Entry[] }
@@ -483,6 +485,20 @@ export default function App() {
       entries: what,
       dest: { key: target.id, label: target.name, where: target.path ? `${status?.rootName ?? ""}/${target.path}` : status?.rootName ?? "" },
     });
+  };
+
+  /**
+   * A tag was renamed or deleted (the backend already re-published the
+   * index, so results and their tags refresh). Counts update now; a deleted
+   * tag that was being viewed gives way to the drive, without ghost results.
+   */
+  const tagsChanged = (msg: string, deleted?: number) => {
+    flash(msg, 2600);
+    api.tagsList().then(setTags, () => {});
+    if (deleted !== undefined && kind === `tag:${deleted}`) {
+      setResult(EMPTY);
+      navigate({ scope: "folder", folder: "" });
+    }
   };
 
   const setPrivate = async (entry: Entry, isPrivate: boolean) => {
@@ -988,20 +1004,17 @@ export default function App() {
               </button>
             </div>
           )}
-          {tags.map((t) => (
-            <button
-              key={t.id}
-              className={`side-item ${browsing && loc.scope === "library" && kind === `tag:${t.id}` && !searching ? "on" : ""}`}
-              onClick={() => {
-                navigate({ scope: "library", folder: "" }, { keepKind: true });
-                setKind(`tag:${t.id}`);
-              }}
-            >
-              <Icon name="tag" />
-              <span className="truncate">{t.name}</span>
-              <span className="count">{t.count.toLocaleString()}</span>
-            </button>
-          ))}
+          <TagList
+            tags={tags}
+            active={browsing && loc.scope === "library" && kind.startsWith("tag:") && !searching ? Number(kind.slice(4)) : null}
+            canEdit={!status.temporary}
+            onOpen={(t) => {
+              navigate({ scope: "library", folder: "" }, { keepKind: true });
+              setKind(`tag:${t.id}`);
+            }}
+            onRename={(t) => setDialog({ kind: "renameTag", tag: t })}
+            onDelete={(t) => setDialog({ kind: "deleteTag", tag: t })}
+          />
           <button className={`side-heading as-button ${mode === "center" ? "on" : ""}`} onClick={() => setMode("center")} title="All analyses">
             Analyze
           </button>
@@ -1609,13 +1622,13 @@ export default function App() {
         <TagManager
           tags={tags}
           onClose={() => setDialog(null)}
-          onChanged={(m) => {
-            flash(m, 2200);
-            api.tagsList().then(setTags);
-            if (kind.startsWith("tag:") && !tags.some((t) => `tag:${t.id}` === kind)) setKind("all");
-          }}
+          onChanged={(m, deleted) => tagsChanged(m, deleted)}
         />
       )}
+      {dialog?.kind === "renameTag" && (
+        <TagRenameDialog tag={dialog.tag} tags={tags} onCancel={() => setDialog(null)} onDone={(m) => (setDialog(null), tagsChanged(m))} />
+      )}
+      {dialog?.kind === "deleteTag" && <TagDeleteDialog tag={dialog.tag} onCancel={() => setDialog(null)} onDone={(m) => (setDialog(null), tagsChanged(m, dialog.tag.id))} />}
       {dialog?.kind === "op" && (
         <OperationPreview
           op={dialog.op}

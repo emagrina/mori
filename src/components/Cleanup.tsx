@@ -535,7 +535,8 @@ export function QuickCleanup(p: Props) {
     const d = s.decisions.get(e.id);
     body = (
       <div className={`cleanup-review ${pulse ? `pulse-${pulse.kind}` : ""}`}>
-        <div className="cleanup-stage">
+        {/* The normal viewer's own stage (same sizing: fit the whole media), never a separate layout. */}
+        <div className="preview-stage cleanup-stage">
           {(d || e.guarded) && (
             <div className="cleanup-badges">
               {d && <span className={`chip ${d === "trash" ? "danger" : ""}`}>{d === "trash" ? "Marked for Trash" : "Kept"}</span>}
