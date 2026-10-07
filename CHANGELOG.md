@@ -4,30 +4,29 @@ All notable changes to Mori are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
-### Tags
-- **Right-click a sidebar tag** for Rename Tag… and Delete Tag… (Mori's menu style; also from the keyboard). Renaming keeps the tag and every association; duplicate names are refused, never merged. Deleting removes only the tag and its associations, never files, and says so. Counts and the open tag view update at once; deleting the open tag returns to the drive (this also fixes Manage Tags leaving a deleted tag's view open).
+## [1.0.1] - 2026-10-07
+
+A patch release focused on everyday file management, plus video and tag fixes. Mori remains local and offline-first.
+
+### Added
+- **Desktop-style selection** in every view, in search results and with *Include subfolders*: a click selects, a double-click or Return opens; Cmd/Ctrl+Click, Shift+Click, Shift+arrows and ⌘A/Ctrl+A select several items; Esc clears. A selection bar shows "N selected" with the common actions.
+- **Move to… and Copy to…** (`M` / `⇧M`) for files and folders, one or many. Mori shows what will happen first; name conflicts offer Keep Both, Replace (the existing file goes to the Trash first) or Skip, and nothing is overwritten in place. Moves to another drive copy, verify, and only then send the original to the Trash. Partial failures are reported. Undo moves items back (for moves to another drive, on macOS only).
+- **Drag and drop** onto folders in the grid, list and sidebar: the selection moves together through the same checks as Move to…. Sidebar folders expand when you hold over them; Option/Alt copies. Internal to Mori only.
+- **Quick Cleanup**: review a folder one file at a time from the keyboard (Keep / Mark for Trash, Undo, Back, Skip). Decisions are only staged; nothing moves until you review the marked items and confirm once, and then they go to the system Trash, never a permanent delete. Unfinished cleanups can be resumed (never saved in temporary sessions).
+- **File actions inside the preview**: a `…` menu with Get Info, Favorites, Checksum, Rename, Move to…, Copy to… and Move to Trash.
+- **Rename Tag… and Delete Tag…** from a tag's right-click menu in the sidebar. Renaming keeps every tagged item; duplicate names are refused. Deleting a tag never deletes or changes files.
+
+### Improved
+- **Favorites**: a clear star on the thumbnail (filled when set, outline on hover) that can be clicked without opening or selecting the item, a star in List view, and a Favorites count in the sidebar.
+- Larger, labelled private and protected markers in the sidebar folder list.
+- F2 renames. Renaming a file keeps its favorite and tags, and Undo of a rename or move restores them too.
+- The offline world map loads only when Places is opened.
 
 ### Fixed
-- **Quick Cleanup showed portrait videos zoomed in and cropped** (e.g. a 720×1280 clip showed only the middle of the frame). Quick Cleanup now uses the normal viewer's media stage, so every photo, GIF and video is fitted whole, with black bars where the shape differs.
-- **Filmstrip for portrait and rotated videos**: frames keep the video's displayed aspect ratio at a fixed strip height instead of being cropped into landscape boxes (preview and isolated view). Video facts now report the displayed size of rotated phone videos (90°/270° track rotation).
-
-### Drag and drop, favorites
-- **Drag and drop** files and folders onto folders in Grid, Gallery and List views, the sidebar tree and the drive: the selection moves together, through the same backend Move as Move to… (conflicts, protected folders, Read-only Mode, cross-drive moves, Undo). Clear accept / refuse feedback, sidebar folders expand when you hold over them, folder cards spring open, Option/Alt copies. Internal only: not to or from other apps.
-- **Favorite star** on the thumbnail (top-right, filled when set, outline on hover), clickable without opening or selecting; a dedicated star in List view; a Favorites count in the sidebar.
-
-### File management
-- **Desktop selection** in every view, search results and *Include subfolders*: a click selects and a double-click (or Return) opens; Cmd/Ctrl+Click, Shift+Click, Shift+arrows, ⌘A/Ctrl+A, Esc. Items are tracked by id, never by name.
-- A **selection bar** ("3 selected") with Move to…, Copy to…, Tags, Favorite and Move to Trash; the context menu acts on the whole selection.
-- **Move to…** and **Copy to…** for files and folders (`M` / `⇧M`): a backend dry run first, Keep Both / Replace / Skip for name conflicts (Replace sends the existing file to the Trash first; nothing is ever overwritten in place), cross-drive moves that copy, verify and only then send the original to the Trash, links copied as links, half-finished copies removed, partial failures reported, Undo.
-- **File actions inside the preview**: a `…` menu with Get Info, Favorites, Checksum, Rename, Move to…, Copy to… and Move to Trash. After trashing or moving the viewed file, the preview continues with the next one.
-- Rename with F2. Renaming a file keeps its favorite and tags; undoing a rename or move carries Mori's records back.
-- Larger, labelled private/protected markers in the sidebar folder tree.
-
-### Quick Cleanup
-- Go through a folder (optionally with subfolders, filtered by type, in a chosen order) one file at a time: Keep (→/K) or Mark for Trash (←/D), Undo, Back, Skip, progress and counters.
-- Decisions are **only staged in memory**; files are moved to the system Trash after the Review Marked screen and one confirmation, through the existing Trash command (with Undo). Never a permanent deletion.
-- Held keys and bounced presses can't mark extra files; protected files can't be marked; files that vanish leave the queue.
-- Unfinished sessions can be resumed in normal sessions (opaque ids only); never saved in Temporary Sessions or Private Inspection, and the final Trash step is unavailable while read-only.
+- **Quick Cleanup cropped portrait videos**: a vertical clip (for example 720×1280) showed only the middle of the frame. Videos, photos and GIFs are now fitted whole, as in the normal viewer.
+- **Video filmstrip** frames keep the video's real shape: portrait and rotated phone videos are no longer cropped into landscape boxes.
+- Video details report the displayed size of rotated phone videos.
+- *Manage Tags* no longer leaves a deleted tag's view open.
 
 ## [1.0.0]
 

@@ -37,7 +37,7 @@ How:
 - traces outside Mori's control: swap, snapshots, backups, crash reports, journals, SSD behaviour. Temporary sessions minimise what *Mori* keeps; Mori does not claim complete forensic trace elimination.
 
 **Platform notes:**
-- Mori 1.0.0 is built for macOS (Apple Silicon and Intel), Windows x64 and Linux x64. macOS is the primary, hand-tested platform.
+- Mori 1.0.1 is built for macOS (Apple Silicon and Intel), Windows x64 and Linux x64. macOS is the primary, hand-tested platform.
 - The worker sandbox is enforced on **macOS**.
 - **Windows** uses Job object limits and no file paths, but no filesystem-denying sandbox.
 - **Linux** uses resource limits and `no_new_privs`, without seccomp yet.
