@@ -4,6 +4,9 @@ All notable changes to Mori are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+- **Filmstrip for portrait and rotated videos**: frames keep the video's displayed aspect ratio at a fixed strip height instead of being cropped into landscape boxes (preview and isolated view). Video facts now report the displayed size of rotated phone videos (90°/270° track rotation).
+
 ### Drag and drop, favorites
 - **Drag and drop** files and folders onto folders in Grid, Gallery and List views, the sidebar tree and the drive: the selection moves together, through the same backend Move as Move to… (conflicts, protected folders, Read-only Mode, cross-drive moves, Undo). Clear accept / refuse feedback, sidebar folders expand when you hold over them, folder cards spring open, Option/Alt copies. Internal only: not to or from other apps.
 - **Favorite star** on the thumbnail (top-right, filled when set, outline on hover), clickable without opening or selecting; a dedicated star in List view; a Favorites count in the sidebar.

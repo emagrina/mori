@@ -13,6 +13,7 @@ import {
   type Inspection,
   type VideoInfo,
 } from "../api";
+import { aspectOf } from "../filmstrip";
 import { Icon } from "./Icon";
 import { ArchiveView, AudioView, FactsPanel, Filmstrip, FrameView, PdfView } from "./Viewers";
 
@@ -406,7 +407,7 @@ export function PreviewBody({ entry, info, zoom, pan, setPan, zoomBy, resetZoom,
     );
   }
   if (info.preview === "archive") return <ArchiveView entry={entry} onFail={fail("archive")} />;
-  if (iso && info.preview === "video") return <FrameView entry={entry} onFail={fail("frames")} />;
+  if (iso && info.preview === "video") return <FrameView entry={entry} aspect={info.video ? aspectOf(info.video.width, info.video.height) : null} onFail={fail("frames")} />;
   if (info.video && info.video.status !== "playable") {
     const reason: VideoFailure = { unsupportedCodec: "codec", noVideo: "noVideo", damaged: "damaged", blocked: "blocked", playable: "damaged" }[
       info.video.status
@@ -458,6 +459,7 @@ export function PreviewBody({ entry, info, zoom, pan, setPan, zoomBy, resetZoom,
           <VideoPlayer id={entry.id} videoRef={videoRef} onDims={onDims} onFail={(f) => alive.current && setFailed(f)} />
           <Filmstrip
             entry={entry}
+            aspect={info.video ? aspectOf(info.video.width, info.video.height) : null}
             onSeek={(f) => {
               const v = videoRef.current;
               if (v?.duration) v.currentTime = f * v.duration;

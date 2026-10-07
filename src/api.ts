@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { SavedSession } from "./cleanup";
+import { frameFraction } from "./filmstrip";
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
 export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
@@ -1267,7 +1268,7 @@ function grabSequence(src: string, count: number, signal: AbortSignal, onPng: (k
       const ctx = c.getContext("2d", { willReadFrequently: true })!;
       for (let k = 0; k < count; k++) {
         if (finished) return;
-        if (!(await seek(Math.min((d * (k + 0.5)) / count, Math.max(0, d - 0.05))))) return finish();
+        if (!(await seek(Math.min(d * frameFraction(k, count), Math.max(0, d - 0.05))))) return finish();
         await presented();
         try {
           ctx.globalCompositeOperation = "source-over";
