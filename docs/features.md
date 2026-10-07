@@ -18,9 +18,10 @@ The complete reference for what Mori 1.0 does. The [README](../README.md) has th
 - **Local caching and indexing.** A small index and thumbnail cache stay on the computer. **Clear cache** removes them.
 - **Light and dark interface** that follows the system setting.
 - **Safe file management.**
-  - Rename, and **Move to Trash** (the system Trash / Recycle Bin, so items can be restored). Permanent deletion is a separate, explicit action (see [File operations](#file-operations-undo-and-permanent-deletion)).
-  - Multi-selection with Cmd/Ctrl+Click and Shift+Click; ⌘⌫ on macOS, Delete on Windows.
+  - Desktop selection: a click selects, a double-click (or Return) opens. Cmd/Ctrl+Click, Shift+Click, Shift+arrows and ⌘A/Ctrl+A work in every view, in search results and with *Include subfolders* (see [Selection](#selection)).
+  - Rename, **Move to…**, **Copy to…** and **Move to Trash** (the system Trash / Recycle Bin, so items can be restored), for one item or many, from the context menu, the selection bar, the preview's `…` menu or the keyboard. Permanent deletion is a separate, explicit action (see [File operations](#file-operations-undo-and-permanent-deletion)).
   - Several items or a folder ask for confirmation first. Views, search results and the index update immediately.
+- **Quick Cleanup**: decide Keep / Mark for Trash for a folder's files one after another, keyboard first. Decisions are only staged; files move to the Trash after a review and one confirmation (see [Quick Cleanup](#quick-cleanup)).
 - **Analyze**: two separate tools that only run when you start them. Both let you choose the locations (the current drive, Home, Pictures, Movies/Videos, Downloads, Documents or any folder you pick) and whether to include subfolders, and both read only the folders you select.
 
 ### Exact duplicates
@@ -117,10 +118,17 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 
 | Key | Action |
 |---|---|
-| Arrow keys | Move the selection |
-| Return | Open the folder or the preview |
+| Click | Select (it never opens anything) |
+| ⌘-Click / Ctrl+Click | Add to / remove from the selection |
+| Shift-Click | Select the range from the last clicked item |
+| ⌘A / Ctrl+A | Select everything in the current view |
+| Arrow keys | Move the selection; with Shift, extend it |
+| Double-click / Return | Open the folder or the preview |
 | Space | **Mori Quick Look**: a floating preview inside Mori, never the system's Quick Look |
-| Esc | Close / clear |
+| Esc | Close / clear the selection |
+| `M` / `⇧M` | Move to… / Copy to… (the selection, or the file being previewed) |
+| F2 | Rename |
+| ⌘⌫ / Delete | Move to Trash (Windows/Linux: Delete) |
 | `I` | Get Info |
 | `F` | Add to / remove from Favorites |
 | ⌘F / Ctrl+F | Search |
@@ -144,12 +152,79 @@ Shortcuts never fire while you type in a text field. *Keyboard Shortcuts* in the
 ![Audio with waveform](images/phase7/audio.jpg)
 ![Filmstrip](images/phase7/filmstrip.jpg)
 
+### Selection
+
+Selection works the same in Grid, Gallery and List views, in search results and in flattened (*Include subfolders*) views, because it lives outside the views (`src/selection.ts`).
+
+- Items are identified by Mori's opaque id, never by name: two `IMG_0001.jpg` in different folders are different items.
+- Items that disappear (moved, trashed, renamed elsewhere, filtered out) leave the selection; the keyboard focus continues with the next item.
+- With several items selected, a bar at the bottom shows **"N selected"** with Move to…, Copy to…, Tags…, Favorite and Move to Trash. The context menu offers the same for the whole selection.
+- Only the visible tiles are rendered, and each re-renders only when its own selection state changes, so selecting in a folder of tens of thousands of files stays instant.
+
+### Move to… and Copy to…
+
+Files and folders, one or many, from the context menu, the selection bar, the preview's `…` menu, the command palette or `M` / `⇧M`.
+
+- **Destination**: any folder of the browsed drive (a lazily expanded folder list; the current folder is marked), a recent destination from this session, or **Other Folder…**, chosen in the system's folder picker and kept for the session as an opaque key (the UI never handles paths).
+- **Plan first.** The backend computes what will happen to each item without changing anything:
+  - **refused** with the reason: Read-only Mode, a protected (Never Modify) source or destination, a folder into itself or one of its subfolders, an item that is already in that folder, an item that no longer exists;
+  - **name conflicts**, including two selected items with the same name.
+  If nothing needs a decision, the operation runs straight away.
+- **Conflicts are never overwritten.** For each one (or *Apply to all*):
+  - **Keep Both**: the new item gets a free name, Finder-style ("photo 2.jpg");
+  - **Replace**: offered only when a file would replace a file and the existing one may go to the Trash. The existing file is **moved to the Trash first** (restorable), and the button says so ("Replace 2 and Move");
+  - **Skip**. A conflict left undecided is skipped.
+- **Moves** on the same volume are an atomic rename that fails rather than replace anything. **Across volumes** (another drive), Mori copies, checks that every file arrived complete, and then moves the original **to the Trash**. It never deletes an original permanently. If the original can't go to the Trash, both are kept and Mori says so.
+- **Copies** never replace anything, recreate links as links (what a link points to is never read or copied), keep modification dates, and a copy that fails or is stopped half-way is removed again (only what that copy created).
+- **Progress and Stop** for long operations; stopping finishes after the current item.
+- **Partial failures are reported** item by item: moved, skipped, failed with the reason.
+- **Undo** (⌘Z): a move on the same volume is moved back; a move to another drive puts the original back from the Trash and only then sends the copy to the Trash; a copy goes to the Trash; a replaced file comes back from the Trash. As everywhere, never over something that took the name meanwhile.
+- **Everything follows**: the browser index, the preview (it continues with the next file), the selection, thumbnails, Exact Duplicates and Similar Media results, and Mori's own records (private folders, favorites, tags, screenshot corrections) for items moved on the same volume. Renaming a file now keeps its favorite and tags too.
+
+### Quick Cleanup
+
+For folders with hundreds or thousands of photos (or any files) where you want to decide quickly what goes.
+
+Open it with **Quick Cleanup** in the folder header, *Quick Cleanup…* in a folder's context menu (also in the sidebar), or the command palette.
+
+1. **Setup**: include subfolders or not; a type filter (All, Photos, Videos, GIFs, Documents, Audio, Other); an order (the current sort, oldest first, newest first, largest first, smallest first). The queue comes from the same index query as the browser, so **private folders inside the folder stay out**; started inside a private folder, its contents are included, as when browsing it.
+2. **Review**, one file at a time with a large preview, through the same safe preview paths as Mori's preview (worker-rendered images, guarded video, isolated views in Safe Inspection Mode, file facts for anything that can't be previewed). The header shows **124 / 836** and **Kept 78 · Marked 46**.
+3. **Review Marked** (any time with `R`, and automatically after the last file): every item marked for Trash with its total size (**46 items marked · 2.8 GB**). Select some and **Keep Selected**, or **Keep All**, or double-click one to look at it again.
+4. **Move 46 Items to Trash** asks **once** to confirm, showing anything the backend will refuse (protected, gone). Then the files go to the **system Trash** through the same command as every other Move to Trash, with one Undo for the whole batch.
+
+**Nothing is moved, deleted or changed while you review.** Keep and Mark for Trash only record a decision in memory; files stay where they are until the final confirmation. Reaching the last file shows the summary, never a Trash operation.
+
+| Key | Action |
+|---|---|
+| → or `K` | Keep, next file |
+| ← or `D` or ⌫/Delete | Mark for Trash, next file (nothing is moved) |
+| `U` or ⌘Z / Ctrl+Z | Undo the last decision (back to that file) |
+| ↑ / `P` | Previous file, without deciding |
+| ↓ / `S` | Next file, without deciding |
+| Space | Play / pause a video |
+| `Z`, ⌘+ / ⌘− / ⌘0 | Zoom a photo |
+| `R` | Review marked items |
+| Return | Start (setup screen) |
+| Esc | Back / close |
+
+Safeguards for fast input:
+- A **held-down key** decides one file, not hundreds: auto-repeat is ignored. A bounced double press (under 45 ms) counts once; normal rapid alternating input all counts.
+- Keys combined with ⌘/Ctrl/Alt never decide anything (⌘⌫ can't mark a file here).
+- Files in a protected (Never Modify) folder show a badge and can't be marked.
+- Files that disappear meanwhile (moved, trashed elsewhere, a drive rescanned or disconnected) drop out of the queue with their decisions; the session stays on the same file or the next one.
+- Only the current file is decoded, plus the next two photos ahead (worker-rendered copies), and preloads that fall behind are cancelled. Nothing is preloaded in Safe Inspection Mode.
+
+Sessions:
+- In a normal session an unfinished cleanup is saved locally and can be **Resumed** or **Discarded** next time. Only the folder's opaque id, the options, the opaque ids of decided files and the position are saved: no names or paths. It is listed under *Analysis data* in Privacy & Local Data, and removed by Forget This Drive.
+- In a **Temporary Session or Private Inspection the queue is never saved** (the backend refuses too): decisions live in memory, closing asks first, and ending the session discards them.
+- In **Read-only Mode and Private Inspection** you can review and mark, but Move to Trash is unavailable and the reason is shown.
+
 ### File operations, undo and permanent deletion
 
 - **Operation Preview.** Before moving several items or a folder to the Trash, or deleting permanently, Mori shows exactly what will happen: each item with its size and file count, and each item the mutation policy refuses (Read-only Mode, Never Modify), with the reason. Links are marked "only the link itself is removed". This is a dry run computed by the backend; nothing changes until you confirm.
 - **Undo** (⌘Z / Ctrl+Z, and *Undo History…* in the More menu). Undo is offered only where it really works:
   - **Move to Trash** → put back where it was. macOS tells Mori where each item went in the Trash; elsewhere, use the system Trash.
-  - **Rename** → renamed back.
+  - **Rename** and **Move** → renamed or moved back (see [Move to… and Copy to…](#move-to-and-copy-to) for moves across drives and copies).
   - **Sanitized copy** → the copy goes to the Trash.
   - Undo never replaces something that has taken the original name, and it obeys Read-only Mode and protected folders.
   - **Permanent deletions are listed as "can't be undone"**, never as undoable.
@@ -223,6 +298,10 @@ The setting is stored in Mori's app data and survives restarts. On macOS each dr
 ### Not implemented yet
 
 These have been discussed for Mori but **are not in the code yet**:
+
+- **Drag and drop** of files (into folders, or out of Mori). Use Move to… / Copy to….
+- **Merging folders**: a folder never replaces or merges into a folder with the same name; Keep Both or Skip.
+- Copying links on Windows needs Developer Mode (or administrator rights); otherwise the link is reported as not copied.
 
 - HEIC / HEIF previews on Windows and Linux (macOS only for now).
 - Apple Live Photos playback (Still / Live / Loop modes). Live Photos are recognised as pairs by the analyzers only.

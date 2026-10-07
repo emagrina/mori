@@ -2,6 +2,22 @@
 
 All notable changes to Mori are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Mori uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### File management
+- **Desktop selection** in every view, search results and *Include subfolders*: a click selects and a double-click (or Return) opens; Cmd/Ctrl+Click, Shift+Click, Shift+arrows, ⌘A/Ctrl+A, Esc. Items are tracked by id, never by name.
+- A **selection bar** ("3 selected") with Move to…, Copy to…, Tags, Favorite and Move to Trash; the context menu acts on the whole selection.
+- **Move to…** and **Copy to…** for files and folders (`M` / `⇧M`): a backend dry run first, Keep Both / Replace / Skip for name conflicts (Replace sends the existing file to the Trash first; nothing is ever overwritten in place), cross-drive moves that copy, verify and only then send the original to the Trash, links copied as links, half-finished copies removed, partial failures reported, Undo.
+- **File actions inside the preview**: a `…` menu with Get Info, Favorites, Checksum, Rename, Move to…, Copy to… and Move to Trash. After trashing or moving the viewed file, the preview continues with the next one.
+- Rename with F2. Renaming a file keeps its favorite and tags; undoing a rename or move carries Mori's records back.
+- Larger, labelled private/protected markers in the sidebar folder tree.
+
+### Quick Cleanup
+- Go through a folder (optionally with subfolders, filtered by type, in a chosen order) one file at a time: Keep (→/K) or Mark for Trash (←/D), Undo, Back, Skip, progress and counters.
+- Decisions are **only staged in memory**; files are moved to the system Trash after the Review Marked screen and one confirmation, through the existing Trash command (with Undo). Never a permanent deletion.
+- Held keys and bounced presses can't mark extra files; protected files can't be marked; files that vanish leave the queue.
+- Unfinished sessions can be resumed in normal sessions (opaque ids only); never saved in Temporary Sessions or Private Inspection, and the final Trash step is unavailable while read-only.
+
 ## [1.0.0]
 
 First stable release. The features are listed by area rather than by development commit.
