@@ -76,7 +76,12 @@ describe("selection", () => {
       { id: "2", name: "IMG_0001.jpg" },
       { id: "3", name: "other.jpg" },
     ];
-    const s = click(EMPTY_SELECTION, items.map((e) => e.id), "2", plain);
+    const s = click(
+      EMPTY_SELECTION,
+      items.map((e) => e.id),
+      "2",
+      plain,
+    );
     expect(selectedItems(s, items)).toEqual([items[1]]);
   });
 

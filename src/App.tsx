@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   isMac,
@@ -20,7 +20,13 @@ import {
   type Stats,
   type Status,
   type ViewMode,
+  type TransferOp,
+  type TransferPlan,
+  type TransferResult,
+  type TrashResult,
 } from "./api";
+import { click as clickSel, EMPTY_SELECTION, focusIndex, moveTo, neighborAfterRemoval, reconcile as reconcileSel, selectAll, selectedItems, selectOnly as only, type Selection } from "./selection";
+import { forgetRecentDestinations, TransferDialog } from "./components/Transfer";
 import { Analyzer } from "./components/Analyzer";
 import { FileView } from "./components/FileView";
 import { Inspector } from "./components/Inspector";
@@ -94,12 +100,16 @@ type Dialog =
   | { kind: "forget" }
   | { kind: "clearSession" }
   | { kind: "op"; op: "trash" | "delete"; entries: Entry[] }
+  | { kind: "transfer"; op: TransferOp; entries: Entry[] }
   | { kind: "history" }
   | { kind: "checksum"; entry: Entry }
   | { kind: "compare"; a: Entry; b: Entry }
   | { kind: "integrity" }
   | { kind: "diagnostics" }
   | { kind: "privacy" };
+
+/** Loaded when first opened. */
+const QuickCleanup = lazy(() => import("./components/Cleanup").then((m) => ({ default: m.QuickCleanup })));
 
 const EMPTY: QueryResult = { items: [], total: 0, truncated: false, crumbs: [] };
 
@@ -120,7 +130,8 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [result, setResult] = useState<QueryResult>(EMPTY);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Selected items (by id) and the focused one: see selection.ts. */
+  const [sel, setSel] = useState<Selection>(EMPTY_SELECTION);
   const [previewId, setPreviewId] = useState<string | null>(null);
   /** The preview was opened with "Open in Isolation". */
   const [previewIso, setPreviewIso] = useState(false);
@@ -132,8 +143,8 @@ export default function App() {
   const [newDrive, setNewDrive] = useState<ConnectedDrive | null>(null);
   /** The Safe Inspection banner was collapsed ("Browse metadata only"). */
   const [safeCollapsed, setSafeCollapsed] = useState(false);
-  /** Multi-selection (Cmd/Ctrl+Click, Shift+Click). `selectedId` is the focused item. */
-  const [marked, setMarked] = useState<Set<string>>(() => new Set());
+  /** Quick Cleanup of a folder (staged decisions only, until the final confirmation). */
+  const [cleanup, setCleanup] = useState<{ id: string; name: string } | null>(null);
   /** `targets`: what the menu's actions apply to (the whole selection when right-clicking inside it). */
   const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry; targets: Entry[] } | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
@@ -223,12 +234,12 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if ((isMac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === "k" && !e.altKey && !e.shiftKey) {
         e.preventDefault();
-        if (!dialog) setPalette((p) => !p);
+        if (!dialog && !cleanup) setPalette((p) => !p);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dialog]);
+  }, [dialog, cleanup]);
 
   // Safe Inspection Mode: keep the "Media decoded" counter current.
   useEffect(() => {
@@ -264,24 +275,16 @@ export default function App() {
 
   const items = result.items;
   const files = useMemo(() => items.filter((e) => e.kind !== "folder"), [items]);
-  const selected = useMemo(() => (selectedId ? items.findIndex((e) => e.id === selectedId) : -1), [items, selectedId]);
+  const order = useMemo(() => items.map((e) => e.id), [items]);
+  const selected = useMemo(() => focusIndex(sel, order), [sel, order]);
+  const marked = sel.ids;
   const previewIndex = useMemo(() => (previewId ? files.findIndex((e) => e.id === previewId) : -1), [files, previewId]);
   const crumbs = result.crumbs;
 
-  const selectOnly = useCallback((id: string | null) => {
-    setSelectedId(id);
-    setMarked(id ? new Set([id]) : new Set());
-  }, []);
+  const selectOnly = useCallback((id: string | null) => setSel(only(id)), []);
 
-  // Forget selected items that are no longer listed.
-  useEffect(() => {
-    setMarked((m) => {
-      if (!m.size) return m;
-      const ids = new Set(items.map((e) => e.id));
-      const next = new Set([...m].filter((id) => ids.has(id)));
-      return next.size === m.size ? m : next;
-    });
-  }, [items]);
+  // Forget selected items that are no longer listed (moved, trashed, filtered out).
+  useEffect(() => setSel((cur) => reconcileSel(cur, order)), [order]);
   const parentFolder = crumbs.length > 1 ? crumbs[crumbs.length - 2].id : "";
 
   // -------------------------------------------------------------- actions
@@ -347,25 +350,47 @@ export default function App() {
     }
   };
 
+  /**
+   * Items are about to leave the view (Trash, Move): a preview showing one
+   * moves on to the next sensible file (releasing the old one), and the
+   * keyboard focus continues from the same place.
+   */
+  const leaving = (targets: Entry[]) => {
+    const folders = targets.filter((t) => t.kind === "folder").map((t) => `${t.path}/`);
+    const ids = new Set(targets.map((t) => t.id));
+    const inside = (e: { id: string; path: string }) => ids.has(e.id) || folders.some((f) => e.path.startsWith(f));
+    const previewed = previewId ? files.find((f) => f.id === previewId) : undefined;
+    if (previewed && inside(previewed)) {
+      const next = neighborAfterRemoval(
+        files.map((f) => f.id),
+        new Set(files.filter(inside).map((f) => f.id)),
+        previewed.id,
+      );
+      setPreviewId(next);
+    }
+    return inside;
+  };
+
+  /** Items are gone from here: drop them from the visible results now (the index refresh follows). */
+  const removeFromView = (removed: (e: Entry) => boolean) => {
+    const goneIds = new Set(items.filter(removed).map((e) => e.id));
+    const next = neighborAfterRemoval(order, goneIds, sel.focus);
+    setResult((res) => {
+      const kept = res.items.filter((e) => !removed(e));
+      return { ...res, items: kept, total: Math.max(0, res.total - (res.items.length - kept.length)) };
+    });
+    setSel(sel.focus && goneIds.has(sel.focus) ? only(previewId ? null : next) : (cur) => reconcileSel(cur, order.filter((id) => !goneIds.has(id))));
+    setAnalysisVersion((v) => v + 1);
+  };
+
   const moveToTrash = async (targets: Entry[]) => {
     setDialog(null);
-    const folders = targets.filter((t) => t.kind === "folder").map((t) => `${t.path}/`);
-    const inside = (e: { id: string; path: string }) => targets.some((t) => t.id === e.id) || folders.some((f) => e.path.startsWith(f));
-    // Stop previewing (and release) a file that's about to go away.
-    const previewed = previewId ? files.find((f) => f.id === previewId) : undefined;
-    if (previewed && inside(previewed)) setPreviewId(null);
+    leaving(targets);
     const r = await api.trashItems(targets.map((t) => t.id)).catch((e) => ({ trashed: [] as string[], bytes: 0, failed: [{ path: "", reason: String(e) }] }));
     const gone = targets.filter((t) => r.trashed.includes(t.id));
     if (gone.length) {
-      // Update the visible results right away; the index refresh follows.
       const goneFolders = gone.filter((t) => t.kind === "folder").map((t) => `${t.path}/`);
-      const removed = (e: Entry) => r.trashed.includes(e.id) || goneFolders.some((f) => e.path.startsWith(f));
-      setResult((res) => {
-        const kept = res.items.filter((e) => !removed(e));
-        return { ...res, items: kept, total: Math.max(0, res.total - (res.items.length - kept.length)) };
-      });
-      setMarked(new Set());
-      setAnalysisVersion((v) => v + 1);
+      removeFromView((e: Entry) => r.trashed.includes(e.id) || goneFolders.some((f) => e.path.startsWith(f)));
       // The folder being viewed (or one of its parents) went to the Trash.
       if (loc.scope === "folder" && crumbs.some((c) => r.trashed.includes(c.id))) {
         setLoc({ scope: "folder", folder: "" });
@@ -383,8 +408,54 @@ export default function App() {
     const path = entry.path.includes("/") ? `${entry.path.slice(0, entry.path.lastIndexOf("/"))}/${name}` : name;
     setResult((res) => ({ ...res, items: res.items.map((e) => (e.id === entry.id ? { ...e, id: newId, name, path } : e)) }));
     selectOnly(newId);
+    if (previewId === entry.id) setPreviewId(newId);
     if (loc.scope === "folder" && loc.folder === entry.id) setLoc({ scope: "folder", folder: newId });
     flash("Renamed");
+  };
+
+  const requestTransfer = (op: TransferOp, targets: Entry[]) => {
+    setMenu(null);
+    if (targets.length) setDialog({ kind: "transfer", op, entries: targets });
+  };
+
+  /** Move / Copy finished (the backend already updated its index). */
+  const transferred = (op: TransferOp, entries: Entry[], r: TransferResult, plan: TransferPlan) => {
+    setDialog(null);
+    if (op === "move" && r.done.length) {
+      const moved = new Set(r.done.map((d) => d.id));
+      const goneFolders = entries.filter((t) => t.kind === "folder" && moved.has(t.id)).map((t) => `${t.path}/`);
+      const out = (e: Entry) => moved.has(e.id) || goneFolders.some((f) => e.path.startsWith(f));
+      leaving(entries.filter((e) => moved.has(e.id)));
+      removeFromView(out);
+      if (loc.scope === "folder" && crumbs.some((c) => moved.has(c.id))) {
+        setLoc({ scope: "folder", folder: "" });
+        setHistory([]);
+      }
+    } else if (r.done.length) setAnalysisVersion((v) => v + 1);
+    const first = entries.find((e) => e.id === r.done[0]?.id);
+    const what = r.done.length === 1 && first ? `“${first.name}”` : plural(r.done.length, "item");
+    const parts = [r.done.length ? `${op === "move" ? "Moved" : "Copied"} ${what} to “${plan.destName}”` : `Nothing was ${op === "move" ? "moved" : "copied"}`];
+    if (r.skipped) parts.push(`${plural(r.skipped, "item")} skipped`);
+    if (r.failed.length) parts.push(`${plural(r.failed.length, "item")} failed (${r.failed[0].reason})`);
+    if (r.originalsKept.length) parts.push(`${plural(r.originalsKept.length, "original")} kept (${r.originalsKept[0].reason})`);
+    if (r.cancelled) parts.push("stopped");
+    if (r.done.length) parts.push(`${isMac ? "⌘Z" : "Ctrl+Z"} to undo`);
+    flash(parts.join(" · "), r.failed.length || r.originalsKept.length ? 7000 : 3500);
+  };
+
+  const cleanupTrashed = (r: TrashResult) => {
+    setAnalysisVersion((v) => v + 1);
+    if (r.trashed.length) {
+      const gone = new Set(r.trashed);
+      removeFromView((e) => gone.has(e.id));
+    }
+  };
+
+  const startCleanup = (folder: Entry | null) => {
+    setMenu(null);
+    setPreviewId(null);
+    if (folder) setCleanup({ id: folder.id, name: folder.name });
+    else if (loc.scope === "folder") setCleanup({ id: loc.folder, name: crumbs.length ? crumbs[crumbs.length - 1].name : status?.rootName ?? "" });
   };
 
   const setPrivate = async (entry: Entry, isPrivate: boolean) => {
@@ -441,6 +512,9 @@ export default function App() {
     setInspectId(null);
     setPreviewId(null);
     setExtPreview(null);
+    // The session's cleanup decisions only ever lived in memory: they end here.
+    setCleanup(null);
+    forgetRecentDestinations();
     setAnalysisVersion((v) => v + 1);
     rootChanged(s);
     flash("Session cleared", 3000);
@@ -494,28 +568,19 @@ export default function App() {
     }
   };
 
-  const clickItem = (i: number, { toggle, range }: { toggle: boolean; range: boolean }) => {
+  /** A click selects (Cmd/Ctrl toggles, Shift ranges); opening is a double-click or Return. */
+  const clickItem = (i: number, mods: { toggle: boolean; range: boolean }) => {
     const e = items[i];
-    if (!e) return;
-    if (toggle) {
-      setMarked((m) => {
-        const next = new Set(m);
-        if (next.has(e.id)) next.delete(e.id);
-        else next.add(e.id);
-        return next;
-      });
-      setSelectedId(e.id);
-    } else if (range) {
-      const anchor = selected >= 0 ? selected : i;
-      const [lo, hi] = anchor < i ? [anchor, i] : [i, anchor];
-      setMarked(new Set(items.slice(lo, hi + 1).map((x) => x.id)));
-    } else {
-      selectOnly(e.id);
-      activate(i);
-    }
+    if (e) setSel((cur) => clickSel(cur, order, e.id, mods));
   };
 
-  const selectionTargets = () => (marked.size ? items.filter((e) => marked.has(e.id)) : selected >= 0 ? [items[selected]] : []);
+  const selectionTargets = () => (marked.size ? selectedItems(sel, items) : selected >= 0 ? [items[selected]] : []);
+  /** What file actions apply to: the previewed file while previewing, else the selection. */
+  const actionTargets = () => {
+    const previewed = previewId ? files.find((f) => f.id === previewId) : undefined;
+    return previewed ? [previewed] : selectionTargets();
+  };
+  const canModify = !(readOnly || status?.readOnly);
 
   const copyPath = async (e: Entry) => {
     const text = await api.copyPath(e.id).catch(() => null);
@@ -558,6 +623,8 @@ export default function App() {
   };
 
   const rootChanged = (s: Status) => {
+    setCleanup(null);
+    selectOnly(null);
     resetThumbs();
     setSafeCollapsed(false);
     setStatus(s);
@@ -573,20 +640,36 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || palette || shortcuts || mode !== "browse") return; // dialogs and the analyzer handle their own keys
+      if (dialog || palette || shortcuts || cleanup || menu || mode !== "browse") return; // dialogs, menus and other views handle their own keys
       const mod = isMac ? e.metaKey : e.ctrlKey;
       const t = e.target as HTMLElement;
       // Never steal keys from text fields.
       const inInput = t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable;
-      // Move to Trash: ⌘⌫ on macOS, Delete on Windows/Linux. Never a permanent delete.
-      if (!inInput && (isMac ? e.metaKey && e.key === "Backspace" : e.key === "Delete")) {
-        e.preventDefault();
-        const previewed = previewId ? files.find((f) => f.id === previewId) : undefined;
-        requestTrash(previewed ? [previewed] : selectionTargets());
+      // Move to… (M) / Copy to… (Shift+M), Rename (F2): the previewed file or the selection.
+      if (!inInput && !mod && !e.altKey && e.key.toLowerCase() === "m" && !e.repeat) {
+        const targets = actionTargets();
+        if (targets.length) {
+          e.preventDefault();
+          requestTransfer(e.shiftKey ? "copy" : "move", targets);
+        }
         return;
       }
-      if (!inInput && !previewId && (e.key === "i" || (mod && e.key.toLowerCase() === "i")) && !e.altKey) {
-        const target = selected >= 0 ? items[selected] : null;
+      if (!inInput && e.key === "F2") {
+        const targets = actionTargets();
+        if (targets.length === 1) {
+          e.preventDefault();
+          setDialog({ kind: "rename", entry: targets[0] });
+        }
+        return;
+      }
+      // Move to Trash: ⌘⌫ on macOS, Delete on Windows/Linux. Never a permanent delete.
+      if (!inInput && (isMac ? e.metaKey && e.key === "Backspace" : e.key === "Delete") && !e.repeat) {
+        e.preventDefault();
+        requestTrash(actionTargets());
+        return;
+      }
+      if (!inInput && (e.key === "i" || (mod && e.key.toLowerCase() === "i")) && !e.altKey) {
+        const target = previewId ? files.find((f) => f.id === previewId) : selected >= 0 ? items[selected] : null;
         if (target) {
           e.preventDefault();
           setInspectId((cur) => (cur === target.id ? null : target.id));
@@ -615,11 +698,14 @@ export default function App() {
       if (previewId) return; // the preview owns the keyboard
       if (e.key === "Escape") {
         if (pop) setPop(null);
-        else if (menu) setMenu(null);
         else if (inInput) {
           setSearch("");
           searchRef.current?.blur();
         } else selectOnly(null);
+      } else if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "a" && !inInput) {
+        // Select All in the current view (folder, search results, flattened subfolders).
+        e.preventDefault();
+        setSel((cur) => selectAll(cur, order));
       } else if (mod && ["1", "2", "3"].includes(e.key)) {
         e.preventDefault();
         setView((["list", "grid", "gallery"] as const)[Number(e.key) - 1]);
@@ -646,17 +732,25 @@ export default function App() {
       setMenu(null);
       setPop(null);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    };
     window.addEventListener("click", close);
     window.addEventListener("blur", close);
+    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", onKey);
     };
   }, [menu, pop]);
 
   // --------------------------------------------------------------- render
 
-  const sel = selected >= 0 ? items[selected] : null;
+  const focused = selected >= 0 ? items[selected] : null;
   const commands: Command[] = [
     { id: "v-list", title: "List View", section: "View", icon: "list", keys: `${isMac ? "⌘" : "Ctrl+"}1`, run: () => setView("list") },
     { id: "v-grid", title: "Grid View", section: "View", icon: "grid", keys: `${isMac ? "⌘" : "Ctrl+"}2`, run: () => setView("grid") },
@@ -683,19 +777,19 @@ export default function App() {
     { id: "a-meta", title: "Sensitive Metadata", section: "Analyze", icon: "tag", words: "exif gps location privacy", run: () => setMode("metadata") },
     { id: "a-places", title: "Places", section: "Analyze", icon: "pin", words: "map gps", run: () => setMode("places") },
     { id: "a-health", title: "Media Health", section: "Analyze", icon: "warning", words: "broken unsupported", run: () => setMode("health") },
-    ...(sel && sel.kind !== "link"
+    ...(focused && focused.kind !== "link"
       ? [
-          ...(sel.kind !== "folder"
+          ...(focused.kind !== "folder"
             ? [
-                { id: "s-ql", title: `Quick Look “${sel.name}”`, section: "Selection", icon: "gallery" as IconName, keys: "Space", run: () => (setPreviewQuick(true), setPreviewId(sel.id)) },
-                { id: "s-iso", title: `Open “${sel.name}” in Isolation`, section: "Selection", icon: "shield" as IconName, run: () => (setPreviewIso(true), setPreviewId(sel.id)) },
+                { id: "s-ql", title: `Quick Look “${focused.name}”`, section: "Selection", icon: "gallery" as IconName, keys: "Space", run: () => (setPreviewQuick(true), setPreviewId(focused.id)) },
+                { id: "s-iso", title: `Open “${focused.name}” in Isolation`, section: "Selection", icon: "shield" as IconName, run: () => (setPreviewIso(true), setPreviewId(focused.id)) },
               ]
             : []),
-          { id: "s-info", title: `Get Info for “${sel.name}”`, section: "Selection", icon: "info" as IconName, keys: "I", run: () => setInspectId(sel.id) },
-          { id: "s-fav", title: sel.favorite ? `Remove “${sel.name}” from Favorites` : `Add “${sel.name}” to Favorites`, section: "Selection", icon: "star" as IconName, keys: "F", run: () => setFavorite([sel], !sel.favorite) },
-          { id: "s-tags", title: `Tags for “${sel.name}”…`, section: "Selection", icon: "tag" as IconName, run: () => setDialog({ kind: "tags", entries: selectionTargets() }) },
-          { id: "s-copy", title: "Copy Path", section: "Selection", icon: "copy" as IconName, run: () => copyPath(sel) },
-          { id: "s-reveal", title: isMac ? "Show in Finder" : "Show in Folder", section: "Selection", icon: "reveal" as IconName, run: () => api.revealFile(sel.id) },
+          { id: "s-info", title: `Get Info for “${focused.name}”`, section: "Selection", icon: "info" as IconName, keys: "I", run: () => setInspectId(focused.id) },
+          { id: "s-fav", title: focused.favorite ? `Remove “${focused.name}” from Favorites` : `Add “${focused.name}” to Favorites`, section: "Selection", icon: "star" as IconName, keys: "F", run: () => setFavorite([focused], !focused.favorite) },
+          { id: "s-tags", title: `Tags for “${focused.name}”…`, section: "Selection", icon: "tag" as IconName, run: () => setDialog({ kind: "tags", entries: selectionTargets() }) },
+          { id: "s-copy", title: "Copy Path", section: "Selection", icon: "copy" as IconName, run: () => copyPath(focused) },
+          { id: "s-reveal", title: isMac ? "Show in Finder" : "Show in Folder", section: "Selection", icon: "reveal" as IconName, run: () => api.revealFile(focused.id) },
         ]
       : []),
     { id: "m-ro", title: readOnly ? "Turn Off Read-only Mode" : "Turn On Read-only Mode", section: "Mori", icon: "shield", run: toggleReadOnly },
@@ -705,13 +799,23 @@ export default function App() {
     { id: "m-integrity", title: "Integrity Snapshots…", section: "Mori", icon: "check", words: "sha-256 checksum verify", run: () => setDialog({ kind: "integrity" }) },
     { id: "m-privacy", title: "Privacy & Local Data…", section: "Mori", icon: "lock", words: "clear data reset storage", run: () => setDialog({ kind: "privacy" }) },
     { id: "m-diag", title: "Diagnostics…", section: "Mori", icon: "info", words: "self-test capabilities offline security", run: () => setDialog({ kind: "diagnostics" }) },
-    ...(sel && sel.kind !== "folder" && sel.kind !== "link" ? [{ id: "s-sum", title: `Calculate Checksum of “${sel.name}”`, section: "Selection", icon: "check" as IconName, words: "sha-256 hash integrity", run: () => setDialog({ kind: "checksum", entry: sel }) }] : []),
+    ...(focused && focused.kind !== "folder" && focused.kind !== "link" ? [{ id: "s-sum", title: `Calculate Checksum of “${focused.name}”`, section: "Selection", icon: "check" as IconName, words: "sha-256 hash integrity", run: () => setDialog({ kind: "checksum", entry: focused }) }] : []),
     { id: "m-tags", title: "Manage Tags…", section: "Mori", icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
     { id: "m-session", title: "Clear Session Data…", section: "Mori", icon: "close", run: () => setDialog({ kind: "clearSession" }) },
     { id: "m-rescan", title: "Rescan", section: "Mori", icon: "refresh", run: () => api.rescan() },
     { id: "m-undo", title: "Undo", section: "Edit", icon: "refresh", keys: `${isMac ? "⌘" : "Ctrl+"}Z`, run: undoLast },
     { id: "m-history", title: "Undo History…", section: "Edit", icon: "clock", run: () => setDialog({ kind: "history" }) },
-    ...(sel && sel.kind !== "link" ? [{ id: "s-del", title: `Delete “${sel.name}” Permanently…`, section: "Selection", icon: "close" as IconName, words: "remove erase", run: () => setDialog({ kind: "op", op: "delete", entries: selectionTargets() }) }] : []),
+    ...(focused && focused.kind !== "link" ? [{ id: "s-del", title: `Delete “${focused.name}” Permanently…`, section: "Selection", icon: "close" as IconName, words: "remove erase", run: () => setDialog({ kind: "op", op: "delete", entries: selectionTargets() }) }] : []),
+    ...(items.length ? [{ id: "s-all", title: "Select All", section: "Edit", icon: "check" as IconName, keys: `${isMac ? "⌘" : "Ctrl+"}A`, run: () => setSel((cur) => selectAll(cur, order)) }] : []),
+    ...(focused && canModify
+      ? [
+          { id: "s-move", title: marked.size > 1 ? `Move ${plural(marked.size, "Item")} to…` : `Move “${focused.name}” to…`, section: "Selection", icon: "folder" as IconName, keys: "M", run: () => requestTransfer("move", selectionTargets()) },
+          { id: "s-copyto", title: marked.size > 1 ? `Copy ${plural(marked.size, "Item")} to…` : `Copy “${focused.name}” to…`, section: "Selection", icon: "copy" as IconName, keys: "⇧M", run: () => requestTransfer("copy", selectionTargets()) },
+          { id: "s-rename", title: `Rename “${focused.name}”…`, section: "Selection", icon: "rename" as IconName, keys: "F2", run: () => setDialog({ kind: "rename", entry: focused }) },
+        ]
+      : []),
+    ...(focused?.kind === "folder" ? [{ id: "s-clean", title: `Quick Cleanup of “${focused.name}”…`, section: "Selection", icon: "gallery" as IconName, words: "keep mark trash review photos", run: () => startCleanup(focused) }] : []),
+    ...(loc.scope === "folder" ? [{ id: "m-clean", title: "Quick Cleanup of This Folder…", section: "Mori", icon: "gallery" as IconName, words: "keep mark trash review photos", run: () => startCleanup(null) }] : []),
     { id: "m-keys", title: "Keyboard Shortcuts", section: "Help", icon: "command", words: "keys help", run: () => setShortcuts(true) },
   ];
 
@@ -1088,10 +1192,16 @@ export default function App() {
                 Include subfolders
               </label>
             )}
-            <div className="item-count">
+            <div className="item-count" aria-live="polite">
+              {marked.size > 0 && <span className="selected-count">{marked.size.toLocaleString()} selected · </span>}
               {result.total.toLocaleString()} {result.total === 1 ? "item" : "items"}
               {result.truncated && ` · first ${items.length.toLocaleString()}`}
             </div>
+            {folderScope && !searching && files.length > 0 && (
+              <button className="btn small ghost" onClick={() => startCleanup(null)} title="Go through these files one by one: Keep or Mark for Trash. Nothing moves until you confirm.">
+                <Icon name="gallery" size={13} /> Quick Cleanup
+              </button>
+            )}
           </div>
         </div>
 
@@ -1099,17 +1209,21 @@ export default function App() {
           <FileView
             items={items}
             view={view}
-            selected={selected}
-            marked={marked}
+            focus={selected}
+            selectedIds={marked}
             locationKey={`${loc.scope}|${loc.folder}|${kind}|${debounced}|${recursiveView}|${searchGlobal}`}
-            keyboardActive={!previewId && browsing && !dialog}
+            keyboardActive={!previewId && browsing && !dialog && !cleanup && !menu}
             sort={sort}
             desc={desc}
             showLocation={showLocation}
             baseLabel={driveWide ? status.rootName : folderName}
             onSort={(k) => (k === sort ? setDesc((d) => !d) : (setSort(k), setDesc(false)))}
-            onSelect={(i) => selectOnly(items[i]?.id ?? null)}
-            onActivate={activate}
+            onMove={(i, extend) => setSel((cur) => moveTo(cur, order, i, extend))}
+            onClear={() => selectOnly(null)}
+            onActivate={(i) => {
+              selectOnly(items[i]?.id ?? null);
+              activate(i);
+            }}
             onQuickLook={(i) => {
               const e = items[i];
               if (!e || e.kind === "folder" || e.kind === "link") return;
@@ -1153,6 +1267,19 @@ export default function App() {
             </p>
           </div>
         )}
+        {marked.size > 1 && !previewId && (
+          <SelectionBar
+            count={marked.size}
+            targets={selectionTargets()}
+            canModify={canModify}
+            onMove={() => requestTransfer("move", selectionTargets())}
+            onCopy={() => requestTransfer("copy", selectionTargets())}
+            onTags={() => setDialog({ kind: "tags", entries: selectionTargets() })}
+            onFavorite={(on) => setFavorite(selectionTargets().filter((t) => t.kind !== "link"), on)}
+            onTrash={() => requestTrash(selectionTargets())}
+            onClear={() => selectOnly(null)}
+          />
+        )}
       </main>
 
       <Analyzer active={mode === "analyzer"} version={analysisVersion} onToast={flash} onSwitch={() => setMode("similar")} />
@@ -1194,6 +1321,17 @@ export default function App() {
           onError={flash}
           isolated={previewIso}
           quick={previewQuick}
+          active={!dialog && !menu && !palette && !inspectId}
+          actions={{
+            canModify,
+            onTrash: (e) => requestTrash([e]),
+            onMove: (e) => requestTransfer("move", [e]),
+            onCopy: (e) => requestTransfer("copy", [e]),
+            onRename: (e) => setDialog({ kind: "rename", entry: e }),
+            onInfo: (e) => setInspectId(e.id),
+            onChecksum: (e) => setDialog({ kind: "checksum", entry: e }),
+            onFavorite: (e) => setFavorite([e], !e.favorite),
+          }}
         />
       )}
 
@@ -1216,6 +1354,10 @@ export default function App() {
           entry={menu.entry}
           count={menu.targets.length}
           onTrash={() => requestTrash(menu.targets)}
+          onMoveTo={() => requestTransfer("move", menu.targets)}
+          onCopyTo={() => requestTransfer("copy", menu.targets)}
+          onCleanup={() => startCleanup(menu.entry)}
+          canModify={canModify}
           onDelete={() => setDialog({ kind: "op", op: "delete", entries: menu.targets })}
           onRename={() => setDialog({ kind: "rename", entry: menu.entry })}
           onPrivacy={() => (menu.entry.private ? setPrivate(menu.entry, false) : setDialog({ kind: "private", entry: menu.entry }))}
@@ -1445,7 +1587,7 @@ export default function App() {
           onDeleted={(msg, ids) => {
             setDialog(null);
             if (previewId && ids.includes(previewId)) setPreviewId(null);
-            setMarked(new Set());
+            selectOnly(null);
             setAnalysisVersion((v) => v + 1);
             flash(msg, 5000);
           }}
@@ -1521,7 +1663,36 @@ export default function App() {
         <RenameDialog entry={dialog.entry} onCancel={() => setDialog(null)} onDone={(id, name) => renamed(dialog.entry, id, name)} />
       )}
 
-      {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} onNotice={(m) => flash(m, 3000)} />}
+      {dialog?.kind === "transfer" && (
+        <TransferDialog
+          op={dialog.op}
+          entries={dialog.entries}
+          rootName={status.rootName}
+          current={loc.scope === "folder" ? loc.folder : ""}
+          onClose={() => setDialog(null)}
+          onDone={(r, plan) => transferred(dialog.op, dialog.entries, r, plan)}
+        />
+      )}
+
+      {cleanup && (
+        <Suspense fallback={<div className="cleanup" />}>
+        <QuickCleanup
+          key={cleanup.id}
+          folder={cleanup}
+          status={status}
+          readOnly={readOnly}
+          browserSort={{ sort, desc }}
+          recursiveDefault={recursive}
+          indexVersion={indexVersion}
+          onClose={() => setCleanup(null)}
+          onToast={flash}
+          onTrashed={cleanupTrashed}
+          onUndo={() => (undoLast(), setCleanup(null))}
+        />
+        </Suspense>
+      )}
+
+      {inspectId && <Inspector id={inspectId} onClose={() => setInspectId(null)} onNotice={(m) => flash(m, 3000)} over={!!previewId} />}
 
       {drivePrompt}
 
@@ -1625,11 +1796,28 @@ function FolderTree({
           >
             <Icon name="chevron" size={12} />
           </button>
-          <button className="label" onClick={() => onOpen(f.id)} title={f.private ? `${f.name} — ${PRIVATE_HINT}` : f.name}>
+          <button
+            className="label"
+            onClick={() => onOpen(f.id)}
+            title={f.private ? `${f.name} — ${PRIVATE_HINT}` : f.name}
+            aria-label={`${f.name}${f.private ? ", private folder" : ""}${f.protected ? ", protected folder" : ""}`}
+          >
             <Icon name="folder" size={15} />
             <span className="truncate">{f.name}</span>
-            {f.private && <Icon name="lock" size={11} className="private-mark" />}
-            {f.protected && <Icon name="shield" size={11} className="private-mark" />}
+            {(f.private || f.protected) && (
+              <span className="tree-marks">
+                {f.private && (
+                  <span className="tree-mark" role="img" aria-label="Private folder" title="Private folder: its contents are hidden from global and recursive views">
+                    <Icon name="lock" size={13} stroke={1.7} />
+                  </span>
+                )}
+                {f.protected && (
+                  <span className="tree-mark" role="img" aria-label="Protected folder (Never Modify)" title="Protected folder (Never Modify)">
+                    <Icon name="shield" size={13} stroke={1.7} />
+                  </span>
+                )}
+              </span>
+            )}
           </button>
         </div>,
       );
@@ -1660,6 +1848,10 @@ function ContextMenu({
   onInfo,
   onProtect,
   onTrash,
+  onMoveTo,
+  onCopyTo,
+  onCleanup,
+  canModify,
   onDelete,
   onError,
 }: {
@@ -1683,13 +1875,31 @@ function ContextMenu({
   onInfo: () => void;
   onProtect: () => void;
   onTrash: () => void;
+  onMoveTo: () => void;
+  onCopyTo: () => void;
+  onCleanup: () => void;
+  /** Read-only Mode / Private Inspection: changes to files are unavailable. */
+  canModify: boolean;
   onDelete: () => void;
   onError: (msg: string) => void;
 }) {
   const folder = entry.kind === "folder";
+  const ro = canModify ? undefined : "Read-only: Mori won't change files right now";
+  const transfer = (
+    <>
+      <button onClick={onMoveTo} disabled={!canModify} title={ro}>
+        <Icon name="folder" size={14} /> Move to…
+        <kbd className="menu-kbd">M</kbd>
+      </button>
+      <button onClick={onCopyTo} disabled={!canModify} title={ro}>
+        <Icon name="copy" size={14} /> Copy to…
+        <kbd className="menu-kbd">⇧M</kbd>
+      </button>
+    </>
+  );
   if (count > 1) {
     return (
-      <div className="menu" style={{ left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 90) }} onContextMenu={(e) => e.preventDefault()}>
+      <div className="menu" role="menu" style={{ left: Math.min(x, window.innerWidth - 230), top: Math.max(8, Math.min(y, window.innerHeight - 250)) }} onContextMenu={(e) => e.preventDefault()}>
         <div className="menu-label">{plural(count, "item")} selected</div>
         {count === 2 && compareOk && (
           <button onClick={onCompare} title="Exact comparison by SHA-256 (not visual similarity)">
@@ -1703,7 +1913,9 @@ function ContextMenu({
           <Icon name="tag" size={14} /> Tags…
         </button>
         <div className="sep" />
-        <button className="danger" onClick={onTrash}>
+        {transfer}
+        <div className="sep" />
+        <button className="danger" onClick={onTrash} disabled={!canModify} title={ro}>
           <Icon name="trash" size={14} /> Move {plural(count, "item")} to Trash
         </button>
         <button className="danger" onClick={onDelete}>
@@ -1712,12 +1924,17 @@ function ContextMenu({
       </div>
     );
   }
-  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.max(8, Math.min(y, window.innerHeight - 540)) };
+  const style = { left: Math.min(x, window.innerWidth - 230), top: Math.max(8, Math.min(y, window.innerHeight - 640)) };
   return (
-    <div className="menu" style={style} onContextMenu={(e) => e.preventDefault()}>
+    <div className="menu" role="menu" style={style} onContextMenu={(e) => e.preventDefault()}>
       {entry.kind !== "link" && (
         <button onClick={onPreview}>
           <Icon name={folder ? "folder" : "gallery"} size={14} /> {folder ? "Open Folder" : "Preview"}
+        </button>
+      )}
+      {folder && (
+        <button onClick={onCleanup} title="Go through this folder's files one by one: Keep or Mark for Trash. Nothing moves until you confirm.">
+          <Icon name="gallery" size={14} /> Quick Cleanup…
         </button>
       )}
       {!folder && entry.kind !== "link" && (
@@ -1768,9 +1985,11 @@ function ContextMenu({
         </>
       )}
       <div className="sep" />
-      <button onClick={onRename}>
+      <button onClick={onRename} disabled={!canModify} title={ro}>
         <Icon name="rename" size={14} /> Rename…
+        <kbd className="menu-kbd">F2</kbd>
       </button>
+      {transfer}
       {folder && (
         <button onClick={onPrivacy} title={entry.private ? undefined : PRIVATE_HINT}>
           <Icon name="lock" size={14} /> {entry.private ? "Make Public" : "Make Private…"}
@@ -1782,11 +2001,62 @@ function ContextMenu({
         </button>
       )}
       <div className="sep" />
-      <button className="danger" onClick={onTrash}>
+      <button className="danger" onClick={onTrash} disabled={!canModify} title={ro}>
         <Icon name="trash" size={14} /> Move to Trash
+        <kbd className="menu-kbd">{isMac ? "⌘⌫" : "Del"}</kbd>
       </button>
       <button className="danger" onClick={onDelete} title="Bypasses the Trash. Shows exactly what will be deleted first.">
         <Icon name="close" size={14} /> Delete Permanently…
+      </button>
+    </div>
+  );
+}
+
+/** Shown while several items are selected: the common file actions, one click away. */
+function SelectionBar({
+  count,
+  targets,
+  canModify,
+  onMove,
+  onCopy,
+  onTags,
+  onFavorite,
+  onTrash,
+  onClear,
+}: {
+  count: number;
+  targets: Entry[];
+  canModify: boolean;
+  onMove: () => void;
+  onCopy: () => void;
+  onTags: () => void;
+  onFavorite: (on: boolean) => void;
+  onTrash: () => void;
+  onClear: () => void;
+}) {
+  const ro = canModify ? undefined : "Read-only: Mori won't change files right now";
+  const allFav = targets.length > 0 && targets.every((t) => t.favorite || t.kind === "link");
+  return (
+    <div className="selection-bar" role="toolbar" aria-label={`${count} selected`}>
+      <span className="count">{count.toLocaleString()} selected</span>
+      <button className="btn small ghost" onClick={onMove} disabled={!canModify} title={ro ?? "Move to… (M)"}>
+        <Icon name="folder" size={13} /> Move to…
+      </button>
+      <button className="btn small ghost" onClick={onCopy} disabled={!canModify} title={ro ?? "Copy to… (⇧M)"}>
+        <Icon name="copy" size={13} /> Copy to…
+      </button>
+      <button className="btn small ghost" onClick={onTags} title="Tags…">
+        <Icon name="tag" size={13} /> Tags…
+      </button>
+      <button className="btn small ghost" onClick={() => onFavorite(!allFav)} title={allFav ? "Remove from Favorites (F)" : "Add to Favorites (F)"}>
+        <Icon name="star" size={13} /> {allFav ? "Unfavorite" : "Favorite"}
+      </button>
+      <span className="sep" />
+      <button className="btn small ghost danger" onClick={onTrash} disabled={!canModify} title={ro ?? `Move to Trash (${isMac ? "⌘⌫" : "Delete"})`}>
+        <Icon name="trash" size={13} /> Move to Trash
+      </button>
+      <button className="icon-btn" onClick={onClear} title="Clear selection (Esc)" aria-label="Clear selection">
+        <Icon name="close" size={13} />
       </button>
     </div>
   );

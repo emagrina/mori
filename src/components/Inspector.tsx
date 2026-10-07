@@ -8,7 +8,7 @@ const LEVEL: Record<RiskLevel, string> = { high: "High attention", attention: "A
  * Factual file report: real type, extension check, risk indicators,
  * permissions. Mori reports what it observed — never "safe" or "virus".
  */
-export function Inspector({ id, onClose, onNotice }: { id: string; onClose: () => void; onNotice?: (msg: string) => void }) {
+export function Inspector({ id, onClose, onNotice, over = false }: { id: string; onClose: () => void; onNotice?: (msg: string) => void; /** Shown over the preview. */ over?: boolean }) {
   const [report, setReport] = useState<FileReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,7 +39,7 @@ export function Inspector({ id, onClose, onNotice }: { id: string; onClose: () =
   const r = report;
   const flagged = r?.findings.filter((f) => f.level !== "info") ?? [];
   return (
-    <aside className="inspector" aria-label="File information">
+    <aside className={`inspector ${over ? "over" : ""}`} aria-label="File information">
       <header>
         <h2 className="truncate" title={r?.name}>
           {r?.name ?? "Info"}

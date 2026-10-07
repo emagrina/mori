@@ -121,7 +121,10 @@ describe("Quick Cleanup staging", () => {
   it("a file that disappears mid-session leaves the queue cleanly", () => {
     let s = run(createSession(items), ["trash", "keep"]);
     // f2 is current; f0 (marked) and f2 vanish (moved elsewhere, drive rescanned…).
-    s = reconcile(s, items.filter((e) => e.id !== "f0" && e.id !== "f2"));
+    s = reconcile(
+      s,
+      items.filter((e) => e.id !== "f0" && e.id !== "f2"),
+    );
     expect(current(s)?.id).toBe("f3");
     expect(trashIds(s)).toEqual([]);
     expect(counts(s)).toMatchObject({ total: 4, kept: 1 });

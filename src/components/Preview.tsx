@@ -33,13 +33,30 @@ interface Props {
   isolated?: boolean;
   /** Mori Quick Look (Space): a floating panel instead of the full window. */
   quick?: boolean;
+  /** File management from inside the preview (the `…` menu). */
+  actions?: PreviewActions;
+  /** False while a dialog or menu is on top: the preview leaves the keyboard alone. */
+  active?: boolean;
+}
+
+export interface PreviewActions {
+  onTrash: (e: Entry) => void;
+  onMove: (e: Entry) => void;
+  onCopy: (e: Entry) => void;
+  onRename: (e: Entry) => void;
+  onInfo: (e: Entry) => void;
+  onChecksum: (e: Entry) => void;
+  onFavorite: (e: Entry) => void;
+  /** Whether changes to files are allowed right now (Read-only Mode, Private Inspection). */
+  canModify: boolean;
 }
 
 /** Seconds per photo in a slideshow. */
 const SLIDE_MS = 4000;
 
-export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, isolated = false, quick = false }: Props) {
+export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, isolated = false, quick = false, actions, active = true }: Props) {
   const entry = items[index];
+  const [menu, setMenu] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dims, setDims] = useState<string>("");
@@ -120,8 +137,16 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
     });
 
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (menu) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setMenu(false);
+        }
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();
@@ -150,7 +175,14 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [index, hasPrev, hasNext, onClose, onIndex]);
+  }, [index, hasPrev, hasNext, onClose, onIndex, active, menu]);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menu]);
+  useEffect(() => setMenu(false), [entry?.id]);
 
   if (!entry) return null;
   // Safe Inspection Mode: opening a file is the explicit request, and it is
@@ -209,6 +241,24 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
               <Icon name="external" size={14} /> Open
             </button>
           )}
+          {actions && (
+            <div className="preview-more">
+              <button
+                className={`icon-btn ${menu ? "on" : ""}`}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  setMenu((m) => !m);
+                }}
+                title="More actions"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={menu}
+              >
+                <Icon name="more" />
+              </button>
+              {menu && <PreviewMenu entry={entry} actions={actions} close={() => setMenu(false)} />}
+            </div>
+          )}
         </div>
       </header>
 
@@ -226,7 +276,7 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
         {info === null ? (
           <div className="spinner" />
         ) : (
-          <Body
+          <PreviewBody
             key={entry.id}
             entry={entry}
             info={info}
@@ -268,7 +318,40 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
   );
 }
 
-interface BodyProps {
+
+/** The preview's `…` menu: manage the file being viewed. */
+function PreviewMenu({ entry, actions, close }: { entry: Entry; actions: PreviewActions; close: () => void }) {
+  const item = (label: string, icon: Parameters<typeof Icon>[0]["name"], run: (e: Entry) => void, opts: { keys?: string; danger?: boolean; modify?: boolean } = {}) => (
+    <button
+      role="menuitem"
+      className={opts.danger ? "danger" : ""}
+      disabled={opts.modify && !actions.canModify}
+      title={opts.modify && !actions.canModify ? "Read-only: Mori won't change files right now" : undefined}
+      onClick={() => {
+        close();
+        run(entry);
+      }}
+    >
+      <Icon name={icon} size={14} /> {label}
+      {opts.keys && <kbd className="menu-kbd">{opts.keys}</kbd>}
+    </button>
+  );
+  return (
+    <div className="menu preview-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+      {item("Get Info", "info", actions.onInfo, { keys: "I" })}
+      {item(entry.favorite ? "Remove from Favorites" : "Add to Favorites", "star", actions.onFavorite)}
+      {item("Calculate Checksum", "check", actions.onChecksum)}
+      <div className="sep" />
+      {item("Rename…", "rename", actions.onRename, { keys: "F2", modify: true })}
+      {item("Move to…", "folder", actions.onMove, { keys: "M", modify: true })}
+      {item("Copy to…", "copy", actions.onCopy, { keys: "⇧M", modify: true })}
+      <div className="sep" />
+      {item("Move to Trash", "trash", actions.onTrash, { keys: isMac ? "⌘⌫" : "Delete", danger: true, modify: true })}
+    </div>
+  );
+}
+
+export interface BodyProps {
   entry: Entry;
   info: Inspection;
   zoom: number;
@@ -285,7 +368,8 @@ interface BodyProps {
 
 type Failure = "image" | "text" | "pdf" | "archive" | "frames" | "audio" | VideoFailure;
 
-function Body({ entry, info, zoom, pan, setPan, zoomBy, resetZoom, onDims, videoRef, onOpen, iso }: BodyProps) {
+/** The media itself (shared with Quick Cleanup): the same safe preview paths. */
+export function PreviewBody({ entry, info, zoom, pan, setPan, zoomBy, resetZoom, onDims, videoRef, onOpen, iso }: BodyProps) {
   const [failed, setFailed] = useState<Failure | null>(null);
   const [text, setText] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
