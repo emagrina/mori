@@ -4,6 +4,10 @@ All notable changes to Mori are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Drag and drop, favorites
+- **Drag and drop** files and folders onto folders in Grid, Gallery and List views, the sidebar tree and the drive: the selection moves together, through the same backend Move as Move to… (conflicts, protected folders, Read-only Mode, cross-drive moves, Undo). Clear accept / refuse feedback, sidebar folders expand when you hold over them, folder cards spring open, Option/Alt copies. Internal only: not to or from other apps.
+- **Favorite star** on the thumbnail (top-right, filled when set, outline on hover), clickable without opening or selecting; a dedicated star in List view; a Favorites count in the sidebar.
+
 ### File management
 - **Desktop selection** in every view, search results and *Include subfolders*: a click selects and a double-click (or Return) opens; Cmd/Ctrl+Click, Shift+Click, Shift+arrows, ⌘A/Ctrl+A, Esc. Items are tracked by id, never by name.
 - A **selection bar** ("3 selected") with Move to…, Copy to…, Tags, Favorite and Move to Trash; the context menu acts on the whole selection.

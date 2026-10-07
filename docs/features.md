@@ -130,7 +130,8 @@ Uses local perceptual analysis to suggest photos and videos that may represent t
 | F2 | Rename |
 | ⌘⌫ / Delete | Move to Trash (Windows/Linux: Delete) |
 | `I` | Get Info |
-| `F` | Add to / remove from Favorites |
+| `F` | Add to / remove from Favorites (or click the star on a card) |
+| Drag onto a folder | Move there (Option/Alt: copy) |
 | ⌘F / Ctrl+F | Search |
 | ⌘K / Ctrl+K | **Command palette**: every view, analysis and action, plus files and folders by name |
 | ⌘1 / ⌘2 / ⌘3 | List / Grid / Gallery |
@@ -160,6 +161,27 @@ Selection works the same in Grid, Gallery and List views, in search results and 
 - Items that disappear (moved, trashed, renamed elsewhere, filtered out) leave the selection; the keyboard focus continues with the next item.
 - With several items selected, a bar at the bottom shows **"N selected"** with Move to…, Copy to…, Tags…, Favorite and Move to Trash. The context menu offers the same for the whole selection.
 - Only the visible tiles are rendered, and each re-renders only when its own selection state changes, so selecting in a folder of tens of thousands of files stays instant.
+
+### Drag and drop
+
+Drag files and folders onto a folder to move them there, like Finder. It is the same backend Move as *Move to…*: the frontend only says what goes where, and the backend checks everything again.
+
+- **Sources**: one item, or the selection. Grabbing an item that is part of the selection drags the whole selection; grabbing an unselected item drags just that item and makes it the selection. Sidebar folders can be dragged too. The drag image shows one picture and the count ("5 items"), never a stack of thumbnails.
+- **Targets**: folder cards in Grid and Gallery views, folder rows in List view, folders in the sidebar tree, and the drive itself at the top of the sidebar.
+- **Feedback**: a folder that will take the drop shows Mori's selection ring and tint; one that won't is dimmed and dashed, with the reason (already there, into itself or its own subfolder, protected, Read-only Mode / Private Inspection), and the cursor shows the drop isn't allowed.
+- **Sidebar auto-expand**: hold over a collapsed sidebar folder for about ¾ s and it expands, so you can go deeper before dropping. Passing over quickly expands nothing. The sidebar and the grid scroll when you drag near their edges.
+- **Spring-loaded folders**: hold over a folder card for about a second and Mori opens it, so you can keep dragging into a subfolder.
+- **Move by default**, **Option/Alt** copies (as in Finder).
+- After the drop, everything works as in [Move to… and Copy to…](#move-to-and-copy-to): the backend's plan, the Keep Both / Replace / Skip / Cancel dialog only if a name conflicts or something is refused, moves across drives done as a verified copy with the original to the Trash, partial failures reported, and Undo.
+- Only **internal** drags: Mori items onto Mori folders. Dragging files out to Finder or other apps, and dropping files from Finder into Mori, aren't supported (see [Not implemented yet](#not-implemented-yet)). A Mori drag carries only an opaque marker, never a path, so other apps receive nothing if the pointer leaves the window, and files dropped from outside are ignored.
+
+### Favorites
+
+- The star sits on the thumbnail's top-right corner in Grid and Gallery views (files and folders), in a small translucent disc that reads on light and dark images: **filled and always shown** for favorites, an **outline on hover** otherwise. Click it to add or remove; it never opens, selects, drags or Quick Looks the item.
+- List view has a dedicated star at the end of the name, the same way.
+- `F`, the context menu, the selection bar and the preview's `…` menu still work.
+- **Favorites** in the sidebar lists favorite files and folders, with a count that updates at once (private folders' contents aren't counted, as everywhere).
+- Favorites are Mori's own records (never written into files) and aren't saved in temporary sessions; there the star is only shown, not offered.
 
 ### Move to… and Copy to…
 
@@ -299,7 +321,7 @@ The setting is stored in Mori's app data and survives restarts. On macOS each dr
 
 These have been discussed for Mori but **are not in the code yet**:
 
-- **Drag and drop** of files (into folders, or out of Mori). Use Move to… / Copy to….
+- **Drag and drop with other apps**: dragging files out of Mori to Finder or other apps, and dropping files from Finder into Mori. Mori's window has the system drop handler off on purpose, and Tauri 2 has no built-in way to start a native file drag. Supporting it would mean a native drag plugin that hands real paths to the system (dragging out), and turning the drop handler on, which hands arbitrary outside paths to Mori (dropping in). Both need their own security review. Internal drag and drop works.
 - **Merging folders**: a folder never replaces or merges into a folder with the same name; Keep Both or Skip.
 - Copying links on Windows needs Developer Mode (or administrator rights); otherwise the link is reported as not copied.
 
