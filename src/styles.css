@@ -4753,22 +4753,14 @@ button.dest-row:not(:disabled):hover,
   flex-direction: column;
 }
 
+/* Quick Cleanup's media area *is* the viewer's `.preview-stage` (a flex
+   container with min-height: 0, so the media's height: 100% resolves to the
+   visible area and object-fit: contain fits the whole frame). Only what
+   differs from the viewer belongs here. It must never become a grid with an
+   auto row again: that row grows to the video's own height (a 720×1280
+   clip laid out 2276 px tall) and overflow: hidden then crops it. */
 .cleanup-stage {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-}
-
-.cleanup-stage > .image-stage,
-.cleanup-stage > .video-stack,
-.cleanup-stage > .unsupported,
-.cleanup-stage > .pdf-view,
-.cleanup-stage > .text-preview {
-  width: 100%;
-  height: 100%;
+  min-width: 0;
 }
 
 .cleanup-badges {

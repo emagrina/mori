@@ -5,6 +5,7 @@ All notable changes to Mori are documented here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- **Quick Cleanup showed portrait videos zoomed in and cropped** (e.g. a 720×1280 clip showed only the middle of the frame). Quick Cleanup now uses the normal viewer's media stage, so every photo, GIF and video is fitted whole, with black bars where the shape differs.
 - **Filmstrip for portrait and rotated videos**: frames keep the video's displayed aspect ratio at a fixed strip height instead of being cropped into landscape boxes (preview and isolated view). Video facts now report the displayed size of rotated phone videos (90°/270° track rotation).
 
 ### Drag and drop, favorites
