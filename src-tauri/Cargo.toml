@@ -1,6 +1,6 @@
 [package]
 name = "mori"
-version = "1.0.1"
+version = "1.1.0"
 description = "Mori — a tiny offline file & media browser for external drives"
 edition = "2021"
 
