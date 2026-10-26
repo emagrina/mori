@@ -4,6 +4,21 @@ All notable changes to Mori are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-26
+
+Mori now speaks 23 languages. Mori remains local and offline-first.
+
+### Added
+- **Interface in 23 languages**: English, Spanish, Catalan, French, German, Italian, Portuguese, Dutch, Polish, Ukrainian, Russian, Turkish, Arabic, Hebrew, Hindi, Bengali, Indonesian, Vietnamese, Thai, Simplified Chinese, Traditional Chinese, Japanese and Korean. Mori's own messages (errors, risk findings, analysis reasons, dialog titles) are translated too.
+- **Language…** in the sidebar's More menu and in the command palette: follow the system language (the default) or pick one. The choice is saved with Mori's settings and applied at once, keeping the current folder and view.
+- **Right-to-left layout** for Arabic and Hebrew.
+- Numbers, sizes and dates follow the chosen language.
+- Store builds only: **Rate Mori…** and the system's own review prompt, asked only right after a task completes. The builds published here aren't in a store, so they never ask (see docs/releasing.md).
+
+### Improved
+- Diagnostics match checks by a stable id, so its summary works in every language.
+- Long group details in Similar Media wrap instead of being cut off.
+
 ## [1.0.1] - 2026-10-07
 
 A patch release focused on everyday file management, plus video and tag fixes. Mori remains local and offline-first.
