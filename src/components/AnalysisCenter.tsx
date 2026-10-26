@@ -1,14 +1,15 @@
+import { msg, t } from "../i18n";
 import { Icon, type IconName } from "./Icon";
 
 export type Tool = "analyzer" | "similar" | "metadata" | "places" | "storage" | "health";
 
 const TOOLS: { key: Tool; icon: IconName; title: string; text: string; note: string }[] = [
-  { key: "storage", icon: "drive", title: "Storage", text: "Where the space goes: types, years, largest items, empty folders.", note: "From the index · instant" },
-  { key: "analyzer", icon: "duplicate", title: "Exact Duplicates", text: "Byte-identical files in any locations.", note: "Verified by content hash" },
-  { key: "similar", icon: "gallery", title: "Similar Media", text: "Photos and videos that look the same, bursts included.", note: "Estimated — always review" },
-  { key: "metadata", icon: "tag", title: "Sensitive Metadata", text: "Locations, names, devices and other revealing metadata.", note: "Read in the sandbox" },
-  { key: "places", icon: "pin", title: "Places", text: "Where photos and videos were taken, on an offline map.", note: "No map service" },
-  { key: "health", icon: "warning", title: "Media Health", text: "Broken, unsupported, risk-flagged and undecodable media.", note: "One result per file" },
+  { key: "storage", icon: "drive", title: msg("Storage"), text: msg("Where the space goes: types, years, largest items, empty folders."), note: msg("From the index · instant") },
+  { key: "analyzer", icon: "duplicate", title: msg("Exact Duplicates"), text: msg("Byte-identical files in any locations."), note: msg("Verified by content hash") },
+  { key: "similar", icon: "gallery", title: msg("Similar Media"), text: msg("Photos and videos that look the same, bursts included."), note: msg("Estimated — always review") },
+  { key: "metadata", icon: "tag", title: msg("Sensitive Metadata"), text: msg("Locations, names, devices and other revealing metadata."), note: msg("Read in the sandbox") },
+  { key: "places", icon: "pin", title: msg("Places"), text: msg("Where photos and videos were taken, on an offline map."), note: msg("No map service") },
+  { key: "health", icon: "warning", title: msg("Media Health"), text: msg("Broken, unsupported, risk-flagged and undecodable media."), note: msg("One result per file") },
 ];
 
 /** Every analysis in one place. Each runs only when you start it, and changes nothing until you confirm. */
@@ -21,24 +22,24 @@ export function AnalysisCenter({ active, onOpen }: { active: boolean; onOpen: (t
       </header>
       <div className="page-head">
         <div className="title-row">
-          <h1 className="page-title">Analyze</h1>
+          <h1 className="page-title">{t("Analyze")}</h1>
         </div>
       </div>
       <div className="analyzer-body">
         <div className="center-grid">
-          {TOOLS.map((t) => (
-            <button key={t.key} className="tool-card" onClick={() => onOpen(t.key)}>
-              <Icon name={t.icon} size={18} />
+          {TOOLS.map((tool) => (
+            <button key={tool.key} className="tool-card" onClick={() => onOpen(tool.key)}>
+              <Icon name={tool.icon} size={18} />
               <span className="tool-text">
-                <span className="tool-title">{t.title}</span>
-                <span className="muted">{t.text}</span>
-                <span className="tool-note">{t.note}</span>
+                <span className="tool-title">{t(tool.title)}</span>
+                <span className="muted">{t(tool.text)}</span>
+                <span className="tool-note">{t(tool.note)}</span>
               </span>
             </button>
           ))}
         </div>
         <p className="fineprint center">
-          Analyses read only what you choose, run locally, keep their results in memory, and change nothing until you review and confirm.
+          {t("Analyses read only what you choose, run locally, keep their results in memory, and change nothing until you review and confirm.")}
         </p>
       </div>
     </main>

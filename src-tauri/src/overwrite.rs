@@ -32,7 +32,7 @@ pub enum Medium {
 /// Why overwriting files at `path` would not reach the original data, or
 /// `Ok` when it can (single pass, spinning disk, non-copy-on-write volume).
 pub fn eligibility(path: &Path) -> Result<(), String> {
-    let (fs_type, device) = volume_info(path).ok_or("Mori can't identify this drive.")?;
+    let (fs_type, device) = volume_info(path).ok_or_else(|| tr!("Mori can't identify this drive."))?;
     decide(&fs_type, medium(&device))
 }
 
@@ -40,18 +40,18 @@ pub fn eligibility(path: &Path) -> Result<(), String> {
 pub fn decide(fs_type: &str, medium: Medium) -> Result<(), String> {
     match fs_type {
         "apfs" | "zfs" | "btrfs" => {
-            return Err("This drive uses a copy-on-write file system: overwriting writes new blocks and the original data can remain.".into())
+            return Err(tr!("This drive uses a copy-on-write file system: overwriting writes new blocks and the original data can remain."))
         }
-        "nfs" | "smbfs" | "afpfs" | "webdav" | "cifs" => return Err("Network volumes can't be overwritten reliably from this computer.".into()),
+        "nfs" | "smbfs" | "afpfs" | "webdav" | "cifs" => return Err(tr!("Network volumes can't be overwritten reliably from this computer.")),
         "hfs" | "msdos" | "exfat" | "ntfs" | "ext4" | "ext3" | "ext2" | "fat32" | "vfat" => {}
-        _ => return Err("Mori doesn't know how this file system stores data.".into()),
+        _ => return Err(tr!("Mori doesn't know how this file system stores data.")),
     }
     match medium {
         Medium::Rotational => Ok(()),
         Medium::SolidState => {
-            Err("This is a solid-state or flash drive: wear-levelling keeps old copies the system can't reach, so overwriting isn't meaningful.".into())
+            Err(tr!("This is a solid-state or flash drive: wear-levelling keeps old copies the system can't reach, so overwriting isn't meaningful."))
         }
-        Medium::Unknown => Err("Mori can't confirm this is a spinning hard disk, so overwriting may not reach the original data.".into()),
+        Medium::Unknown => Err(tr!("Mori can't confirm this is a spinning hard disk, so overwriting may not reach the original data.")),
     }
 }
 
@@ -66,18 +66,18 @@ pub fn overwrite_and_delete(policy: &Policy, path: &Path) -> Result<u64, String>
 
 /// The overwrite itself (eligibility already decided).
 fn overwrite_unchecked(path: &Path) -> Result<u64, String> {
-    let before = fs::symlink_metadata(path).map_err(|_| "file no longer exists".to_string())?;
+    let before = fs::symlink_metadata(path).map_err(|_| tr!("file no longer exists"))?;
     if before.file_type().is_symlink() {
-        return Err("A link is never overwritten (its target would be): delete the link instead.".into());
+        return Err(tr!("A link is never overwritten (its target would be): delete the link instead."));
     }
     if !before.is_file() {
-        return Err("Only files can be overwritten.".into());
+        return Err(tr!("Only files can be overwritten."));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if before.nlink() > 1 {
-            return Err("This file has other hard links; overwriting would destroy their data too.".into());
+            return Err(tr!("This file has other hard links; overwriting would destroy their data too."));
         }
     }
     let mut opts = fs::OpenOptions::new();
@@ -87,14 +87,14 @@ fn overwrite_unchecked(path: &Path) -> Result<u64, String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW);
     }
-    let mut f = opts.open(path).map_err(|_| "the file couldn't be opened for writing".to_string())?;
+    let mut f = opts.open(path).map_err(|_| tr!("the file couldn't be opened for writing"))?;
     // Same file as checked (no swap between the check and the open).
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let now = f.metadata().map_err(|_| "the file changed".to_string())?;
+        let now = f.metadata().map_err(|_| tr!("the file changed"))?;
         if now.ino() != before.ino() || now.dev() != before.dev() || !now.is_file() {
-            return Err("the file changed while it was being prepared".into());
+            return Err(tr!("the file changed while it was being prepared"));
         }
     }
     let len = before.len();
@@ -111,10 +111,10 @@ fn overwrite_unchecked(path: &Path) -> Result<u64, String> {
             let b = seed.to_le_bytes();
             chunk.copy_from_slice(&b[..chunk.len()]);
         }
-        f.write_all(&buf[..n]).map_err(|_| "writing failed (disk full or removed?)".to_string())?;
+        f.write_all(&buf[..n]).map_err(|_| tr!("writing failed (disk full or removed?)"))?;
         done += n as u64;
     }
-    f.sync_all().map_err(|_| "flushing to the device failed".to_string())?;
+    f.sync_all().map_err(|_| tr!("flushing to the device failed"))?;
     #[cfg(target_os = "macos")]
     unsafe {
         use std::os::fd::AsRawFd;
@@ -122,7 +122,7 @@ fn overwrite_unchecked(path: &Path) -> Result<u64, String> {
         libc::fcntl(f.as_raw_fd(), libc::F_FULLFSYNC);
     }
     drop(f);
-    fs::remove_file(path).map_err(|_| "the overwritten file couldn't be removed".to_string())?;
+    fs::remove_file(path).map_err(|_| tr!("the overwritten file couldn't be removed"))?;
     Ok(len)
 }
 

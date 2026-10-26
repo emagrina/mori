@@ -4,6 +4,7 @@ import { formatDate, formatShortDate, formatSize, isMac, parentOf, PRIVATE_HINT,
 /** Folder an item came from, relative to the view ("" = the viewed folder itself). */
 const locationOf = (e: Entry) => (e.location ?? parentOf(e.path)).split("/").join(" / ");
 import { beginDrag, DRAG_TYPE, dragGhost, dragged, edgeScroll, endDrag, SPRING_MS, type DragItem } from "../dnd";
+import { t } from "../i18n";
 import { Icon } from "./Icon";
 import { Thumb } from "./Thumb";
 
@@ -259,14 +260,14 @@ export function FileView(p: Props) {
     >
       {p.view === "list" && (
         <div className="list-header" style={{ paddingLeft: PAD + 10, paddingRight: PAD + 10 }}>
-          {header("name", "Name", "c-name")}
-          {header("type", "Type", "c-type")}
-          {header("size", "Size", "c-size")}
-          {header("modified", "Modified", "c-date")}
-          {p.showLocation && <span className="c-folder">Location</span>}
+          {header("name", t("Name"), "c-name")}
+          {header("type", t("Type"), "c-type")}
+          {header("size", t("Size"), "c-size")}
+          {header("modified", t("Modified"), "c-date")}
+          {p.showLocation && <span className="c-folder">{t("Location")}</span>}
         </div>
       )}
-      <div className="sizer" style={{ height }} role="listbox" aria-multiselectable aria-label="Files" onClick={(e) => e.target === e.currentTarget && p.onClear()}>
+      <div className="sizer" style={{ height }} role="listbox" aria-multiselectable aria-label={t("Files")} onClick={(e) => e.target === e.currentTarget && p.onClear()}>
         {tiles}
       </div>
     </div>
@@ -310,10 +311,10 @@ interface TileProps {
  * selects or drags the item.
  */
 function FavStar({ e, i, events, can, size }: { e: Entry; i: number; events: TileEvents; can: boolean; size: number }) {
-  const label = e.favorite ? "Remove from Favorites" : "Add to Favorites";
+  const label = e.favorite ? t("Remove from Favorites") : t("Add to Favorites");
   if (!can) {
     return e.favorite ? (
-      <span className="fav-star on static" title="Favorite" role="img" aria-label="Favorite">
+      <span className="fav-star on static" title={t("Favorite")} role="img" aria-label={t("Favorite")}>
         <Icon name="star" size={size} fill />
       </span>
     ) : null;
@@ -322,7 +323,7 @@ function FavStar({ e, i, events, can, size }: { e: Entry; i: number; events: Til
   return (
     <button
       className={`fav-star ${e.favorite ? "on" : ""}`}
-      title={`${label} (F)`}
+      title={t("{label} (F)", { label })}
       aria-label={label}
       aria-pressed={!!e.favorite}
       // Draggable itself (and the drag cancelled), so grabbing the star never drags the card.
@@ -376,18 +377,18 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
           <Icon name={e.kind} size={16} />
           <span className="truncate">{e.name}</span>
           {e.flagged && (
-            <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
+            <span className="risk-mark" title={t("The name shows a suspicious pattern. Press I for details.")}>
               <Icon name="warning" size={11} />
             </span>
           )}
           {e.protected && (
-            <span className="private-mark" title="Never Modify">
+            <span className="private-mark" title={t("Never Modify")}>
               <Icon name="shield" size={11} />
             </span>
           )}
           {e.link && <span className="link-target truncate">→ {e.link}</span>}
           {e.private && (
-            <span className="private-mark" title={PRIVATE_HINT}>
+            <span className="private-mark" title={t(PRIVATE_HINT)}>
               <Icon name="lock" size={11} />
             </span>
           )}
@@ -411,7 +412,7 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
         <div className="caption-overlay">
           <div className="truncate">
             {e.private && (
-              <span className="private-mark" title={PRIVATE_HINT}>
+              <span className="private-mark" title={t(PRIVATE_HINT)}>
                 <Icon name="lock" size={11} />{" "}
               </span>
             )}
@@ -432,7 +433,7 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
         <div className="caption">
           <div className="name truncate">
             {e.flagged && (
-              <span className="risk-mark" title="The name shows a suspicious pattern. Press I for details.">
+              <span className="risk-mark" title={t("The name shows a suspicious pattern. Press I for details.")}>
                 <Icon name="warning" size={11} />{" "}
               </span>
             )}
@@ -441,16 +442,16 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
           <div className="meta truncate">
             {e.kind === "folder" && e.protected && (
               <>
-                <span className="private-mark" title="Never Modify">
-                  <Icon name="shield" size={10} /> Protected
+                <span className="private-mark" title={t("Never Modify")}>
+                  <Icon name="shield" size={10} /> {t("Protected")}
                 </span>
                 {" · "}
               </>
             )}
             {e.kind === "folder" && e.private && (
               <>
-                <span className="private-mark" title={PRIVATE_HINT}>
-                  <Icon name="lock" size={10} /> Private
+                <span className="private-mark" title={t(PRIVATE_HINT)}>
+                  <Icon name="lock" size={10} /> {t("Private")}
                 </span>
                 {" · "}
               </>
@@ -458,7 +459,9 @@ const Tile = memo(function Tile({ e, i, view, top, left, width: tileW, height, s
             {e.kind === "folder"
               ? showLocation && locationOf(e)
                 ? locationOf(e)
-                : `${e.private ? "" : "Folder · "}${formatShortDate(e.modified)}`
+                : e.private
+                  ? formatShortDate(e.modified)
+                  : `${t("Folder")} · ${formatShortDate(e.modified)}`
               : showLocation && locationOf(e)
                 ? locationOf(e)
                 : `${formatSize(e.size)} · ${formatShortDate(e.modified)}`}

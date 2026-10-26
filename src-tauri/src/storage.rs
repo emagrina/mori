@@ -182,7 +182,7 @@ pub fn report(idx: &Index, folder: &str) -> Report {
         tiles.push(Tile {
             kind: "files",
             id: String::new(),
-            name: format!("{} more files", rest.len()),
+            name: trn!(rest.len(), "{n} more file", "{n} more files"),
             bytes: rest.iter().map(|e| e.size).sum(),
             files: rest.len() as u64,
         });
@@ -273,27 +273,27 @@ fn is_junk(name: &str, len: u64) -> bool {
 pub fn verify_empty(dir: &Path) -> Result<(), String> {
     fn walk(dir: &Path, depth: usize, seen: &mut usize) -> Result<(), String> {
         if depth > 32 {
-            return Err("too deeply nested to check".into());
+            return Err(tr!("too deeply nested to check"));
         }
-        let meta = fs::symlink_metadata(dir).map_err(|_| "no longer exists".to_string())?;
+        let meta = fs::symlink_metadata(dir).map_err(|_| tr!("no longer exists"))?;
         if !meta.is_dir() {
-            return Err("no longer a folder".into());
+            return Err(tr!("no longer a folder"));
         }
-        for item in fs::read_dir(dir).map_err(|_| "can't be read".to_string())? {
+        for item in fs::read_dir(dir).map_err(|_| tr!("can't be read"))? {
             *seen += 1;
             if *seen > 10_000 {
-                return Err("too many items to check".into());
+                return Err(tr!("too many items to check"));
             }
-            let item = item.map_err(|_| "can't be read".to_string())?;
+            let item = item.map_err(|_| tr!("can't be read"))?;
             let name = item.file_name().to_string_lossy().into_owned();
-            let m = fs::symlink_metadata(item.path()).map_err(|_| "can't be read".to_string())?;
+            let m = fs::symlink_metadata(item.path()).map_err(|_| tr!("can't be read"))?;
             if m.file_type().is_symlink() {
-                return Err(format!("contains a link (“{}”)", crate::secure::display_safe(&name)));
+                return Err(tr!("contains a link (“{name}”)", name = crate::secure::display_safe(&name)));
             }
             if m.is_dir() {
                 walk(&item.path(), depth + 1, seen)?;
             } else if !(m.is_file() && is_junk(&name, m.len())) {
-                return Err(format!("contains “{}”", crate::secure::display_safe(&name)));
+                return Err(tr!("contains “{name}”", name = crate::secure::display_safe(&name)));
             }
         }
         Ok(())

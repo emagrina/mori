@@ -2,35 +2,38 @@ import { useEffect, useState } from "react";
 import { api, type DiagCheck, type DiagStatus } from "../api";
 import { ProgressBar } from "./Analyzer";
 import { ModalFrame } from "./Modal";
+import { msg, t } from "../i18n";
 
 /** Set at build time from package.json (kept equal to Cargo.toml and tauri.conf.json by a test). */
 declare const __MORI_VERSION__: string;
 
 const MARK: Record<DiagStatus, string> = { pass: "✓", limited: "△", fail: "✕", info: "—" };
+const STATUS_LABEL: Record<DiagStatus, string> = { pass: msg("pass"), limited: msg("limited"), fail: msg("fail"), info: msg("info") };
 const SECTIONS: [DiagCheck["section"], string][] = [
-  ["security", "Security"],
-  ["media", "Media"],
-  ["privacy", "Privacy"],
-  ["network", "Network"],
-  ["ephemeral", "Ephemeral mode"],
-  ["logging", "Logging"],
+  ["security", msg("Security")],
+  ["media", msg("Media")],
+  ["privacy", msg("Privacy")],
+  ["network", msg("Network")],
+  ["ephemeral", msg("Ephemeral mode")],
+  ["logging", msg("Logging")],
 ];
 
 /** A summary line: Ready only when every check it depends on passed now. */
 function summary(checks: DiagCheck[]) {
-  const by = (labels: string[]) => {
-    const cs = checks.filter((c) => labels.includes(c.label));
-    if (!cs.length) return { state: "Unavailable", note: "" };
+  // Checks are matched by their stable id (their label is translated).
+  const by = (ids: string[]) => {
+    const cs = checks.filter((c) => ids.includes(c.id));
+    if (!cs.length) return { state: msg("Unavailable"), note: "" };
     const bad = cs.find((c) => c.status === "fail");
     const lim = cs.find((c) => c.status === "limited");
-    return bad ? { state: "Not working", note: bad.label } : lim ? { state: "Limited", note: lim.label } : { state: "Ready", note: "" };
+    return bad ? { state: msg("Not working"), note: bad.label } : lim ? { state: msg("Limited"), note: lim.label } : { state: msg("Ready"), note: "" };
   };
   return [
-    ["Core browsing", by(["Real file type detection", "Symlink protection", "Local data store"])],
-    ["Offline operation", by(["Web view remote content", "Decoder worker network access"])],
-    ["Preview isolation", by(["Restricted decoder workers", "Preview isolation", "Resource limits"])],
-    ["Media support", by(["JPEG", "PNG", "WebP", "GIF", "HEIC / HEIF", "PDF safe preview"])],
-    ["Temporary sessions", by(["Temporary session", "Temporary files", "Startup cleanup"])],
+    [msg("Core browsing"), by(["Real file type detection", "Symlink protection", "Local data store"])],
+    [msg("Offline operation"), by(["Web view remote content", "Decoder worker network access"])],
+    [msg("Preview isolation"), by(["Restricted decoder workers", "Preview isolation", "Resource limits"])],
+    [msg("Media support"), by(["JPEG", "PNG", "WebP", "GIF", "HEIC / HEIF", "PDF safe preview"])],
+    [msg("Temporary sessions"), by(["Temporary session", "Temporary files", "Startup cleanup"])],
   ] as const;
 }
 
@@ -47,17 +50,17 @@ export function Diagnostics({ onClose }: { onClose: () => void }) {
     <ModalFrame onCancel={onClose} wide>
       <div className="diag-head">
         <div>
-          <h2>Mori Diagnostics</h2>
+          <h2>{t("Mori Diagnostics")}</h2>
           <p className="muted small">Mori {__MORI_VERSION__}</p>
         </div>
         <button className="btn small" onClick={run} disabled={!checks}>
-          Run Self-Test
+          {t("Run Self-Test")}
         </button>
       </div>
       {!checks && (
         <>
           <ProgressBar value={0} indeterminate />
-          <p className="muted small">Testing with synthetic files made in memory — none of your files, no network.</p>
+          <p className="muted small">{t("Testing with synthetic files made in memory — none of your files, no network.")}</p>
         </>
       )}
       {checks && (
@@ -65,9 +68,9 @@ export function Diagnostics({ onClose }: { onClose: () => void }) {
           <div className="diag-summary">
             {summary(checks).map(([label, s]) => (
               <div key={label}>
-                <span>{label}</span>
+                <span>{t(label)}</span>
                 <span className={s.state === "Ready" ? "" : "attn"}>
-                  {s.state}
+                  {t(s.state)}
                   {s.note && <span className="muted small"> · {s.note}</span>}
                 </span>
               </div>
@@ -76,17 +79,17 @@ export function Diagnostics({ onClose }: { onClose: () => void }) {
           <label className="toggle diag-toggle">
             <input type="checkbox" checked={details} onChange={(e) => setDetails(e.target.checked)} />
             <span className="switch" aria-hidden />
-            Show details
+            {t("Show details")}
           </label>
           <div className="diag-sections">
             {SECTIONS.map(([key, title]) => (
               <section key={key}>
-                <h3>{title}</h3>
+                <h3>{t(title)}</h3>
                 {checks
                   .filter((c) => c.section === key)
                   .map((c) => (
-                    <div key={c.label} className={`diag-row ${c.status}`}>
-                      <span className="diag-mark" title={c.status === "info" ? "A fact about Mori's code or configuration, not a runtime test" : c.status}>
+                    <div key={c.id} className={`diag-row ${c.status}`}>
+                      <span className="diag-mark" title={c.status === "info" ? t("A fact about Mori's code or configuration, not a runtime test") : t(STATUS_LABEL[c.status])}>
                         {MARK[c.status]}
                       </span>
                       <span className="diag-label">{c.label}</span>
@@ -97,20 +100,20 @@ export function Diagnostics({ onClose }: { onClose: () => void }) {
               </section>
             ))}
             <section>
-              <h3>Privacy limitations</h3>
+              <h3>{t("Privacy limitations")}</h3>
               <p className="muted small">
-                Mori minimises what it stores itself, but it can't control traces created outside it: file-system journals, the operating system's
-                swap and memory compression, file-system snapshots (Time Machine, APFS), system crash reports, backups, storage-controller behaviour
-                (wear-levelling on SSDs), Spotlight or other indexing, and third-party monitoring software.
+                {t(
+                  "Mori minimises what it stores itself, but it can't control traces created outside it: file-system journals, the operating system's swap and memory compression, file-system snapshots (Time Machine, APFS), system crash reports, backups, storage-controller behaviour (wear-levelling on SSDs), Spotlight or other indexing, and third-party monitoring software.",
+                )}
               </p>
             </section>
           </div>
-          <p className="muted small">✓ verified just now · △ limited · ✕ not working · — fact about Mori's code or configuration (not a runtime test)</p>
+          <p className="muted small">{t("✓ verified just now · △ limited · ✕ not working · — fact about Mori's code or configuration (not a runtime test)")}</p>
         </>
       )}
       <div className="dialog-actions">
         <button className="btn primary" onClick={onClose} autoFocus>
-          Done
+          {t("Done")}
         </button>
       </div>
     </ModalFrame>

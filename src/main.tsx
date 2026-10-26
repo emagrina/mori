@@ -1,8 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
-import { startLivenessPing } from "./api";
+import { api, startLivenessPing } from "./api";
 import { installDragGuards } from "./dnd";
+import { currentLocale, initI18n, systemLocale } from "./i18n";
 import "./styles.css";
 
 // Mori is a viewer, not a web page: suppress the webview's default context menu
@@ -26,8 +27,16 @@ if (import.meta.env.DEV) {
 
 startLivenessPing();
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// The interface language is settled before the first render: the saved choice,
+// else the system's. Rust is told too, for the messages it writes.
+void (async () => {
+  const pref = await api.savedLanguage().catch(() => null);
+  await initI18n(pref ?? systemLocale());
+  api.setLanguage(currentLocale()).catch(() => {});
+
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+})();

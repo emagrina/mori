@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   formatSize,
-  plural,
   PRIVATE_HINT,
   type DestInfo,
   type Entry,
@@ -12,6 +11,7 @@ import {
   type TransferPlan,
   type TransferResult,
 } from "../api";
+import { t, tn } from "../i18n";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 
@@ -29,7 +29,41 @@ export const forgetRecentDestinations = () => {
   recent = [];
 };
 
-const verb = (op: TransferOp) => (op === "move" ? "Move" : "Copy");
+/** Dialog headings: one item is named, several are counted. */
+function headings(op: TransferOp, entries: Entry[]) {
+  const n = entries.length;
+  const name = n === 1 ? entries[0].name : null;
+  const move = op === "move";
+  return {
+    /** "Move “a.jpg” to…" */
+    pick: () =>
+      name !== null
+        ? move
+          ? t("Move “{name}” to…", { name })
+          : t("Copy “{name}” to…", { name })
+        : move
+          ? tn(n, "Move {n} item to…", "Move {n} items to…")
+          : tn(n, "Copy {n} item to…", "Copy {n} items to…"),
+    /** "Move “a.jpg” to “Photos”" */
+    into: (dest: string) =>
+      name !== null
+        ? move
+          ? t("Move “{name}” to “{dest}”", { name, dest })
+          : t("Copy “{name}” to “{dest}”", { name, dest })
+        : move
+          ? tn(n, "Move {n} item to “{dest}”", "Move {n} items to “{dest}”", { dest })
+          : tn(n, "Copy {n} item to “{dest}”", "Copy {n} items to “{dest}”", { dest }),
+    /** "Moving “a.jpg”…" */
+    running: () =>
+      name !== null
+        ? move
+          ? t("Moving “{name}”…", { name })
+          : t("Copying “{name}”…", { name })
+        : move
+          ? tn(n, "Moving {n} item…", "Moving {n} items…")
+          : tn(n, "Copying {n} item…", "Copying {n} items…"),
+  };
+}
 
 /**
  * Move to… / Copy to…: pick a destination, see exactly what will happen
@@ -62,7 +96,7 @@ export function TransferDialog({
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [res, setRes] = useState<Record<string, Resolution>>({});
-  const what = entries.length === 1 ? `“${entries[0].name}”` : plural(entries.length, "item");
+  const head = headings(op, entries);
   const sources = useMemo(() => new Set(entries.map((e) => e.id)), [entries]);
 
   const choose = async (d: Dest) => {
@@ -136,18 +170,16 @@ export function TransferDialog({
   if (progress) {
     return (
       <ModalFrame onCancel={() => {}}>
-        <h2>
-          {op === "move" ? "Moving" : "Copying"} {what}…
-        </h2>
+        <h2>{head.running()}</h2>
         <div className="progress transfer-progress">
           <div style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
         </div>
         <p className="muted small">
-          {progress.done.toLocaleString()} of {progress.total.toLocaleString()} · to “{dest?.label}”
+          {t("{done} of {total} · to “{dest}”", { done: progress.done, total: progress.total, dest: dest?.label ?? "" })}
         </p>
         <div className="dialog-actions">
-          <button className="btn" onClick={() => api.transferCancel()} title="Stops after the current item; a partly copied item is removed again">
-            Stop
+          <button className="btn" onClick={() => api.transferCancel()} title={t("Stops after the current item; a partly copied item is removed again")}>
+            {t("Stop")}
           </button>
         </div>
       </ModalFrame>
@@ -157,13 +189,11 @@ export function TransferDialog({
   if (preset && !plan) {
     return (
       <ModalFrame onCancel={() => !busy && onClose()}>
-        <h2>
-          {verb(op)} {what} to “{preset.label}”
-        </h2>
+        <h2>{head.into(preset.label)}</h2>
         {error ? <p className="field-error">{error}</p> : <div className="dot-spinner" />}
         <div className="dialog-actions">
           <button className="btn" onClick={onClose} disabled={busy && !error}>
-            {error ? "Close" : "Cancel"}
+            {error ? t("Close") : t("Cancel")}
           </button>
         </div>
       </ModalFrame>
@@ -176,35 +206,36 @@ export function TransferDialog({
         <div className="dialog-icon">
           <Icon name="folder" size={20} />
         </div>
-        <h2>
-          {verb(op)} {what} to “{dest.label}”
-        </h2>
+        <h2>{head.into(dest.label)}</h2>
         <p className="dialog-facts">
-          {plural(ready, "item")} · {formatSize(plan.totalBytes)}
+          {tn(ready, "{n} item", "{n} items")} · {formatSize(plan.totalBytes)}
           {blocked.length > 0 && (
             <span className="attn">
               {" "}
-              · {plural(blocked.length, "item")} can't be {op === "move" ? "moved" : "copied"}
+              ·{" "}
+              {op === "move"
+                ? tn(blocked.length, "{n} item can't be moved", "{n} items can't be moved")
+                : tn(blocked.length, "{n} item can't be copied", "{n} items can't be copied")}
             </span>
           )}
-          {conflicts.length > 0 && <span className="attn"> · {plural(conflicts.length, "name conflict")}</span>}
+          {conflicts.length > 0 && <span className="attn"> · {tn(conflicts.length, "{n} name conflict", "{n} name conflicts")}</span>}
         </p>
         {plan.crossVolume && (
-          <p className="dialog-note">“{dest.label}” is on another drive: items are copied and checked, then the originals go to the Trash (never deleted).</p>
+          <p className="dialog-note">{t("“{dest}” is on another drive: items are copied and checked, then the originals go to the Trash (never deleted).", { dest: dest.label })}</p>
         )}
         {conflicts.length > 1 && (
           <div className="conflict-all">
-            <span className="muted small">Apply to all:</span>
+            <span className="muted small">{t("Apply to all:")}</span>
             <button className="btn small" onClick={() => applyAll("keepBoth")}>
-              Keep Both
+              {t("Keep Both")}
             </button>
             {conflicts.some((e) => e.replaceable) && (
-              <button className="btn small" onClick={() => applyAll("replace")} title="Only files over files; what's replaced goes to the Trash">
-                Replace
+              <button className="btn small" onClick={() => applyAll("replace")} title={t("Only files over files; what's replaced goes to the Trash")}>
+                {t("Replace")}
               </button>
             )}
             <button className="btn small" onClick={() => applyAll("skip")}>
-              Skip
+              {t("Skip")}
             </button>
           </div>
         )}
@@ -216,10 +247,17 @@ export function TransferDialog({
                 {e.name}
                 <span className="muted small">
                   {" "}
-                  — {e.conflict === "batch" ? "another selected item has the same name" : `a ${e.conflict} with this name is already there`}
+                  —{" "}
+                  {e.conflict === "batch"
+                    ? t("another selected item has the same name")
+                    : e.conflict === "folder"
+                      ? t("a folder with this name is already there")
+                      : e.conflict === "link"
+                        ? t("a link with this name is already there")
+                        : t("a file with this name is already there")}
                 </span>
               </span>
-              <div className="segmented small" role="radiogroup" aria-label={`What to do with ${e.name}`}>
+              <div className="segmented small" role="radiogroup" aria-label={t("What to do with {name}", { name: e.name })}>
                 {(["keepBoth", "replace", "skip"] as const)
                   .filter((r) => r !== "replace" || e.replaceable)
                   .map((r) => (
@@ -231,13 +269,13 @@ export function TransferDialog({
                       onClick={() => setRes((m) => ({ ...m, [e.id]: r }))}
                       title={
                         r === "replace"
-                          ? "The existing file goes to the Trash first (restorable)"
+                          ? t("The existing file goes to the Trash first (restorable)")
                           : r === "keepBoth"
-                            ? "Give the new one a free name (“name 2”)"
-                            : "Leave this item where it is"
+                            ? t("Give the new one a free name (“name 2”)")
+                            : t("Leave this item where it is")
                       }
                     >
-                      {r === "keepBoth" ? "Keep Both" : r === "replace" ? "Replace" : "Skip"}
+                      {r === "keepBoth" ? t("Keep Both") : r === "replace" ? t("Replace") : t("Skip")}
                     </button>
                   ))}
               </div>
@@ -255,25 +293,29 @@ export function TransferDialog({
         </div>
         {replacing > 0 && (
           <p className="op-warning">
-            <strong>{plural(replacing, "existing file")} will be replaced.</strong> {replacing === 1 ? "It goes" : "They go"} to the Trash first, so you can
-            restore {replacing === 1 ? "it" : "them"} (or press Undo).
+            <strong>{tn(replacing, "{n} existing file will be replaced.", "{n} existing files will be replaced.")}</strong>{" "}
+            {tn(replacing, "It goes to the Trash first, so you can restore it (or press Undo).", "They go to the Trash first, so you can restore them (or press Undo).")}
           </p>
         )}
-        {conflicts.some((e) => !res[e.id]) && <p className="muted small">Conflicts left undecided are skipped. Nothing is overwritten.</p>}
+        {conflicts.some((e) => !res[e.id]) && <p className="muted small">{t("Conflicts left undecided are skipped. Nothing is overwritten.")}</p>}
         {error && <p className="field-error">{error}</p>}
         <div className="dialog-actions">
           {!preset && (
             <button className="btn" onClick={() => (setPlan(null), setDest(null))} disabled={busy}>
-              Back
+              {t("Back")}
             </button>
           )}
           <button className="btn" onClick={onClose} disabled={busy}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button className="btn primary" disabled={busy || !ready} onClick={() => run(plan, dest, res)} autoFocus>
             {replacing
-              ? `Replace ${replacing} and ${verb(op)}`
-              : `${verb(op)} ${plural(ready - conflicts.filter((e) => !res[e.id] || res[e.id] === "skip").length, "item")}`}
+              ? op === "move"
+                ? t("Replace {n} and Move", { n: replacing })
+                : t("Replace {n} and Copy", { n: replacing })
+              : op === "move"
+                ? tn(ready - conflicts.filter((e) => !res[e.id] || res[e.id] === "skip").length, "Move {n} item", "Move {n} items")
+                : tn(ready - conflicts.filter((e) => !res[e.id] || res[e.id] === "skip").length, "Copy {n} item", "Copy {n} items")}
           </button>
         </div>
       </ModalFrame>
@@ -282,12 +324,10 @@ export function TransferDialog({
 
   return (
     <ModalFrame onCancel={() => !busy && onClose()} wide>
-      <h2>
-        {verb(op)} {what} to…
-      </h2>
+      <h2>{head.pick()}</h2>
       {recent.length > 0 && (
         <>
-          <div className="menu-label">Recent</div>
+          <div className="menu-label">{t("Recent")}</div>
           <div className="dest-list">
             {recent.map((d) => (
               <button key={d.key} className="dest-row" onClick={() => choose(d)} disabled={busy}>
@@ -299,16 +339,16 @@ export function TransferDialog({
           </div>
         </>
       )}
-      <div className="menu-label">Folders</div>
+      <div className="menu-label">{t("Folders")}</div>
       <DestTree rootName={rootName} current={current} sources={sources} busy={busy} onChoose={choose} />
       {error && <p className="field-error">{error}</p>}
       <div className="dialog-actions">
-        <button className="btn" onClick={other} disabled={busy} title="A folder outside the one you're browsing, chosen in the system's folder picker">
-          Other Folder…
+        <button className="btn" onClick={other} disabled={busy} title={t("A folder outside the one you're browsing, chosen in the system's folder picker")}>
+          {t("Other Folder…")}
         </button>
         <span className="spacer" />
         <button className="btn" onClick={onClose} disabled={busy}>
-          Cancel
+          {t("Cancel")}
         </button>
       </div>
     </ModalFrame>
@@ -354,7 +394,7 @@ function DestTree({
           <button
             className={`twisty ${open.has(f.id) && loaded?.length !== 0 ? "open" : ""} ${loaded?.length === 0 ? "leaf" : ""}`}
             onClick={() => toggle(f.id)}
-            aria-label={open.has(f.id) ? `Collapse ${f.name}` : `Expand ${f.name}`}
+            aria-label={open.has(f.id) ? t("Collapse {name}", { name: f.name }) : t("Expand {name}", { name: f.name })}
           >
             <Icon name="chevron" size={12} />
           </button>
@@ -362,13 +402,13 @@ function DestTree({
             className="dest-pick"
             disabled={busy || disabled}
             onClick={() => onChoose({ key: f.id, label: f.name, where: `${rootName}/${path}${f.name}` })}
-            title={disabled ? "A folder can't be moved or copied into itself" : f.private ? `${f.name} — ${PRIVATE_HINT}` : f.name}
+            title={disabled ? t("A folder can't be moved or copied into itself") : f.private ? `${f.name} — ${t(PRIVATE_HINT)}` : f.name}
           >
             <Icon name="folder" size={14} />
             <span className="truncate">{f.name}</span>
             {f.private && <Icon name="lock" size={12} className="private-mark" />}
             {f.protected && <Icon name="shield" size={12} className="private-mark" />}
-            {f.id === current && <span className="muted small">current folder</span>}
+            {f.id === current && <span className="muted small">{t("current folder")}</span>}
           </button>
         </div>,
       );
@@ -383,7 +423,7 @@ function DestTree({
         <button className="dest-pick" disabled={busy} onClick={() => onChoose({ key: "", label: rootName, where: rootName })}>
           <Icon name="drive" size={14} />
           <span className="truncate">{rootName}</span>
-          {current === "" && <span className="muted small">current folder</span>}
+          {current === "" && <span className="muted small">{t("current folder")}</span>}
         </button>
       </div>
       {rows}

@@ -9,7 +9,6 @@ import {
   formatSize,
   frameUrl,
   pdfPageUrl,
-  plural,
   type ArchiveEntry,
   type ArchiveFlag,
   type ArchiveListing,
@@ -18,6 +17,7 @@ import {
   type PdfInfo,
 } from "../api";
 import { aspectOf, frameFraction, frameWidth } from "../filmstrip";
+import { msg, t, tn } from "../i18n";
 import { Icon } from "./Icon";
 
 // ------------------------------------------------------------------- PDF
@@ -69,58 +69,58 @@ export function PdfView({ entry, iso, onFail }: { entry: Entry; iso: boolean; on
   }, [page]);
 
   if (!info) return <div className="spinner" />;
-  const active = [info.javascript && "JavaScript", info.openAction && "automatic actions", info.embeddedFiles && "embedded files", info.forms && "form fields"].filter(
+  const active = [info.javascript && "JavaScript", info.openAction && t("automatic actions"), info.embeddedFiles && t("embedded files"), info.forms && t("form fields")].filter(
     Boolean,
   ) as string[];
   // Strip thumbnails are rendered on demand; keep long documents bounded.
   const strip = Array.from({ length: Math.min(info.pages, 400) }, (_, i) => i + 1);
   return (
     <div className="pdf-view">
-      <div className="pdf-strip" aria-label="Pages">
+      <div className="pdf-strip" aria-label={t("Pages")}>
         {strip.map((p) => (
-          <button key={p} className={p === page ? "on" : ""} onClick={() => setPage(p)} title={`Page ${p}`}>
+          <button key={p} className={p === page ? "on" : ""} onClick={() => setPage(p)} title={t("Page {page}", { page: p })}>
             <img src={pdfPageUrl(entry.id, p, STRIP_SIZE, iso)} alt="" loading="lazy" draggable={false} />
             <span>{p}</span>
           </button>
         ))}
-        {info.pages > strip.length && <div className="muted small">+{info.pages - strip.length} more</div>}
+        {info.pages > strip.length && <div className="muted small">{t("+{count} more", { count: info.pages - strip.length })}</div>}
       </div>
       <div className="pdf-main">
         <div className="pdf-bar">
-          <button className="icon-btn" disabled={page <= 1} onClick={() => setPage(page - 1)} title="Previous page (Page Up)">
+          <button className="icon-btn" disabled={page <= 1} onClick={() => setPage(page - 1)} title={t("Previous page (Page Up)")}>
             <Icon name="left" size={14} />
           </button>
           <span className="pdf-count">
-            Page {page} of {info.pages.toLocaleString()}
+            {t("Page {page} of {total}", { page, total: info.pages })}
           </span>
-          <button className="icon-btn" disabled={page >= info.pages} onClick={() => setPage(page + 1)} title="Next page (Page Down)">
+          <button className="icon-btn" disabled={page >= info.pages} onClick={() => setPage(page + 1)} title={t("Next page (Page Down)")}>
             <Icon name="right" size={14} />
           </button>
           <span className="divider" />
-          <button className="icon-btn" disabled={zoom <= 0.5} onClick={() => setZoom((z) => Math.max(0.5, z / 1.25))} title="Zoom out">
+          <button className="icon-btn" disabled={zoom <= 0.5} onClick={() => setZoom((z) => Math.max(0.5, z / 1.25))} title={t("Zoom out")}>
             <Icon name="zoomOut" size={14} />
           </button>
           <span className="zoom-label">{Math.round(zoom * 100)}%</span>
-          <button className="icon-btn" disabled={zoom >= 3} onClick={() => setZoom((z) => Math.min(3, z * 1.25))} title="Zoom in">
+          <button className="icon-btn" disabled={zoom >= 3} onClick={() => setZoom((z) => Math.min(3, z * 1.25))} title={t("Zoom in")}>
             <Icon name="zoomIn" size={14} />
           </button>
           {active.length > 0 && (
-            <span className="pdf-active" title="Mori renders page content only. None of this is run, opened or followed.">
-              <Icon name="warning" size={12} /> Contains {active.join(", ")} — not run
+            <span className="pdf-active" title={t("Mori renders page content only. None of this is run, opened or followed.")}>
+              <Icon name="warning" size={12} /> {t("Contains {items} — not run", { items: active.join(", ") })}
             </span>
           )}
         </div>
         <div className="pdf-stage" ref={stage}>
           {broken ? (
             <div className="unsupported small">
-              <div className="note">This page could not be rendered safely.</div>
+              <div className="note">{t("This page could not be rendered safely.")}</div>
             </div>
           ) : (
             <img
               key={page}
               className="pdf-page"
               src={pdfPageUrl(entry.id, page, zoom > 1.5 ? 2400 : PAGE_SIZE, iso)}
-              alt={`Page ${page}`}
+              alt={t("Page {page}", { page })}
               draggable={false}
               style={{ height: `${Math.round(zoom * 100)}%` }}
               onError={() => setBroken(true)}
@@ -135,12 +135,12 @@ export function PdfView({ entry, iso, onFail }: { entry: Entry; iso: boolean; on
 // --------------------------------------------------------------- archive
 
 const FLAG_LABEL: Record<ArchiveFlag, string> = {
-  traversal: "Escapes the folder (../)",
-  absolute: "Absolute path",
-  "drive-letter": "Drive-letter path",
-  "control-chars": "Hidden characters in name",
-  "nested-archive": "Archive inside",
-  "high-ratio": "Extreme compression",
+  traversal: msg("Escapes the folder (../)"),
+  absolute: msg("Absolute path"),
+  "drive-letter": msg("Drive-letter path"),
+  "control-chars": msg("Hidden characters in name"),
+  "nested-archive": msg("Archive inside"),
+  "high-ratio": msg("Extreme compression"),
 };
 
 /** Listing only. Nothing is extracted, written or opened. */
@@ -161,11 +161,12 @@ export function ArchiveView({ entry, onFail }: { entry: Entry; onFail: () => voi
     <div className="archive-view">
       <div className="archive-head">
         <div>
-          <strong>{listing.format}</strong> · {plural(listing.totalEntries, "entry", "entries")} · {formatSize(listing.totalSize)} uncompressed
-          {listing.totalCompressed > 0 && <> · {formatSize(listing.totalCompressed)} stored</>}
-          {listing.nestedDepth > 0 && <> · nested {listing.nestedDepth} level{listing.nestedDepth > 1 ? "s" : ""} deep</>}
+          <strong>{listing.format}</strong> · {tn(listing.totalEntries, "{n} entry", "{n} entries")} ·{" "}
+          {t("{size} uncompressed", { size: formatSize(listing.totalSize) })}
+          {listing.totalCompressed > 0 && <> · {t("{size} stored", { size: formatSize(listing.totalCompressed) })}</>}
+          {listing.nestedDepth > 0 && <> · {tn(listing.nestedDepth, "nested {n} level deep", "nested {n} levels deep")}</>}
         </div>
-        <div className="muted small">Listing only — nothing was extracted or opened.</div>
+        <div className="muted small">{t("Listing only — nothing was extracted or opened.")}</div>
       </div>
       {listing.findings.length > 0 && (
         <ul className="findings compact">
@@ -180,7 +181,7 @@ export function ArchiveView({ entry, onFail }: { entry: Entry; onFail: () => voi
         </ul>
       )}
       <ArchiveTable listing={listing} depth={0} />
-      {listing.truncated && <p className="muted small">The listing stopped at a safety limit; totals are partial.</p>}
+      {listing.truncated && <p className="muted small">{t("The listing stopped at a safety limit; totals are partial.")}</p>}
     </div>
   );
 }
@@ -192,7 +193,7 @@ function ArchiveTable({ listing, depth }: { listing: ArchiveListing; depth: numb
         <ArchiveRow key={i} e={e} depth={depth} />
       ))}
       {listing.entries.length < listing.totalEntries && (
-        <div className="muted small archive-more">+{(listing.totalEntries - listing.entries.length).toLocaleString()} more entries not listed</div>
+        <div className="muted small archive-more">{tn(listing.totalEntries - listing.entries.length, "+{n} more entry not listed", "+{n} more entries not listed")}</div>
       )}
     </div>
   );
@@ -205,7 +206,7 @@ function ArchiveRow({ e, depth }: { e: ArchiveEntry; depth: number }) {
       <div className={`archive-row ${e.flags.length ? "flagged" : ""}`} role="row">
         <span className="archive-name mono" title={e.path}>
           {e.nested ? (
-            <button className="icon-btn tiny" onClick={() => setOpen(!open)} aria-label={open ? "Collapse" : "Expand"}>
+            <button className="icon-btn tiny" onClick={() => setOpen(!open)} aria-label={open ? t("Collapse") : t("Expand")}>
               <Icon name={open ? "chevronDown" : "chevron"} size={11} />
             </button>
           ) : (
@@ -214,11 +215,11 @@ function ArchiveRow({ e, depth }: { e: ArchiveEntry; depth: number }) {
           <span className="truncate">{e.path}</span>
         </span>
         <span className="archive-flags">
-          {e.encrypted && <span className="tag">Encrypted</span>}
-          {e.symlink && <span className="tag attn">Link</span>}
+          {e.encrypted && <span className="tag">{t("Encrypted")}</span>}
+          {e.symlink && <span className="tag attn">{t("Link")}</span>}
           {e.flags.map((f) => (
             <span key={f} className={`tag ${f === "nested-archive" ? "" : "attn"}`}>
-              {FLAG_LABEL[f] ?? f}
+              {FLAG_LABEL[f] ? t(FLAG_LABEL[f]) : f}
             </span>
           ))}
         </span>
@@ -257,7 +258,7 @@ export function FrameView({ entry, aspect: hint, onFail }: { entry: Entry; aspec
   return (
     <div className="frame-view">
       <div className="frame-main">
-        {shown === undefined ? <div className="spinner" /> : <img src={frameUrl(entry.id, shown, true)} alt={`Frame ${shown + 1}`} draggable={false} />}
+        {shown === undefined ? <div className="spinner" /> : <img src={frameUrl(entry.id, shown, true)} alt={t("Frame {n}", { n: shown + 1 })} draggable={false} />}
       </div>
       <div className="frame-strip">
         {Array.from({ length: FRAMES }, (_, k) => (
@@ -267,7 +268,7 @@ export function FrameView({ entry, aspect: hint, onFail }: { entry: Entry; aspec
             style={{ width: w, height: ISO_STRIP_H }}
             disabled={!ready.includes(k)}
             onClick={() => setCurrent(k)}
-            title={`Frame ${k + 1} of ${FRAMES}`}
+            title={t("Frame {n} of {total}", { n: k + 1, total: FRAMES })}
           >
             {ready.includes(k) ? (
               <img src={frameUrl(entry.id, k, true)} alt="" draggable={false} onLoad={(e) => onFrame(e.currentTarget)} />
@@ -277,7 +278,7 @@ export function FrameView({ entry, aspect: hint, onFail }: { entry: Entry; aspec
           </button>
         ))}
       </div>
-      <div className="muted small">Still frames sampled across the video. The video itself is not played.</div>
+      <div className="muted small">{t("Still frames sampled across the video. The video itself is not played.")}</div>
     </div>
   );
 }
@@ -299,16 +300,16 @@ export function FactsPanel({ entry }: { entry: Entry }) {
   return (
     <div className="facts">
       <dl>
-        <dt>Detected</dt>
-        <dd>{r.detected?.label ?? "Unknown"}</dd>
-        <dt>Extension</dt>
+        <dt>{t("Detected")}</dt>
+        <dd>{r.detected?.label ?? t("Unknown")}</dd>
+        <dt>{t("Extension")}</dt>
         <dd>
-          {r.ext ? `.${r.ext}` : "none"}
-          {r.extMatches === false && <span className="attn"> · does not match content</span>}
+          {r.ext ? `.${r.ext}` : t("none")}
+          {r.extMatches === false && <span className="attn"> · {t("does not match content")}</span>}
         </dd>
-        <dt>Size</dt>
+        <dt>{t("Size")}</dt>
         <dd>{formatSize(r.size)}</dd>
-        <dt>Modified</dt>
+        <dt>{t("Modified")}</dt>
         <dd>{formatDate(r.modified)}</dd>
       </dl>
       {flagged.length > 0 && (
@@ -444,7 +445,7 @@ export function AudioView({ entry, iso, onFail }: { entry: Entry; iso: boolean; 
           a.currentTime = ((e.clientX - r.left) / r.width) * a.duration;
         }}
       >
-        {peaks instanceof Float32Array ? <canvas ref={canvas} /> : <div className="wave-note muted small">{peaks === null ? "Reading waveform…" : peaks === "skipped" ? "Waveform shown for files up to 32 MB" : "Waveform unavailable"}</div>}
+        {peaks instanceof Float32Array ? <canvas ref={canvas} /> : <div className="wave-note muted small">{peaks === null ? t("Reading waveform…") : peaks === "skipped" ? t("Waveform shown for files up to {size}", { size: formatSize(WAVE_MAX_BYTES) }) : t("Waveform unavailable")}</div>}
       </div>
       <audio ref={audio} controls preload="metadata" controlsList="nodownload noremoteplayback" />
     </div>
@@ -514,7 +515,7 @@ export function Filmstrip({ entry, aspect: hint, onSeek }: { entry: Entry; aspec
   if (state === "none") {
     return (
       <button className="btn small filmstrip-btn" onClick={sample}>
-        Show Filmstrip
+        {t("Show Filmstrip")}
       </button>
     );
   }
@@ -524,7 +525,7 @@ export function Filmstrip({ entry, aspect: hint, onSeek }: { entry: Entry; aspec
       {Array.from({ length: SCRUB_FRAMES }, (_, k) => {
         const at = frameFraction(k, SCRUB_FRAMES);
         return (
-          <button key={k} style={{ width: w, height: STRIP_H }} disabled={!ready.has(k)} onClick={() => onSeek(at)} title={`Jump to ${Math.round(at * 100)}%`}>
+          <button key={k} style={{ width: w, height: STRIP_H }} disabled={!ready.has(k)} onClick={() => onSeek(at)} title={t("Jump to {pct}%", { pct: Math.round(at * 100) })}>
             {ready.has(k) ? (
               <img src={frameUrl(entry.id, k)} alt="" draggable={false} onLoad={(e) => onFrame(e.currentTarget)} />
             ) : (

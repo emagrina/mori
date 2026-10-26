@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, isMac, type Entry } from "../api";
+import { msg, t } from "../i18n";
 import { Icon, type IconName } from "./Icon";
 
 export interface Command {
@@ -36,14 +37,14 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
       return;
     }
     let alive = true;
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       api
         .query({ scope: "folder", folder: "", kind: "all", search: term, sort: "name", desc: false, recursive: false, global: true })
         .then((r) => alive && setFound(r.items.slice(0, 8)), () => {});
     }, 120);
     return () => {
       alive = false;
-      window.clearTimeout(t);
+      window.clearTimeout(timer);
     };
   }, [q]);
 
@@ -53,7 +54,7 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
     ...found.map((e) => ({
       key: `f:${e.id}`,
       title: e.name,
-      sub: e.path.includes("/") ? e.path.slice(0, e.path.lastIndexOf("/")) : "Drive",
+      sub: e.path.includes("/") ? e.path.slice(0, e.path.lastIndexOf("/")) : t("Drive"),
       icon: (e.kind === "folder" ? "folder" : e.kind) as IconName,
       run: () => onOpenEntry(e),
     })),
@@ -72,13 +73,13 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
 
   return (
     <div className="palette-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="palette" role="dialog" aria-label="Command palette">
+      <div className="palette" role="dialog" aria-label={t("Command palette")}>
         <div className="palette-input">
           <Icon name="search" size={15} />
           <input
             autoFocus
             value={q}
-            placeholder="Type a command, view, file or folder…"
+            placeholder={t("Type a command, view, file or folder…")}
             spellCheck={false}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
@@ -98,7 +99,7 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
               }
             }}
           />
-          <kbd>esc</kbd>
+          <kbd>{t("esc")}</kbd>
         </div>
         <div className="palette-list" ref={list} role="listbox">
           {rows.map((r, i) => (
@@ -109,7 +110,7 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
               {r.keys && <kbd>{r.keys}</kbd>}
             </button>
           ))}
-          {!rows.length && <p className="muted small palette-empty">Nothing matches “{q}”.</p>}
+          {!rows.length && <p className="muted small palette-empty">{t("Nothing matches “{query}”.", { query: q })}</p>}
         </div>
       </div>
     </div>
@@ -119,26 +120,27 @@ export function CommandPalette({ commands, onClose, onOpenEntry }: { commands: C
 const mod = isMac ? "⌘" : "Ctrl+";
 
 export const SHORTCUTS: [string, string][] = [
-  ["Click", "Select"],
-  [isMac ? "⌘-Click" : "Ctrl+Click", "Add to / remove from the selection"],
-  ["Shift-Click", "Select a range"],
-  [`${mod}A`, "Select all"],
-  ["↑ ↓ ← →", "Move the selection (with Shift: extend it)"],
-  ["Double-click  Return", "Open (folder or preview)"],
-  ["Space", "Quick Look (Mori's own, never the system one)"],
-  ["Esc", "Close / clear the selection"],
-  ["I", "Get Info"],
-  ["F", "Add to / remove from Favorites"],
-  [`${mod}F`, "Search"],
-  [`${mod}K`, "Command palette"],
-  [`${mod}1  ${mod}2  ${mod}3`, "List · Grid · Gallery"],
-  ["← →  (preview)", "Previous / next file"],
-  [`${mod}+  ${mod}−  ${mod}0`, "Zoom in / out / fit (preview)"],
-  ["M  ⇧M", "Move to… / Copy to…"],
-  ["F2", "Rename"],
-  [isMac ? "⌘⌫" : "Delete", "Move to Trash"],
-  [`${mod}Z`, "Undo the last file operation"],
-  [`${mod}↑  ⌫`, "Parent folder / back"],
+  // Both columns are English keys (msg), translated when shown; key glyphs pass through t() unchanged.
+  [msg("Click"), msg("Select")],
+  [isMac ? msg("⌘-Click") : msg("Ctrl+Click"), msg("Add to / remove from the selection")],
+  [msg("Shift-Click"), msg("Select a range")],
+  [`${mod}A`, msg("Select all")],
+  ["↑ ↓ ← →", msg("Move the selection (with Shift: extend it)")],
+  [msg("Double-click  Return"), msg("Open (folder or preview)")],
+  [msg("Space"), msg("Quick Look (Mori's own, never the system one)")],
+  [msg("Esc"), msg("Close / clear the selection")],
+  ["I", msg("Get Info")],
+  ["F", msg("Add to / remove from Favorites")],
+  [`${mod}F`, msg("Search")],
+  [`${mod}K`, msg("Command palette")],
+  [`${mod}1  ${mod}2  ${mod}3`, msg("List · Grid · Gallery")],
+  [msg("← →  (preview)"), msg("Previous / next file")],
+  [`${mod}+  ${mod}−  ${mod}0`, msg("Zoom in / out / fit (preview)")],
+  ["M  ⇧M", msg("Move to… / Copy to…")],
+  ["F2", msg("Rename")],
+  [isMac ? "⌘⌫" : msg("Delete"), msg("Move to Trash")],
+  [`${mod}Z`, msg("Undo the last file operation")],
+  [`${mod}↑  ⌫`, msg("Parent folder / back")],
 ];
 
 export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
@@ -154,22 +156,22 @@ export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
   }, [onClose]);
   return (
     <div className="palette-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="palette shortcuts" role="dialog" aria-label="Keyboard shortcuts">
-        <h2>Keyboard Shortcuts</h2>
+      <div className="palette shortcuts" role="dialog" aria-label={t("Keyboard shortcuts")}>
+        <h2>{t("Keyboard Shortcuts")}</h2>
         <dl>
           {SHORTCUTS.map(([k, v]) => (
             <div key={k}>
               <dt>
-                <kbd>{k}</kbd>
+                <kbd>{t(k)}</kbd>
               </dt>
-              <dd>{v}</dd>
+              <dd>{t(v)}</dd>
             </div>
           ))}
         </dl>
-        <p className="muted small">Shortcuts never fire while you type in a text field.</p>
+        <p className="muted small">{t("Shortcuts never fire while you type in a text field.")}</p>
         <div className="dialog-actions">
           <button className="btn" onClick={onClose} autoFocus>
-            Done
+            {t("Done")}
           </button>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, formatDate, formatSize, plural, type Entry, type HistoryRecord, type OperationPlan } from "../api";
+import { api, formatDate, formatSize, type Entry, type HistoryRecord, type OperationPlan } from "../api";
+import { t, tn, tx } from "../i18n";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 
@@ -38,11 +39,14 @@ export function OperationPreview({
     setBusy(true);
     try {
       const r = await api.deleteItems(ids, overwrite, typed);
-      const what = plural(r.deleted.length, "item");
+      const n = r.deleted.length;
+      const size = formatSize(r.bytes);
       onDeleted(
         r.failed.length
-          ? `${overwrite ? "Overwrote and deleted" : "Deleted"} ${what} · ${plural(r.failed.length, "item")} not deleted (${r.failed[0].reason})`
-          : `${overwrite ? "Overwrote and deleted" : "Permanently deleted"} ${what} (${formatSize(r.bytes)})`,
+          ? `${overwrite ? tn(n, "Overwrote and deleted {n} item", "Overwrote and deleted {n} items") : tn(n, "Deleted {n} item", "Deleted {n} items")} · ${tn(r.failed.length, "{n} item not deleted ({reason})", "{n} items not deleted ({reason})", { reason: r.failed[0].reason })}`
+          : overwrite
+            ? tn(n, "Overwrote and deleted {n} item ({size})", "Overwrote and deleted {n} items ({size})", { size })
+            : tn(n, "Permanently deleted {n} item ({size})", "Permanently deleted {n} items ({size})", { size }),
         r.deleted,
       );
     } catch (e) {
@@ -57,14 +61,14 @@ export function OperationPreview({
         <Icon name="trash" size={20} />
       </div>
       <h2>
-        {danger ? "Delete permanently" : "Move to Trash"}: {plural(entries.length, "item")}
+        {danger ? tn(entries.length, "Delete permanently: {n} item", "Delete permanently: {n} items") : tn(entries.length, "Move to Trash: {n} item", "Move to Trash: {n} items")}
       </h2>
       {!plan && !error && <div className="dot-spinner" />}
       {plan && (
         <>
           <p className="dialog-facts">
-            {plural(ok.length, "item")} · {plural(plan.totalFiles, "file")} · {formatSize(plan.totalBytes)}
-            {plan.blocked > 0 && <span className="attn"> · {plural(plan.blocked, "item")} refused (see below)</span>}
+            {tn(ok.length, "{n} item", "{n} items")} · {tn(plan.totalFiles, "{n} file", "{n} files")} · {formatSize(plan.totalBytes)}
+            {plan.blocked > 0 && <span className="attn"> · {tn(plan.blocked, "{n} item refused (see below)", "{n} items refused (see below)")}</span>}
           </p>
           <div className="op-list">
             {plan.entries.map((e) => (
@@ -73,7 +77,7 @@ export function OperationPreview({
                 <span className="truncate op-path" title={e.path}>
                   {e.path}
                 </span>
-                <span className="muted op-size">{e.kind === "folder" ? `${plural(e.files, "file")} · ${formatSize(e.bytes)}` : e.kind === "link" ? "link" : formatSize(e.bytes)}</span>
+                <span className="muted op-size">{e.kind === "folder" ? `${tn(e.files, "{n} file", "{n} files")} · ${formatSize(e.bytes)}` : e.kind === "link" ? t("link") : formatSize(e.bytes)}</span>
                 {(e.blocked || e.note) && <span className={`op-note ${e.blocked ? "attn" : "muted"}`}>{e.blocked ?? e.note}</span>}
               </div>
             ))}
@@ -81,38 +85,38 @@ export function OperationPreview({
           {danger ? (
             <>
               <p className="op-warning">
-                <strong>This bypasses the Trash.</strong> Mori can't undo it. Make sure you have what you need from these items.
+                <strong>{t("This bypasses the Trash.")}</strong> {t("Mori can't undo it. Make sure you have what you need from these items.")}
               </p>
               <label className={`op-option ${plan.overwriteUnavailable ? "disabled" : ""}`} title={plan.overwriteUnavailable ?? undefined}>
                 <input type="checkbox" disabled={!!plan.overwriteUnavailable} checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
                 <span>
-                  Overwrite file contents first (single pass)
+                  {t("Overwrite file contents first (single pass)")}
                   <span className="muted small">
                     {plan.overwriteUnavailable
-                      ? ` — not offered here: ${plan.overwriteUnavailable}`
-                      : " — on this spinning disk the old bytes are replaced before deletion. Backups and other copies are not affected, and this is not forensic erasure."}
+                      ? ` — ${t("not offered here: {reason}", { reason: plan.overwriteUnavailable })}`
+                      : ` — ${t("on this spinning disk the old bytes are replaced before deletion. Backups and other copies are not affected, and this is not forensic erasure.")}`}
                   </span>
                 </span>
               </label>
               {plan.needsTypedConfirm && (
                 <label className="op-typed">
-                  Type <strong>DELETE</strong> to confirm
+                  {tx("Type {word} to confirm", { word: <strong>DELETE</strong> })}
                   <input className="text-input slim" value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus spellCheck={false} autoComplete="off" />
                 </label>
               )}
             </>
           ) : (
-            <p className="dialog-note">Items go to the system Trash and can be restored (⌘Z in Mori, or from the Trash).</p>
+            <p className="dialog-note">{t("Items go to the system Trash and can be restored (⌘Z in Mori, or from the Trash).")}</p>
           )}
         </>
       )}
       {error && <p className="field-error">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={onCancel} disabled={busy} autoFocus={!danger}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className={`btn primary ${danger ? "danger-fill" : ""}`} disabled={!plan || !ok.length || !confirmed || busy} onClick={run}>
-          {busy ? "Deleting…" : danger ? (overwrite ? "Overwrite and Delete" : "Delete Permanently") : "Move to Trash"}
+          {busy ? t("Deleting…") : danger ? (overwrite ? t("Overwrite and Delete") : t("Delete Permanently")) : t("Move to Trash")}
         </button>
       </div>
     </ModalFrame>
@@ -131,7 +135,8 @@ export function HistoryPanel({ onClose, onUndone }: { onClose: () => void; onUnd
     setError(null);
     try {
       const r = await api.historyUndo(id);
-      onUndone(r.failed.length ? `Undid ${plural(r.restored, "change")} · ${r.failed[0]}` : `Undid ${plural(r.restored, "change")}`);
+      const undid = tn(r.restored, "Undid {n} change", "Undid {n} changes");
+      onUndone(r.failed.length ? `${undid} · ${r.failed[0]}` : undid);
       load();
     } catch (e) {
       setError(String(e));
@@ -139,19 +144,19 @@ export function HistoryPanel({ onClose, onUndone }: { onClose: () => void; onUnd
   };
   return (
     <ModalFrame onCancel={onClose} wide>
-      <h2>Undo History</h2>
-      <p className="muted small">Changes Mori made to your files in this session.</p>
-      {list && !list.length && <p className="muted">Nothing yet.</p>}
+      <h2>{t("Undo History")}</h2>
+      <p className="muted small">{t("Changes Mori made to your files in this session.")}</p>
+      {list && !list.length && <p className="muted">{t("Nothing yet.")}</p>}
       <div className="op-list">
         {list?.map((r) => (
           <div key={r.id} className={`op-row history ${r.undone ? "blocked" : ""}`}>
             <span className="truncate op-path">{r.label}</span>
             <span className="muted op-size">{formatDate(r.at)}</span>
             {r.undone ? (
-              <span className="muted small">Undone</span>
+              <span className="muted small">{t("Undone")}</span>
             ) : r.undoable ? (
               <button className="btn small" onClick={() => undo(r.id)}>
-                Undo
+                {t("Undo")}
               </button>
             ) : (
               <span className="muted small op-note">{r.note}</span>
@@ -162,7 +167,7 @@ export function HistoryPanel({ onClose, onUndone }: { onClose: () => void; onUnd
       {error && <p className="field-error">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={onClose} autoFocus>
-          Done
+          {t("Done")}
         </button>
       </div>
     </ModalFrame>

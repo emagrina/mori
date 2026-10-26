@@ -1,16 +1,17 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import { api, formatSize, plural, type Entry, type HealthCategory, type HealthItem, type HealthProgress, type HealthView as View } from "../api";
+import { api, formatSize, type Entry, type HealthCategory, type HealthItem, type HealthProgress, type HealthView as View } from "../api";
 import { ProgressBar } from "./Analyzer";
 import { Icon } from "./Icon";
+import { fmtNum, msg, t, tn } from "../i18n";
 
 const PAGE = 200;
 
 export const HEALTH_LABEL: Record<HealthCategory, { title: string; note: string }> = {
-  risk: { title: "Risk-flagged", note: "The content contradicts the name or extension. Mori doesn't decode these further." },
-  broken: { title: "Broken", note: "Damaged or incomplete data: empty, truncated, or rejected by the decoder." },
-  unsupported: { title: "Unsupported", note: "Real media in a format Mori has no safe decoder or player for (RAW, TIFF, AVI…)." },
-  failed: { title: "Decode failed", note: "The sandboxed decoder timed out, crashed or hit a safety limit." },
+  risk: { title: msg("Risk-flagged"), note: msg("The content contradicts the name or extension. Mori doesn't decode these further.") },
+  broken: { title: msg("Broken"), note: msg("Damaged or incomplete data: empty, truncated, or rejected by the decoder.") },
+  unsupported: { title: msg("Unsupported"), note: msg("Real media in a format Mori has no safe decoder or player for (RAW, TIFF, AVI…).") },
+  failed: { title: msg("Decode failed"), note: msg("The sandboxed decoder timed out, crashed or hit a safety limit.") },
 };
 const ORDER: HealthCategory[] = ["risk", "broken", "unsupported", "failed"];
 
@@ -58,7 +59,7 @@ export function HealthView({
           load(null).then((v) => setPhase(v ? "results" : "setup"));
         } else {
           setPhase("setup");
-          onToast("Health check cancelled");
+          onToast(t("Health check cancelled"));
         }
       }),
     ];
@@ -83,11 +84,11 @@ export function HealthView({
       </header>
       <div className="page-head">
         <div className="crumbs">
-          <span className="crumb">Analyze</span>
+          <span className="crumb">{t("Analyze")}</span>
         </div>
         <div className="title-row">
           <h1 className="page-title">
-            Media Health<span className="scope-note">in {rootName}</span>
+            {t("Media Health")}<span className="scope-note">{t("in {name}", { name: rootName })}</span>
           </h1>
           {phase === "results" && (
             <>
@@ -99,10 +100,10 @@ export function HealthView({
                   setPhase("setup");
                 }}
               >
-                Clear Results
+                {t("Clear Results")}
               </button>
               <button className="btn" onClick={start}>
-                Check Again
+                {t("Check Again")}
               </button>
             </>
           )}
@@ -112,46 +113,48 @@ export function HealthView({
         {phase === "setup" && (
           <div className="setup">
             <p className="lead">
-              Checks every photo, video and audio file on {rootName} and lists the ones Mori can't show, with the reason. Each file gets at most one
-              result.
+              {t("Checks every photo, video and audio file on {name} and lists the ones Mori can't show, with the reason. Each file gets at most one result.", {
+                name: rootName,
+              })}
             </p>
             <ul className="health-legend">
               {ORDER.map((c) => (
                 <li key={c}>
-                  <strong>{HEALTH_LABEL[c].title}</strong> <span className="muted">— {HEALTH_LABEL[c].note}</span>
+                  <strong>{t(HEALTH_LABEL[c].title)}</strong> <span className="muted">— {t(HEALTH_LABEL[c].note)}</span>
                 </li>
               ))}
             </ul>
             {error && <p className="field-error">{error}</p>}
             <div className="setup-actions">
               <button className="btn primary large" onClick={start}>
-                Check Media
+                {t("Check Media")}
               </button>
             </div>
             <p className="fineprint">
-              Images are test-decoded by Mori's sandboxed worker (already-made thumbnails count as checked); videos get the sandboxed container probe;
-              audio gets type checks only. Private folders are skipped. Nothing is changed, and results stay in memory.
+              {t(
+                "Images are test-decoded by Mori's sandboxed worker (already-made thumbnails count as checked); videos get the sandboxed container probe; audio gets type checks only. Private folders are skipped. Nothing is changed, and results stay in memory.",
+              )}
             </p>
           </div>
         )}
         {phase === "running" && (
           <div className="analyzer-center">
             <div className="progress-card">
-              <h2>{progress?.paused ? "Paused" : "Checking media"}…</h2>
+              <h2>{progress?.paused ? t("Paused…") : t("Checking media…")}</h2>
               <ProgressBar value={progress && progress.total ? progress.done / progress.total : 0} indeterminate={!progress} />
               <dl className="facts">
                 <div>
-                  <dt>Files</dt>
-                  <dd>{progress ? `${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}` : "—"}</dd>
+                  <dt>{t("Files")}</dt>
+                  <dd>{progress ? t("{done} of {total}", { done: progress.done, total: progress.total }) : "—"}</dd>
                 </div>
                 <div>
-                  <dt>Problems</dt>
-                  <dd>{progress ? progress.found.toLocaleString() : "—"}</dd>
+                  <dt>{t("Problems")}</dt>
+                  <dd>{progress ? fmtNum(progress.found) : "—"}</dd>
                 </div>
               </dl>
               <div className="dialog-actions">
                 <button className="btn" onClick={() => api.healthPause(!progress?.paused)} disabled={cancelling || !progress}>
-                  {progress?.paused ? "Resume" : "Pause"}
+                  {progress?.paused ? t("Resume") : t("Pause")}
                 </button>
                 <button
                   className="btn"
@@ -161,7 +164,7 @@ export function HealthView({
                     api.healthCancel();
                   }}
                 >
-                  {cancelling ? "Cancelling…" : "Cancel"}
+                  {cancelling ? t("Cancelling…") : t("Cancel")}
                 </button>
               </div>
             </div>
@@ -170,46 +173,50 @@ export function HealthView({
         {phase === "results" && view && (
           <>
             <div className="dup-summary">
-              <strong>{view.total || Object.values(view.counts).reduce((a, b) => a + (b ?? 0), 0) ? plural(Object.values(view.counts).reduce((a, b) => a + (b ?? 0), 0), "file") + " Mori can't show" : "Every media file can be shown"}</strong>
-              <span className="muted">{plural(view.checked, "media file")} checked</span>
+              <strong>
+                {view.total || Object.values(view.counts).reduce((a, b) => a + (b ?? 0), 0)
+                  ? tn(Object.values(view.counts).reduce((a, b) => a + (b ?? 0), 0), "{n} file Mori can't show", "{n} files Mori can't show")
+                  : t("Every media file can be shown")}
+              </strong>
+              <span className="muted">{tn(view.checked, "{n} media file checked", "{n} media files checked")}</span>
             </div>
             <div className="chips meta-filters">
               <button className={`chip ${category === null ? "on" : ""}`} onClick={() => (setCategory(null), load(null))}>
-                All
+                {t("All")}
               </button>
               {ORDER.filter((c) => view.counts[c]).map((c) => (
-                <button key={c} className={`chip ${category === c ? "on" : ""}`} onClick={() => (setCategory(c), load(c))} title={HEALTH_LABEL[c].note}>
-                  {HEALTH_LABEL[c].title} <span className="count">{view.counts[c]!.toLocaleString()}</span>
+                <button key={c} className={`chip ${category === c ? "on" : ""}`} onClick={() => (setCategory(c), load(c))} title={t(HEALTH_LABEL[c].note)}>
+                  {t(HEALTH_LABEL[c].title)} <span className="count">{fmtNum(view.counts[c]!)}</span>
                 </button>
               ))}
             </div>
             {items.length === 0 ? (
               <div className="empty">
                 <Icon name="check" size={34} stroke={1.3} />
-                <p>Nothing to report.</p>
+                <p>{t("Nothing to report.")}</p>
               </div>
             ) : (
               <div className="meta-list">
                 {items.map((h, i) => (
                   <div key={h.id} className="meta-row">
-                    <span className={`health-dot hd-${h.category}`} title={HEALTH_LABEL[h.category].title} />
-                    <button className="meta-main as-button" onClick={() => onOpen(items, i)} title="Open (isolated)">
+                    <span className={`health-dot hd-${h.category}`} title={t(HEALTH_LABEL[h.category].title)} />
+                    <button className="meta-main as-button" onClick={() => onOpen(items, i)} title={t("Open (isolated)")}>
                       <div className="truncate meta-name">{h.name}</div>
                       <div className="truncate muted small">{h.path}</div>
                     </button>
-                    <span className="tag">{HEALTH_LABEL[h.category].title}</span>
+                    <span className="tag">{t(HEALTH_LABEL[h.category].title)}</span>
                     <span className="health-reason truncate" title={h.reason}>
                       {h.reason}
                     </span>
                     <span className="muted small meta-size">{formatSize(h.size)}</span>
-                    <button className="icon-btn" onClick={() => onInfo(h.id)} title="Get Info">
+                    <button className="icon-btn" onClick={() => onInfo(h.id)} title={t("Get Info")}>
                       <Icon name="info" size={14} />
                     </button>
                   </div>
                 ))}
                 {items.length < view.total && (
                   <button className="btn more" onClick={() => api.healthResults(category, items.length, PAGE).then((v) => v && setItems((x) => [...x, ...v.items]))}>
-                    Show more ({(view.total - items.length).toLocaleString()} left)
+                    {t("Show more ({count} left)", { count: view.total - items.length })}
                   </button>
                 )}
               </div>

@@ -983,36 +983,36 @@ pub fn keep_reasons(s: &SimilarAnalysis, group: usize) -> Vec<String> {
     let px = |m: &MediaInfo| m.width as u64 * m.height as u64;
     let mut r = Vec::new();
     if px(&km) > 0 && others.iter().all(|m| px(&media(m)) < px(&km)) {
-        r.push(format!("Highest resolution ({} × {})", km.width, km.height));
+        r.push(tr!("Highest resolution ({w} × {h})", w = km.width, h = km.height));
     }
     if let Some(d) = km.duration_ms {
         if others.iter().all(|m| media(m).duration_ms.is_some_and(|o| o + 500 < d)) {
-            r.push(format!("Longest ({}:{:02})", d / 60_000, d / 1000 % 60));
+            r.push(tr!("Longest ({duration})", duration = format!("{}:{:02}", d / 60_000, d / 1000 % 60)));
         }
     }
     if keeper.files.len() > 1 && others.iter().all(|m| m.files.len() == 1) {
-        r.push("Live Photo (photo + motion)".into());
+        r.push(tr!("Live Photo (photo + motion)"));
     }
     if matches!(kf.ext.as_str(), "heic" | "heif")
         && others.iter().all(|m| !matches!(file(m).ext.as_str(), "heic" | "heif"))
     {
-        r.push("Original camera format (HEIC)".into());
+        r.push(tr!("Original camera format (HEIC)"));
     }
     if km.exif && others.iter().any(|m| !media(m).exif) {
-        r.push("Keeps the camera metadata".into());
+        r.push(tr!("Keeps the camera metadata"));
     }
     let same_px: Vec<&&Member> = others.iter().filter(|m| px(&media(m)) == px(&km)).collect();
     if km.duration_ms.is_none() && !same_px.is_empty() && same_px.iter().all(|m| file(m).size < kf.size) {
-        r.push("Least compressed at this resolution".into());
+        r.push(tr!("Least compressed at this resolution"));
     }
     if name_penalty(kf) == 0.0 && others.iter().any(|m| name_penalty(file(m)) > 0.0) {
-        r.push("Original-looking name (others look like copies, exports or messaging saves)".into());
+        r.push(tr!("Original-looking name (others look like copies, exports or messaging saves)"));
     }
     if others.iter().all(|m| kf.modified < file(m).modified) {
-        r.push("Oldest copy".into());
+        r.push(tr!("Oldest copy"));
     }
     if r.is_empty() {
-        r.push("The copies look equivalent; the first one is suggested".into());
+        r.push(tr!("The copies look equivalent; the first one is suggested"));
     }
     r
 }

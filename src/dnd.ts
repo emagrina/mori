@@ -9,6 +9,8 @@
  * itself…). The checks here only drive the visual feedback.
  */
 
+import { t, tn } from "./i18n";
+
 export const DRAG_TYPE = "application/x-mori-items";
 
 /** What the checks need to know about an item. */
@@ -53,17 +55,17 @@ export function canDropInto(
   items: readonly DragItem[],
   opts: { readOnly: boolean },
 ): { ok: true } | { ok: false; reason: string } {
-  if (!items.length) return { ok: false, reason: "Nothing to move." };
-  if (target.kind && target.kind !== "folder") return { ok: false, reason: "Not a folder." };
-  if (opts.readOnly) return { ok: false, reason: "Read-only: Mori won't change files right now." };
-  if (target.guarded) return { ok: false, reason: "Protected (Never Modify): nothing can be moved into it." };
+  if (!items.length) return { ok: false, reason: t("Nothing to move.") };
+  if (target.kind && target.kind !== "folder") return { ok: false, reason: t("Not a folder.") };
+  if (opts.readOnly) return { ok: false, reason: t("Read-only: Mori won't change files right now.") };
+  if (target.guarded) return { ok: false, reason: t("Protected (Never Modify): nothing can be moved into it.") };
   for (const e of items) {
-    if (e.id === target.id) return { ok: false, reason: "A folder can't be moved into itself." };
+    if (e.id === target.id) return { ok: false, reason: t("A folder can't be moved into itself.") };
     if (e.kind === "folder" && (target.path === e.path || target.path.startsWith(`${e.path}/`)))
-      return { ok: false, reason: "A folder can't be moved into one of its own subfolders." };
-    if (e.guarded) return { ok: false, reason: "A protected (Never Modify) item can't be moved." };
+      return { ok: false, reason: t("A folder can't be moved into one of its own subfolders.") };
+    if (e.guarded) return { ok: false, reason: t("A protected (Never Modify) item can't be moved.") };
   }
-  if (items.every((e) => parentOf(e.path) === target.path)) return { ok: false, reason: "Already in this folder." };
+  if (items.every((e) => parentOf(e.path) === target.path)) return { ok: false, reason: t("Already in this folder.") };
   return { ok: true };
 }
 
@@ -101,7 +103,7 @@ export function dragGhost(dt: DataTransfer, count: number, name: string, thumb: 
     if (svg) pic.appendChild(svg.cloneNode(true));
   }
   const label = document.createElement("span");
-  label.textContent = count > 1 ? `${count.toLocaleString()} items` : name;
+  label.textContent = count > 1 ? tn(count, "{n} item", "{n} items") : name;
   ghost.append(pic, label);
   if (count > 1) {
     const badge = document.createElement("span");

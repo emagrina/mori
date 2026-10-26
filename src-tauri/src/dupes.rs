@@ -682,7 +682,7 @@ pub fn suggest_reasons(files: &[FileRec], roots: &[Root], g: &Group) -> Vec<Stri
     let k = g.suggested;
     let Some(keeper) = g.members.get(k) else { return Vec::new() };
     if keeper.locked {
-        return vec!["Part of a Live Photo whose other half isn't duplicated, so it must stay".into()];
+        return vec![tr!("Part of a Live Photo whose other half isn't duplicated, so it must stay")];
     }
     let segs = |m: &Member| {
         let f = &files[m.files[0]];
@@ -703,23 +703,23 @@ pub fn suggest_reasons(files: &[FileRec], roots: &[Root], g: &Group) -> Vec<Stri
     const MEDIA: &[&str] = &["pictures", "photos", "videos", "movies", "dcim", "music", "documents"];
     let mut r = Vec::new();
     if !in_any(keeper, TEMP) && others.iter().any(|m| in_any(m, TEMP)) {
-        r.push("Other copies are in Downloads, temporary or Trash folders".to_string());
+        r.push(tr!("Other copies are in Downloads, temporary or Trash folders"));
     }
     if !in_any(keeper, OLD) && others.iter().any(|m| in_any(m, OLD)) {
-        r.push("Other copies are in backup or “old” folders".into());
+        r.push(tr!("Other copies are in backup or “old” folders"));
     }
     if !copy_name(keeper) && others.iter().any(|m| copy_name(m)) {
-        r.push("Other copies have copy-style names (“copy”, “(1)”)".into());
+        r.push(tr!("Other copies have copy-style names (“copy”, “(1)”)"));
     }
     if in_any(keeper, MEDIA) && others.iter().any(|m| !in_any(m, MEDIA)) {
-        r.push("In an organised media folder".into());
+        r.push(tr!("In an organised media folder"));
     }
     let date = |m: &Member| files[m.files[0]].created.unwrap_or(files[m.files[0]].modified);
     if others.iter().all(|m| date(keeper) < date(m)) {
-        r.push("Oldest copy".into());
+        r.push(tr!("Oldest copy"));
     }
     if r.is_empty() {
-        r.push("The copies are identical; the one with the shortest path is suggested".into());
+        r.push(tr!("The copies are identical; the one with the shortest path is suggested"));
     }
     r
 }
@@ -737,20 +737,20 @@ pub struct PlanItem {
 pub fn validate(a: &Analysis, plan: &[PlanItem]) -> Result<(), String> {
     let mut seen = HashSet::new();
     for item in plan {
-        let g = a.groups.get(item.group).ok_or("The analysis changed; please review again.")?;
+        let g = a.groups.get(item.group).ok_or_else(|| tr!("The analysis changed; please review again."))?;
         if !seen.insert(item.group) {
-            return Err("A group appears twice in the cleanup plan.".into());
+            return Err(tr!("A group appears twice in the cleanup plan."));
         }
         let unique: HashSet<_> = item.trash.iter().collect();
         if unique.len() != item.trash.len() || item.trash.iter().any(|&m| m >= g.members.len()) {
-            return Err("Invalid selection.".into());
+            return Err(tr!("Invalid selection."));
         }
         // NEVER delete every copy.
         if item.trash.len() >= g.members.len() {
-            return Err("At least one copy must be kept.".into());
+            return Err(tr!("At least one copy must be kept."));
         }
         if item.trash.iter().any(|&m| g.members[m].locked) {
-            return Err("A copy that belongs to a Live Photo must be kept.".into());
+            return Err(tr!("A copy that belongs to a Live Photo must be kept."));
         }
     }
     Ok(())
@@ -824,8 +824,9 @@ pub fn execute(
             out.groups_skipped += 1;
             out.failures.push(Failure {
                 path: display_path(a, *bad),
-                reason: "The copy you chose to keep is unavailable or changed, so nothing in this group was moved."
-                    .into(),
+                reason: tr!(
+                    "The copy you chose to keep is unavailable or changed, so nothing in this group was moved."
+                ),
             });
             done += item.trash.iter().map(|&m| g.members[m].files.len() as u64).sum::<u64>();
             continue;
@@ -836,7 +837,7 @@ pub fn execute(
             if let Some(&bad) = member.files.iter().find(|&&f| !still_identical(a, f)) {
                 out.failures.push(Failure {
                     path: display_path(a, bad),
-                    reason: "Changed or unavailable since the analysis; left in place.".into(),
+                    reason: tr!("Changed or unavailable since the analysis; left in place."),
                 });
                 done += member.files.len() as u64;
                 continue;
@@ -854,7 +855,10 @@ pub fn execute(
                     Err(e) => {
                         // Both halves of a Live Photo move together; if the second fails, say so.
                         let reason = if member.files.len() > 1 && k > 0 {
-                            format!("{e}. The Live Photo's still image was already moved to Trash; restore it from the Trash to keep the pair together.")
+                            tr!(
+                                "{error}. The Live Photo's still image was already moved to Trash; restore it from the Trash to keep the pair together.",
+                                error = e
+                            )
                         } else {
                             e
                         };

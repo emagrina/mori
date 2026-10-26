@@ -88,15 +88,13 @@ pub struct UndoOutcome {
 
 fn why_not(changes: &[Change]) -> Option<String> {
     if changes.iter().any(|c| matches!(c, Change::Deleted { .. })) {
-        return Some("Deleted permanently: this can't be undone.".into());
+        return Some(tr!("Deleted permanently: this can't be undone."));
     }
     if changes
         .iter()
         .any(|c| matches!(c, Change::Trashed { trashed: None, .. } | Change::CrossMoved { trashed: None, .. }))
     {
-        return Some(
-            "Restore it from the system Trash (Mori wasn't told where the item went on this platform).".into(),
-        );
+        return Some(tr!("Restore it from the system Trash (Mori wasn't told where the item went on this platform)."));
     }
     None
 }
@@ -142,10 +140,10 @@ impl History {
     pub fn undo(&self, id: u64, policy: &Policy) -> Result<UndoOutcome, String> {
         let rec = {
             let r = self.records.lock().unwrap_or_else(PoisonError::into_inner);
-            r.iter().find(|x| x.id == id).cloned().ok_or("That operation is no longer in the history.")?
+            r.iter().find(|x| x.id == id).cloned().ok_or_else(|| tr!("That operation is no longer in the history."))?
         };
         if rec.undone {
-            return Err("Already undone.".into());
+            return Err(tr!("Already undone."));
         }
         if let Some(n) = why_not(&rec.changes) {
             return Err(n);
@@ -166,7 +164,7 @@ impl History {
                 Change::CrossMoved { from, to, trashed: Some(t) } => fileops::restore_from_trash(policy, t, from)
                     .and_then(|_| {
                         fileops::move_to_trash(policy, to)
-                            .map_err(|e| format!("the original is back, but the copy stayed ({e})"))
+                            .map_err(|e| tr!("the original is back, but the copy stayed ({error})", error = e))
                     })
                     .map(|_| from.clone()),
                 Change::Trashed { trashed: None, .. }

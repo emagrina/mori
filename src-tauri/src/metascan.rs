@@ -98,18 +98,18 @@ pub async fn file_metadata(app: AppHandle, id: String) -> Result<FileMeta, Strin
         let state = app.state::<AppState>();
         let loc = state.locate(&id)?;
         if loc.is_dir || loc.is_link {
-            return Err("Not a file".to_string());
+            return Err(tr!("Not a file"));
         }
-        let (mut file, meta, _) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| "File unavailable")?;
-        let input = input_for(&mut file, meta.len(), DETAIL_HEAD).ok_or("The file couldn't be read.")?;
+        let (mut file, meta, _) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| tr!("File unavailable"))?;
+        let input = input_for(&mut file, meta.len(), DETAIL_HEAD).ok_or_else(|| tr!("The file couldn't be read."))?;
         let sanitizable = meta.len() <= MAX_SANITIZE && sanitize::supported(input.get(4..).unwrap_or(&[]));
         let out = worker::run(Op::Meta, 64, input, Duration::from_secs(15))
-            .map_err(|_| "The metadata couldn't be read safely.")?;
-        let m = parse_meta(out).ok_or("The metadata couldn't be read safely.")?;
-        Ok(FileMeta { categories: m.categories(), meta: m, sanitizable })
+            .map_err(|_| tr!("The metadata couldn't be read safely."))?;
+        let m = parse_meta(out).ok_or_else(|| tr!("The metadata couldn't be read safely."))?;
+        Ok(FileMeta { categories: m.categories(), meta: m.localized(), sanitizable })
     })
     .await
-    .map_err(|_| "The metadata couldn't be read.".to_string())?
+    .map_err(|_| tr!("The metadata couldn't be read."))?
 }
 
 // ------------------------------------------------------------------- scan
@@ -323,12 +323,12 @@ pub fn meta_start(
     recursive: bool,
 ) -> Result<(), String> {
     if state.meta_running.swap(true, Ordering::SeqCst) {
-        return Err("A metadata scan is already running.".into());
+        return Err(tr!("A metadata scan is already running."));
     }
     let roots = crate::analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.meta_running.store(false, Ordering::SeqCst);
-        return Err("Choose at least one available location.".into());
+        return Err(tr!("Choose at least one available location."));
     }
     *state.meta_scan.lock().unwrap_or_else(PoisonError::into_inner) = None;
     state.meta_job.reset();
@@ -345,7 +345,7 @@ pub fn meta_start(
                 ScanDone { status: "done", message: None }
             }
             Ok(Err(Cancelled)) => ScanDone { status: "cancelled", message: None },
-            Err(_) => ScanDone { status: "failed", message: Some("The scan stopped unexpectedly.".into()) },
+            Err(_) => ScanDone { status: "failed", message: Some(tr!("The scan stopped unexpectedly.")) },
         };
         state.meta_running.store(false, Ordering::SeqCst);
         let _ = app.emit("meta-done", event);
@@ -425,7 +425,7 @@ fn hit_view(s: &Store, h: &Hit, drives: &[String]) -> HitView {
         ext: secure::display_safe(&f.ext),
         categories: h.categories.clone(),
         gps: h.gps,
-        fields: h.fields.clone(),
+        fields: h.fields.iter().cloned().map(Field::localized).collect(),
         sanitizable: matches!(f.ext.as_str(), "jpg" | "jpeg" | "png" | "webp") && f.size <= MAX_SANITIZE,
     }
 }
@@ -575,26 +575,26 @@ fn copy_names(name: &str) -> impl Iterator<Item = String> + '_ {
 fn sanitize_one(app: &AppHandle, state: &AppState, id: &str) -> Result<String, String> {
     let loc = state.locate(id)?;
     if loc.is_dir || loc.is_link {
-        return Err("Not a file".into());
+        return Err(tr!("Not a file"));
     }
-    let (file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| "file unavailable")?;
+    let (file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| tr!("file unavailable"))?;
     if meta.len() > MAX_SANITIZE {
-        return Err("too large for a sanitized copy (60 MB limit)".into());
+        return Err(tr!("too large for a sanitized copy (60 MB limit)"));
     }
-    let original = secure::read_limited(file, &meta, MAX_SANITIZE).map_err(|_| "the file couldn't be read")?;
+    let original = secure::read_limited(file, &meta, MAX_SANITIZE).map_err(|_| tr!("the file couldn't be read"))?;
     if !sanitize::supported(&original) {
-        return Err("sanitized copies are available for JPEG, PNG and WebP images".into());
+        return Err(tr!("sanitized copies are available for JPEG, PNG and WebP images"));
     }
     let out = worker::run(Op::Sanitize, 64, original.clone(), Duration::from_secs(30))
         .ok()
         .filter(|o| o.format == OutFormat::Bytes && sanitize::supported(&o.bytes))
-        .ok_or("the image couldn't be processed safely")?
+        .ok_or_else(|| tr!("the image couldn't be processed safely"))?
         .bytes;
     // Verify before writing anything: the copy decodes to the same dimensions…
     let dims = |b: Vec<u8>| worker::run(Op::Thumb, 64, b, Duration::from_secs(25)).ok().map(|o| (o.width, o.height));
     let (a, b) = (dims(original), dims(out.clone()));
     if a.is_none() || a != b {
-        return Err("the copy didn't verify (image changed), so nothing was written".into());
+        return Err(tr!("the copy didn't verify (image changed), so nothing was written"));
     }
     // …and no sensitive field or position is left.
     let mut probe = b"FILE".to_vec();
@@ -602,11 +602,11 @@ fn sanitize_one(app: &AppHandle, state: &AppState, id: &str) -> Result<String, S
     let left = worker::run(Op::Meta, 64, probe, Duration::from_secs(15))
         .ok()
         .and_then(parse_meta)
-        .ok_or("the copy couldn't be verified")?;
+        .ok_or_else(|| tr!("the copy couldn't be verified"))?;
     if !left.categories().is_empty() || left.gps.is_some() {
-        return Err("the copy still contained metadata, so nothing was written".into());
+        return Err(tr!("the copy still contained metadata, so nothing was written"));
     }
-    let dir = canon.parent().ok_or("invalid folder")?;
+    let dir = canon.parent().ok_or_else(|| tr!("invalid folder"))?;
     let policy = state.policy();
     let mut created = None;
     for name in copy_names(&loc.name) {
@@ -615,9 +615,9 @@ fn sanitize_one(app: &AppHandle, state: &AppState, id: &str) -> Result<String, S
             break;
         }
     }
-    let name = created.ok_or("no free name for the copy")?;
+    let name = created.ok_or_else(|| tr!("no free name for the copy"))?;
     state.history.record(
-        format!("Created sanitized copy “{}”", secure::display_safe(&name)),
+        tr!("Created sanitized copy “{name}”", name = secure::display_safe(&name)),
         vec![crate::history::Change::Created { path: dir.join(&name) }],
     );
     // Read back what was written.
@@ -625,10 +625,15 @@ fn sanitize_one(app: &AppHandle, state: &AppState, id: &str) -> Result<String, S
         Some((d, _)) => format!("{d}/{name}"),
         None => name.clone(),
     };
-    let (written, wmeta, _) = secure::open_inside(&loc.root, &rel).map_err(|_| "the copy couldn't be read back")?;
-    let back = secure::read_limited(written, &wmeta, MAX_SANITIZE).map_err(|_| "the copy couldn't be read back")?;
+    let (written, wmeta, _) =
+        secure::open_inside(&loc.root, &rel).map_err(|_| tr!("the copy couldn't be read back"))?;
+    let back =
+        secure::read_limited(written, &wmeta, MAX_SANITIZE).map_err(|_| tr!("the copy couldn't be read back"))?;
     if blake3::hash(&back) != blake3::hash(&out) {
-        return Err(format!("“{name}” was written but didn't read back identically — check it before relying on it"));
+        return Err(tr!(
+            "“{name}” was written but didn't read back identically — check it before relying on it",
+            name = name
+        ));
     }
     // Show it in the browser right away when it's inside the browsed folder.
     if let Some(rel) = crate::browser_rel(state, &dir.join(&name)) {
@@ -650,7 +655,7 @@ pub async fn sanitize_copies(app: AppHandle, ids: Vec<String>) -> Vec<SanitizeOu
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sanitize_one(&app, &state, &id))) {
                     Ok(Ok(n)) => SanitizeOutcome { id, name, new_name: Some(secure::display_safe(&n)), error: None },
                     Ok(Err(e)) => SanitizeOutcome { id, name, new_name: None, error: Some(e) },
-                    Err(_) => SanitizeOutcome { id, name, new_name: None, error: Some("unexpected error".into()) },
+                    Err(_) => SanitizeOutcome { id, name, new_name: None, error: Some(tr!("unexpected error")) },
                 }
             })
             .collect()

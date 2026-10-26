@@ -54,6 +54,7 @@ It has no account, no cloud, no telemetry and no network functionality.
 - **Organize.** Tags and favorites, stored in Mori's own data and never in your files.
 - **Manage files like a file browser.** Click to select, Cmd/Ctrl/Shift for multi-selection, double-click to open; **Move to…** and **Copy to…** with a conflict plan (Keep Both / Replace into the Trash / Skip, never a silent overwrite); drag and drop onto folders in the grid, list and sidebar; actions from the preview too.
 - **Quick Cleanup.** Go through a folder one file at a time with the keyboard: Keep or Mark for Trash. Marking only stages a decision; files move to the system Trash after you review them and confirm once.
+- **In your language.** English, Spanish, Catalan, French, German, Italian, Portuguese, Dutch, Polish, Ukrainian, Russian, Turkish, Arabic, Hebrew, Hindi, Bengali, Indonesian, Vietnamese, Thai, Simplified and Traditional Chinese, Japanese and Korean, following the system language or chosen in **Language…**.
 - **Change files carefully.**
   - Rename, Move to Trash, and Undo.
   - **Delete Permanently** shows an Operation Preview first, and folders or large batches require typing DELETE.
@@ -170,6 +171,8 @@ Checks:
 
 ```bash
 npm run typecheck
+npm test
+npm run i18n:check   # every language has every string, with matching placeholders
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -182,6 +185,7 @@ Releases are built by GitHub Actions when a version tag is pushed; see [docs/rel
 
 ```
 src/                 React + TypeScript interface
+src/locales/         interface translations (src-tauri/locales/: messages from Rust)
 src-tauri/src/       Rust: index and search, path confinement, sandboxed worker,
                      mori:// protocol, analyses, integrity, diagnostics, file operations
 src-tauri/tests/     sandboxed-worker, persistence and version tests

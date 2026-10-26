@@ -3,6 +3,8 @@
 const COMMANDS: &[&str] = &[
     "init",
     "update_settings",
+    "saved_language",
+    "set_language",
     "choose_root",
     "rescan",
     "clear_cache",

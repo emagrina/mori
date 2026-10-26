@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { api, CATEGORY_LABEL, formatDate, formatSize, plural, type FileMeta, type FileReport, type MetaField, type RiskLevel } from "../api";
+import { api, CATEGORY_LABEL, formatDate, formatSize, type FileMeta, type FileReport, type MetaField, type RiskLevel } from "../api";
+import { fmtNum, msg, t, tn, tx } from "../i18n";
 import { Icon } from "./Icon";
 
-const LEVEL: Record<RiskLevel, string> = { high: "High attention", attention: "Attention", info: "Info" };
+const LEVEL: Record<RiskLevel, string> = { high: msg("High attention"), attention: msg("Attention"), info: msg("Info") };
 
 /**
  * Factual file report: real type, extension check, risk indicators,
@@ -39,12 +40,12 @@ export function Inspector({ id, onClose, onNotice, over = false }: { id: string;
   const r = report;
   const flagged = r?.findings.filter((f) => f.level !== "info") ?? [];
   return (
-    <aside className={`inspector ${over ? "over" : ""}`} aria-label="File information">
+    <aside className={`inspector ${over ? "over" : ""}`} aria-label={t("File information")}>
       <header>
         <h2 className="truncate" title={r?.name}>
-          {r?.name ?? "Info"}
+          {r?.name ?? t("Info")}
         </h2>
-        <button className="icon-btn" onClick={onClose} aria-label="Close">
+        <button className="icon-btn" onClick={onClose} aria-label={t("Close")}>
           <Icon name="close" size={13} />
         </button>
       </header>
@@ -59,17 +60,17 @@ export function Inspector({ id, onClose, onNotice, over = false }: { id: string;
 
           {r.kind === "file" && (
             <section>
-              <h3>Type</h3>
+              <h3>{t("Type")}</h3>
               <dl>
-                <dt>Detected</dt>
+                <dt>{t("Detected")}</dt>
                 <dd>{r.detected ? r.detected.label : "—"}</dd>
                 <dt>MIME</dt>
                 <dd className="mono">{r.detected?.mime ?? "—"}</dd>
-                <dt>Extension</dt>
+                <dt>{t("Extension")}</dt>
                 <dd>
-                  {r.ext ? `.${r.ext}` : "none"}
-                  {r.extMatches === true && <span className="muted"> · matches content</span>}
-                  {r.extMatches === false && <span className="attn"> · does not match content</span>}
+                  {r.ext ? `.${r.ext}` : t("none")}
+                  {r.extMatches === true && <span className="muted"> · {t("matches content")}</span>}
+                  {r.extMatches === false && <span className="attn"> · {t("does not match content")}</span>}
                 </dd>
               </dl>
             </section>
@@ -77,12 +78,12 @@ export function Inspector({ id, onClose, onNotice, over = false }: { id: string;
 
           {r.findings.length > 0 && (
             <section>
-              <h3>Findings</h3>
+              <h3>{t("Findings")}</h3>
               <ul className="findings">
                 {r.findings.map((f, i) => (
                   <li key={i} className={`finding ${f.level}`}>
                     <div className="finding-head">
-                      <span className="level">{LEVEL[f.level]}</span>
+                      <span className="level">{t(LEVEL[f.level])}</span>
                       <span className="finding-title">{f.title}</span>
                     </div>
                     <p>{f.detail}</p>
@@ -96,75 +97,75 @@ export function Inspector({ id, onClose, onNotice, over = false }: { id: string;
 
           {r.kind === "link" && (
             <section>
-              <h3>Symbolic link</h3>
+              <h3>{t("Symbolic link")}</h3>
               <dl>
-                <dt>Points to</dt>
+                <dt>{t("Points to")}</dt>
                 <dd className="mono wrap">{r.linkTarget || "—"}</dd>
-                <dt>Target</dt>
-                <dd>{r.linkOutside ? "Outside this folder" : "Inside this folder"} · never followed by Mori</dd>
+                <dt>{t("Target")}</dt>
+                <dd>{r.linkOutside ? t("Outside this folder · never followed by Mori") : t("Inside this folder · never followed by Mori")}</dd>
               </dl>
             </section>
           )}
 
           <section>
-            <h3>General</h3>
+            <h3>{t("General")}</h3>
             <dl>
-              <dt>Kind</dt>
-              <dd>{r.kind === "file" ? "File" : r.kind === "folder" ? "Folder" : "Symbolic link"}</dd>
+              <dt>{t("Kind")}</dt>
+              <dd>{r.kind === "file" ? t("File") : r.kind === "folder" ? t("Folder") : t("Symbolic link")}</dd>
               {r.kind === "file" && (
                 <>
-                  <dt>Size</dt>
+                  <dt>{t("Size")}</dt>
                   <dd>
-                    {formatSize(r.size)} <span className="muted">({r.size.toLocaleString()} bytes)</span>
+                    {formatSize(r.size)} <span className="muted">({tn(r.size, "{n} byte", "{n} bytes")})</span>
                   </dd>
                 </>
               )}
-              <dt>Where</dt>
+              <dt>{t("Where")}</dt>
               <dd className="wrap">{r.path}</dd>
-              <dt>Created</dt>
+              <dt>{t("Created")}</dt>
               <dd>{formatDate(r.created)}</dd>
-              <dt>Modified</dt>
+              <dt>{t("Modified")}</dt>
               <dd>{formatDate(r.modified)}</dd>
-              <dt>Accessed</dt>
+              <dt>{t("Accessed")}</dt>
               <dd>{formatDate(r.accessed)}</dd>
             </dl>
           </section>
 
           {r.permissions && (
             <section>
-              <h3>Permissions</h3>
+              <h3>{t("Permissions")}</h3>
               <dl>
-                <dt>Mode</dt>
+                <dt>{t("Mode")}</dt>
                 <dd className="mono">
                   {r.permissions.mode} <span className="muted">({r.permissions.octal})</span>
                 </dd>
-                <dt>Owner</dt>
+                <dt>{t("Owner")}</dt>
                 <dd>{r.permissions.owner}</dd>
-                <dt>Group</dt>
+                <dt>{t("Group")}</dt>
                 <dd>{r.permissions.group}</dd>
                 {r.permissions.special.length > 0 && (
                   <>
-                    <dt>Special</dt>
+                    <dt>{t("Special")}</dt>
                     <dd>{r.permissions.special.join(", ")}</dd>
                   </>
                 )}
                 {r.permissions.flags.length > 0 && (
                   <>
-                    <dt>Flags</dt>
+                    <dt>{t("Flags")}</dt>
                     <dd>{r.permissions.flags.join(", ")}</dd>
                   </>
                 )}
                 <dt>ACL</dt>
-                <dd>{r.permissions.aclEntries ? `${r.permissions.aclEntries} entries` : "none"}</dd>
+                <dd>{r.permissions.aclEntries ? tn(r.permissions.aclEntries, "{n} entry", "{n} entries") : t("none")}</dd>
                 {r.permissions.hardLinks > 1 && (
                   <>
-                    <dt>Hard links</dt>
-                    <dd>{r.permissions.hardLinks}</dd>
+                    <dt>{t("Hard links")}</dt>
+                    <dd>{fmtNum(r.permissions.hardLinks)}</dd>
                   </>
                 )}
                 {r.permissions.xattrs.length > 0 && (
                   <>
-                    <dt>Attributes</dt>
+                    <dt>{t("Attributes")}</dt>
                     <dd className="mono wrap">{r.permissions.xattrs.join("\n")}</dd>
                   </>
                 )}
@@ -174,24 +175,24 @@ export function Inspector({ id, onClose, onNotice, over = false }: { id: string;
 
           {(r.marks.insidePrivate || r.marks.insideProtected) && (
             <section>
-              <h3>In Mori</h3>
+              <h3>{t("In Mori")}</h3>
               <dl>
                 {r.marks.insidePrivate && (
                   <>
-                    <dt>Private</dt>
-                    <dd>{r.marks.private ? "This folder is private" : "Inside a private folder"}</dd>
+                    <dt>{t("Private")}</dt>
+                    <dd>{r.marks.private ? t("This folder is private") : t("Inside a private folder")}</dd>
                   </>
                 )}
                 {r.marks.insideProtected && (
                   <>
-                    <dt>Never Modify</dt>
-                    <dd>{r.marks.protected ? "This folder is protected" : "Inside a protected folder"}</dd>
+                    <dt>{t("Never Modify")}</dt>
+                    <dd>{r.marks.protected ? t("This folder is protected") : t("Inside a protected folder")}</dd>
                   </>
                 )}
               </dl>
             </section>
           )}
-          <p className="fineprint">These are observations, not a malware verdict. Mori is not an antivirus.</p>
+          <p className="fineprint">{t("These are observations, not a malware verdict. Mori is not an antivirus.")}</p>
         </div>
       )}
     </aside>
@@ -229,15 +230,15 @@ function MetadataSection({ id, onNotice }: { id: string; onNotice?: (msg: string
     setBusy(false);
     setConfirm(false);
     if (o?.newName) {
-      setResult({ ok: true, text: `Created “${o.newName}” next to the original. The original was not changed.` });
-      onNotice?.(`Sanitized copy created: “${o.newName}”`);
-    } else setResult({ ok: false, text: `No copy was made: ${o?.error ?? "unknown error"}.` });
+      setResult({ ok: true, text: t("Created “{name}” next to the original. The original was not changed.", { name: o.newName }) });
+      onNotice?.(t("Sanitized copy created: “{name}”", { name: o.newName }));
+    } else setResult({ ok: false, text: t("No copy was made: {error}.", { error: o?.error ?? t("unknown error") }) });
   };
 
   if (failed) {
     return (
       <section>
-        <h3>Metadata</h3>
+        <h3>{t("Metadata")}</h3>
         <p className="muted small">{failed}</p>
       </section>
     );
@@ -245,7 +246,7 @@ function MetadataSection({ id, onNotice }: { id: string; onNotice?: (msg: string
   if (!meta) {
     return (
       <section>
-        <h3>Metadata</h3>
+        <h3>{t("Metadata")}</h3>
         <div className="dot-spinner" />
       </section>
     );
@@ -254,21 +255,23 @@ function MetadataSection({ id, onNotice }: { id: string; onNotice?: (msg: string
   const groups = [...new Set(meta.fields.map((f) => f.group))];
   return (
     <section>
-      <h3>Metadata</h3>
+      <h3>{t("Metadata")}</h3>
       {meta.fields.length === 0 && !meta.gps ? (
-        <p className="muted small">No embedded metadata found{meta.container !== "Unknown" ? ` in this ${meta.container} file` : ""}.</p>
+        <p className="muted small">
+          {meta.container !== "Unknown" ? t("No embedded metadata found in this {format} file.", { format: meta.container }) : t("No embedded metadata found.")}
+        </p>
       ) : (
         <>
           {meta.categories.length > 0 ? (
             <p className="meta-contains">
-              Contains: {meta.categories.map((c) => CATEGORY_LABEL[c]).join(" · ")}
+              {t("Contains: {categories}", { categories: meta.categories.map((c) => CATEGORY_LABEL[c]).join(" · ") })}
             </p>
           ) : (
-            <p className="muted small">No location, people, device, software, comment or ID fields.</p>
+            <p className="muted small">{t("No location, people, device, software, comment or ID fields.")}</p>
           )}
           {meta.gps && (
             <dl>
-              <dt>Position</dt>
+              <dt>{t("Position")}</dt>
               <dd className="mono">
                 {meta.gps[0].toFixed(5)}, {meta.gps[1].toFixed(5)}
               </dd>
@@ -283,28 +286,29 @@ function MetadataSection({ id, onNotice }: { id: string; onNotice?: (msg: string
               </div>
             ))}
           <button className="link-btn" onClick={() => setAll(!all)}>
-            {all ? "Show sensitive fields only" : `Show all metadata (${plural(meta.fields.length, "field")})`}
+            {all ? t("Show sensitive fields only") : tn(meta.fields.length, "Show all metadata ({n} field)", "Show all metadata ({n} fields)")}
           </button>
-          {meta.partial && <p className="muted small">Some metadata was damaged or past a size limit; the list may be incomplete.</p>}
+          {meta.partial && <p className="muted small">{t("Some metadata was damaged or past a size limit; the list may be incomplete.")}</p>}
         </>
       )}
       {meta.sanitizable && meta.categories.length > 0 && !confirm && (
         <button className="btn small meta-sanitize" onClick={() => setConfirm(true)} disabled={busy}>
-          Create Sanitized Copy…
+          {t("Create Sanitized Copy…")}
         </button>
       )}
       {confirm && (
         <div className="confirm-box">
           <p>
-            Mori will write a <strong>new file</strong> next to this one with the same image and no metadata (orientation is kept). The original is
-            not changed.
+            {tx("Mori will write a {newFile} next to this one with the same image and no metadata (orientation is kept). The original is not changed.", {
+              newFile: <strong>{t("new file")}</strong>,
+            })}
           </p>
           <div className="dialog-actions">
             <button className="btn small" onClick={() => setConfirm(false)} disabled={busy}>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn small primary" onClick={createCopy} disabled={busy}>
-              {busy ? "Creating…" : "Create Copy"}
+              {busy ? t("Creating…") : t("Create Copy")}
             </button>
           </div>
         </div>

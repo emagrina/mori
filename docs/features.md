@@ -322,6 +322,14 @@ This is **not encryption** and does not modify, move, lock or change permissions
 
 The setting is stored in Mori's app data and survives restarts. On macOS each drive is recognised by its volume UUID, so a private folder on an external drive stays private after you eject it and plug it in again, even if it mounts under another name. A private folder renamed or moved within the same drive outside Mori is recognised again on the next scan by its file ID.
 
+### Languages
+
+Mori's interface and its own messages (errors, findings, analysis reasons) are available in English, Spanish, Catalan, French, German, Italian, Portuguese, Dutch, Polish, Ukrainian, Russian, Turkish, Arabic, Hebrew, Hindi, Bengali, Indonesian, Vietnamese, Thai, Simplified Chinese, Traditional Chinese, Japanese and Korean. By default Mori follows the system language; **Language…** in the sidebar's More menu (or the command palette) picks another one. The choice is saved with Mori's settings and applied by reloading the interface, which keeps the current folder and view. Arabic and Hebrew mirror the layout (right to left). Numbers, sizes and dates follow the chosen language.
+
+Text that Mori recorded earlier stays in the language it was written in: integrity snapshot names, Undo History entries and results of analyses already run in the session.
+
+Translations live in `src/locales/<code>.json` (interface) and `src-tauri/locales/<code>.json` (messages from Rust), keyed by the English text. `npm run i18n:check` lists missing strings and placeholder mistakes.
+
 ### Not implemented yet
 
 These have been discussed for Mori but **are not in the code yet**:

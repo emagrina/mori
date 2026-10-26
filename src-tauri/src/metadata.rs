@@ -86,6 +86,131 @@ impl Meta {
     }
 }
 
+// ----------------------------------------------------------- translation
+//
+// Fields are extracted in the sandboxed worker, which always speaks English;
+// the labels and generated values Mori itself writes are translated here, in
+// the main process, right before they are shown. Names and values read from
+// the file (EXIF tag names, XMP keys, user text) are left as they are.
+
+/// "1234 bytes" → 1234.
+fn byte_count(s: &str) -> Option<u64> {
+    s.strip_suffix(" bytes")?.parse().ok()
+}
+
+fn bytes(n: u64) -> String {
+    trn!(n, "{n} byte", "{n} bytes")
+}
+
+fn field_name(name: &str) -> Option<String> {
+    Some(match name {
+        "Dimensions" => tr!("Dimensions"),
+        "Last Modified" => tr!("Last Modified"),
+        "Comment" => tr!("Comment"),
+        "Multi-picture" => tr!("Multi-picture"),
+        "Extended XMP" => tr!("Extended XMP"),
+        "Created" => tr!("Created"),
+        "Version" => tr!("Version"),
+        "Note" => tr!("Note"),
+        "Picture" => tr!("Picture"),
+        "Vendor" => tr!("Vendor"),
+        // IPTC
+        "Object Name" => tr!("Object Name"),
+        "Keywords" => tr!("Keywords"),
+        "Date Created" => tr!("Date Created"),
+        "By-line" => tr!("By-line"),
+        "By-line Title" => tr!("By-line Title"),
+        "City" => tr!("City"),
+        "Sub-location" => tr!("Sub-location"),
+        "Province/State" => tr!("Province/State"),
+        "Country Code" => tr!("Country Code"),
+        "Country" => tr!("Country"),
+        "Headline" => tr!("Headline"),
+        "Credit" => tr!("Credit"),
+        "Source" => tr!("Source"),
+        "Copyright Notice" => tr!("Copyright Notice"),
+        "Contact" => tr!("Contact"),
+        "Caption" => tr!("Caption"),
+        "Caption Writer" => tr!("Caption Writer"),
+        // MP4 / ID3
+        "Title" => tr!("Title"),
+        "Artist" => tr!("Artist"),
+        "Album" => tr!("Album"),
+        "Date" => tr!("Date"),
+        "Encoder" => tr!("Encoder"),
+        "Composer" => tr!("Composer"),
+        "Cover Art" => tr!("Cover Art"),
+        "Year" => tr!("Year"),
+        "Genre" => tr!("Genre"),
+        "Encoded by" => tr!("Encoded by"),
+        "Encoder settings" => tr!("Encoder settings"),
+        "File owner" => tr!("File owner"),
+        "Copyright" => tr!("Copyright"),
+        "Lyrics" => tr!("Lyrics"),
+        "Embedded object" => tr!("Embedded object"),
+        "Private data" => tr!("Private data"),
+        "Unique file identifier" => tr!("Unique file identifier"),
+        "User text" => tr!("User text"),
+        "Link" => tr!("Link"),
+        _ => return None,
+    })
+}
+
+fn field_value(group: &str, name: &str, value: &str) -> Option<String> {
+    match (group, name) {
+        ("EXIF", "MakerNote") => {
+            Some(match value.strip_prefix("Manufacturer data (").and_then(|v| v.strip_suffix(')')) {
+                Some(n) => tr!("Manufacturer data ({size})", size = bytes(byte_count(n)?)),
+                None => tr!("Manufacturer data"),
+            })
+        }
+        ("JPEG", "Multi-picture") => Some(tr!("Additional images after the main one")),
+        ("ID3", "Note") if value == "Unsynchronised tag: frames not listed" => {
+            Some(tr!("Unsynchronised tag: frames not listed"))
+        }
+        ("XMP", "Extended XMP") | ("FLAC", "Picture") | ("ID3", "Picture" | "Embedded object") => {
+            byte_count(value).map(bytes)
+        }
+        ("ID3", "Private data" | "Unique file identifier") => {
+            let (owner, n) = value.strip_suffix(')')?.rsplit_once(" (")?;
+            Some(tr!("{owner} ({size})", owner = owner, size = bytes(byte_count(n)?)))
+        }
+        ("QuickTime", _) => {
+            if let Some(n) = value.strip_prefix("Picture (").and_then(|v| v.strip_suffix(')')) {
+                return Some(tr!("Picture ({size})", size = bytes(byte_count(n)?)));
+            }
+            let n: u64 = value.strip_suffix(" bytes of data")?.parse().ok()?;
+            Some(trn!(n, "{n} byte of data", "{n} bytes of data"))
+        }
+        _ => None,
+    }
+}
+
+impl Field {
+    /// This field with Mori's own labels and generated values in the
+    /// interface language.
+    pub fn localized(mut self) -> Field {
+        if let Some(v) = field_value(&self.group, &self.name, &self.value) {
+            self.value = v;
+        }
+        if let Some(n) = field_name(&self.name) {
+            self.name = n;
+        }
+        if self.group == "Image" {
+            self.group = tr!("Image");
+        }
+        self
+    }
+}
+
+impl Meta {
+    /// See `Field::localized`.
+    pub fn localized(mut self) -> Meta {
+        self.fields = self.fields.into_iter().map(Field::localized).collect();
+        self
+    }
+}
+
 /// Plausible coordinates; (0, 0) is the usual "unset" value, not a place.
 pub fn valid_position(lat: f64, lon: f64) -> bool {
     lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0 && !(lat == 0.0 && lon == 0.0)

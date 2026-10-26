@@ -10,6 +10,8 @@
     "core:window:allow-internal-toggle-maximize",
     "allow-init",
     "allow-update-settings",
+    "allow-saved-language",
+    "allow-set-language",
     "allow-choose-root",
     "allow-rescan",
     "allow-clear-cache",

@@ -442,7 +442,7 @@ button:disabled {
   flex-direction: column;
   min-height: 0;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--separator);
+  border-inline-end: 1px solid var(--separator);
 }
 
 .sidebar-head {
@@ -490,7 +490,7 @@ button:disabled {
   gap: 9px;
   padding: 0 10px;
   border-radius: var(--r-select);
-  text-align: left;
+  text-align: start;
   color: var(--text-2);
   transition:
     background var(--dur) var(--ease),
@@ -519,7 +519,7 @@ button:disabled {
 }
 
 .side-item .count {
-  margin-left: auto;
+  margin-inline-start: auto;
   font-size: 11.5px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
@@ -564,7 +564,7 @@ button:disabled {
 .tree-row .twisty {
   width: 18px;
   height: 18px;
-  margin-left: 2px;
+  margin-inline-start: 2px;
   display: grid;
   place-items: center;
   color: var(--text-3);
@@ -595,8 +595,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-right: 8px;
-  text-align: left;
+  padding-inline-end: 8px;
+  text-align: start;
 }
 
 .tree-row .label svg {
@@ -614,7 +614,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 10px 10px 12px 18px;
+  padding-block: 10px 12px;
+  padding-inline: 18px 10px;
   border-top: 1px solid var(--separator);
 }
 
@@ -637,7 +638,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 16px 0 20px;
+  padding-block: 0;
+  padding-inline: 20px 16px;
 }
 
 .search {
@@ -770,13 +772,13 @@ button:disabled {
   gap: 2px;
   min-width: 0;
   overflow: hidden;
-  margin-left: -6px;
+  margin-inline-start: -6px;
 }
 
 .crumbs .back {
   width: 22px;
   height: 22px;
-  margin-right: 2px;
+  margin-inline-end: 2px;
 }
 
 .crumb-wrap {
@@ -838,7 +840,7 @@ button.crumb:hover {
   font-weight: 400;
   letter-spacing: 0;
   color: var(--text-3);
-  margin-left: 10px;
+  margin-inline-start: 10px;
 }
 
 .item-count {
@@ -1051,7 +1053,7 @@ button.crumb:hover {
 
 .thumb .badge {
   position: absolute;
-  right: 6px;
+  inset-inline-end: 6px;
   bottom: 6px;
   height: 19px;
   min-width: 19px;
@@ -1106,7 +1108,7 @@ button.crumb:hover {
   display: flex;
   align-items: center;
   gap: 4px;
-  text-align: left;
+  text-align: start;
   padding: 0;
   height: 100%;
   min-width: 0;
@@ -1163,7 +1165,7 @@ button.crumb:hover {
 }
 
 .c-size {
-  text-align: right;
+  text-align: end;
   justify-content: flex-end;
 }
 
@@ -1477,7 +1479,7 @@ button.crumb:hover {
   gap: 10px;
   padding: 0 10px;
   border-radius: 6px;
-  text-align: left;
+  text-align: start;
   color: var(--text);
   font-size: 12.5px;
 }
@@ -1500,7 +1502,7 @@ button.crumb:hover {
 }
 
 .menu button .check {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--text-2);
 }
 
@@ -1753,7 +1755,7 @@ button.crumb:hover {
   border: 1px solid var(--border);
   background: var(--surface-1);
   color: var(--text-2);
-  text-align: left;
+  text-align: start;
   cursor: default;
   transition:
     border-color var(--dur) var(--ease),
@@ -2022,8 +2024,9 @@ button.crumb:hover {
   font-weight: 400;
   font-size: 12px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 4px 6px;
   white-space: nowrap;
 }
 
@@ -2043,13 +2046,13 @@ button.crumb:hover {
 }
 
 .tag.suggested {
-  margin-left: 6px;
+  margin-inline-start: 6px;
   color: var(--text);
   background: var(--selected);
 }
 
 .dup-info .tag:not(.suggested) {
-  margin-left: 6px;
+  margin-inline-start: 6px;
 }
 
 .dup-saving {
@@ -2220,7 +2223,7 @@ button.crumb:hover {
   border: 1px solid var(--border);
   background: var(--surface-1);
   color: var(--text-2);
-  text-align: left;
+  text-align: start;
   transition:
     border-color var(--dur) var(--ease),
     background var(--dur) var(--ease);
@@ -2439,7 +2442,7 @@ button.link:hover {
 
 .name-line .tag {
   flex-shrink: 0;
-  margin-left: 0 !important;
+  margin-inline-start: 0 !important;
 }
 
 .dup-title .muted {
@@ -2467,8 +2470,8 @@ button.link:hover {
 }
 
 .tree-row .private-mark {
-  margin-left: auto;
-  padding-right: 6px;
+  margin-inline-start: auto;
+  padding-inline-end: 6px;
 }
 
 .caption-overlay .private-mark {
@@ -2477,7 +2480,7 @@ button.link:hover {
 }
 
 .private-chip {
-  margin-left: 10px;
+  margin-inline-start: 10px;
   padding: 0 7px;
   height: 20px;
   line-height: 20px;
@@ -2508,7 +2511,7 @@ button.link:hover {
   position: fixed;
   z-index: 45;
   top: 10px;
-  right: 10px;
+  inset-inline-end: 10px;
   bottom: 10px;
   width: min(380px, calc(100vw - 40px));
   display: flex;
@@ -2520,7 +2523,8 @@ button.link:hover {
 }
 
 .inspector > header {
-  padding: 14px 14px 10px 18px;
+  padding-block: 14px 10px;
+  padding-inline: 18px 14px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2671,7 +2675,7 @@ button.link:hover {
 }
 
 .menu .menu-kbd {
-  margin-left: auto;
+  margin-inline-start: auto;
   font-family: var(--font);
   font-size: 11px;
   color: var(--text-3);
@@ -2751,7 +2755,7 @@ button.link:hover {
 
 .safe-banner .safe-stat::before {
   content: "·";
-  margin-right: 12px;
+  margin-inline-end: 12px;
   color: var(--text-3);
 }
 
@@ -2788,7 +2792,8 @@ button.link:hover {
   width: 132px;
   flex-shrink: 0;
   overflow-y: auto;
-  padding: 8px 12px 16px 16px;
+  padding-block: 8px 16px;
+  padding-inline: 16px 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2843,7 +2848,7 @@ button.link:hover {
 }
 
 .pdf-active {
-  margin-left: 12px;
+  margin-inline-start: 12px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2904,7 +2909,8 @@ button.link:hover {
 }
 
 .archive-table.nested {
-  margin: 2px 0 6px 22px;
+  margin-block: 2px 6px;
+  margin-inline: 22px 0;
 }
 
 .archive-row {
@@ -2947,7 +2953,7 @@ button.link:hover {
 
 .archive-size {
   width: 70px;
-  text-align: right;
+  text-align: end;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
@@ -3028,7 +3034,7 @@ button.link:hover {
 .facts {
   width: 100%;
   max-width: 420px;
-  text-align: left;
+  text-align: start;
   font-size: 12px;
   display: flex;
   flex-direction: column;
@@ -3092,7 +3098,8 @@ button.link:hover {
   display: inline-block;
   width: 5px;
   height: 5px;
-  margin: 0 6px 1px 0;
+  margin-block: 0 1px;
+  margin-inline: 0 6px;
   border-radius: 50%;
   background: var(--attention);
 }
@@ -3138,7 +3145,7 @@ button.link:hover {
 }
 
 .chip .count {
-  margin-left: 4px;
+  margin-inline-start: 4px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -3216,14 +3223,14 @@ button.link:hover {
 
 .meta-size {
   width: 64px;
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 
 .outcome-list {
   max-height: 220px;
   overflow-y: auto;
-  padding-left: 18px;
+  padding-inline-start: 18px;
   font-size: 12px;
   color: var(--text-2);
 }
@@ -3349,7 +3356,7 @@ button.link:hover {
   display: flex;
   padding: 5px 6px;
   border-radius: 5px;
-  text-align: left;
+  text-align: start;
 }
 
 .places-list li button:hover {
@@ -3471,7 +3478,7 @@ button.link:hover {
 
 .side-heading.as-button {
   width: calc(100% - 16px);
-  text-align: left;
+  text-align: start;
   border-radius: 6px;
 }
 
@@ -3523,7 +3530,7 @@ button.link:hover {
 .storage-summary strong {
   font-family: var(--font-display);
   font-size: 22px;
-  margin-right: 4px;
+  margin-inline-end: 4px;
 }
 
 .kind-bar {
@@ -3558,7 +3565,7 @@ button.link:hover {
   width: 9px;
   height: 9px;
   border-radius: 2px;
-  margin-right: 3px;
+  margin-inline-end: 3px;
   vertical-align: -1px;
 }
 
@@ -3599,7 +3606,7 @@ button.link:hover {
   background: color-mix(in srgb, var(--text) 13%, transparent);
   color: var(--text);
   font-size: 11.5px;
-  text-align: left;
+  text-align: start;
   overflow: hidden;
   transition: background var(--dur) var(--ease);
 }
@@ -3673,7 +3680,7 @@ button.link:hover {
   min-height: 34px;
   padding: 0 8px;
   border-bottom: 1px solid var(--separator);
-  text-align: left;
+  text-align: start;
   font-size: 12.5px;
 }
 
@@ -3697,13 +3704,13 @@ button.size-row:hover {
 
 .size-bytes {
   width: 80px;
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 
 .health-legend {
   margin: 0;
-  padding-left: 18px;
+  padding-inline-start: 18px;
   font-size: 12.5px;
   display: flex;
   flex-direction: column;
@@ -3734,7 +3741,7 @@ button.size-row:hover {
 }
 
 .as-button {
-  text-align: left;
+  text-align: start;
 }
 
 .storage-overview .fineprint,
@@ -3748,7 +3755,7 @@ button.size-row:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-right: 6px;
+  padding-inline-end: 6px;
 }
 
 .tag-pick {
@@ -3767,7 +3774,7 @@ button.size-row:hover {
   min-height: 32px;
   padding: 0 8px;
   border-radius: var(--r-control);
-  text-align: left;
+  text-align: start;
   font-size: 13px;
 }
 
@@ -4023,7 +4030,7 @@ button.tag-option:hover {
   height: 34px;
   padding: 0 10px;
   border-radius: 8px;
-  text-align: left;
+  text-align: start;
   font-size: 13px;
 }
 
@@ -4283,7 +4290,7 @@ button.tag-option:hover {
   max-height: 160px;
   overflow-y: auto;
   margin: 6px 0 0;
-  padding-left: 18px;
+  padding-inline-start: 18px;
   font-size: 11.5px;
 }
 
@@ -4415,7 +4422,7 @@ button.tag-option:hover {
 
 .session-banner .safe-stat::before {
   content: "·";
-  margin-right: 12px;
+  margin-inline-end: 12px;
   color: var(--text-3);
 }
 
@@ -4486,7 +4493,7 @@ button.tag-option:hover {
 }
 
 .selection-bar .count {
-  margin-right: 8px;
+  margin-inline-end: 8px;
   font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -4505,8 +4512,8 @@ button.tag-option:hover {
 
 /* Sidebar: private / protected folders are legible at a glance. */
 .tree-row .tree-marks {
-  margin-left: auto;
-  padding-right: 4px;
+  margin-inline-start: auto;
+  padding-inline-end: 4px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -4533,7 +4540,7 @@ button.tag-option:hover {
 .preview-menu {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  inset-inline-end: 0;
   min-width: 220px;
 }
 
@@ -4562,7 +4569,7 @@ button.tag-option:hover {
   min-height: 30px;
   padding: 0 8px;
   border-radius: var(--r-select);
-  text-align: left;
+  text-align: start;
 }
 
 button.dest-row:not(:disabled):hover,
@@ -4605,7 +4612,7 @@ button.dest-row:not(:disabled):hover,
   gap: 8px;
   border-radius: var(--r-select);
   color: var(--text-2);
-  text-align: left;
+  text-align: start;
 }
 
 .dest-row .dest-pick:disabled {
@@ -4618,7 +4625,7 @@ button.dest-row:not(:disabled):hover,
 }
 
 .dest-row .muted.small {
-  margin-left: auto;
+  margin-inline-start: auto;
   flex-shrink: 0;
 }
 
@@ -4638,7 +4645,7 @@ button.dest-row:not(:disabled):hover,
 }
 
 .op-row.conflict .segmented {
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .transfer-progress {
@@ -4766,7 +4773,7 @@ button.dest-row:not(:disabled):hover,
 .cleanup-badges {
   position: absolute;
   top: 14px;
-  left: 16px;
+  inset-inline-start: 16px;
   z-index: 3;
   display: flex;
   gap: 6px;
@@ -4919,7 +4926,7 @@ button.dest-row:not(:disabled):hover,
 
 .cleanup-setup .op-list {
   width: min(640px, 100%);
-  text-align: left;
+  text-align: start;
 }
 
 .cleanup-setup .dialog-note {
@@ -4937,7 +4944,7 @@ button.dest-row:not(:disabled):hover,
 }
 
 .cleanup-resume > div {
-  margin-right: 12px;
+  margin-inline-end: 12px;
 }
 
 .cleanup-options {
@@ -4978,7 +4985,7 @@ button.dest-row:not(:disabled):hover,
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 260px));
   gap: 6px 28px;
-  text-align: left;
+  text-align: start;
   font-size: 12px;
   color: var(--text-3);
 }
@@ -5106,7 +5113,7 @@ button.dest-row:not(:disabled):hover,
 .fav-star {
   position: absolute;
   top: 7px;
-  right: 7px;
+  inset-inline-end: 7px;
   z-index: 2;
   width: 26px;
   height: 26px;
@@ -5144,12 +5151,12 @@ button.dest-row:not(:disabled):hover,
 
 .tile.gallery .fav-star {
   top: 8px;
-  right: 8px;
+  inset-inline-end: 8px;
 }
 
 /* List view: a dedicated slot at the end of the name, not an overlay. */
 .c-name .fav-slot {
-  margin-left: auto;
+  margin-inline-start: auto;
   width: 22px;
   height: 22px;
   flex-shrink: 0;
@@ -5236,7 +5243,7 @@ button.dest-row:not(:disabled):hover,
 
 .row .drop-reason {
   position: static;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   padding: 1px 8px;
   white-space: nowrap;
   box-shadow: none;
@@ -5302,4 +5309,53 @@ button.dest-row:not(:disabled):hover,
   font-size: 10.5px;
   color: var(--primary-text);
   background: var(--primary-bg);
+}
+
+/* --------------------------------------------------------------- language */
+
+.tag-pick.lang-pick {
+  max-height: min(420px, calc(100vh - 260px));
+}
+
+.lang-option .lang-detail {
+  flex: 0 1 auto;
+  max-width: 45%;
+  font-size: 12px;
+}
+
+.lang-option .check {
+  flex-shrink: 0;
+}
+
+.lang-pick .sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--separator);
+  flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------ right to left */
+
+/* Arabic and Hebrew mirror the layout (logical properties above), but the
+   macOS window buttons stay at the window's top-left, which is now the end of
+   the top bar rather than the sidebar. Media scrubbers, the compare slider and
+   maps keep their physical geometry (their positions come from pointer x). */
+[dir="rtl"] .app.mac .sidebar-head {
+  padding-left: 16px;
+}
+
+[dir="rtl"] .app.mac .topbar {
+  padding-left: 84px;
+}
+
+[dir="rtl"] .toast {
+  left: calc(50% - var(--sidebar-w) / 2);
+}
+
+/* Arrows that mean "forward" / "back" (breadcrumbs, Back, folder disclosure)
+   point the other way. */
+[dir="rtl"] .crumb-sep,
+[dir="rtl"] .crumbs .back svg,
+[dir="rtl"] .twisty svg {
+  scale: -1 1;
 }
