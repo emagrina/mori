@@ -71,7 +71,7 @@ fn check(state: &AppState, root: &std::path::Path, job: &Job) -> Option<(Categor
     }
     let unknown = report.detected.as_ref().is_none_or(|d| d.family == crate::filetype::Family::Unknown);
     if meta.len() == 0 {
-        return Some((Category::Broken, "Empty file".into()));
+        return Some((Category::Broken, tr!("Empty file")));
     }
     if let Some(f) = report.findings.iter().find(|f| matches!(f.code, "truncated" | "broken-container")) {
         return Some((Category::Broken, f.title.clone()));
@@ -83,11 +83,16 @@ fn check(state: &AppState, root: &std::path::Path, job: &Job) -> Option<(Categor
     match job.kind {
         Kind::Photo | Kind::Gif => {
             if !detected.is_image() {
-                let what = report.detected.as_ref().map_or("This format", |d| d.label);
                 return if unknown {
-                    Some((Category::Broken, "Not recognisable as an image".into()))
+                    Some((Category::Broken, tr!("Not recognisable as an image")))
                 } else {
-                    Some((Category::Unsupported, format!("{what}: no safe decoder in Mori")))
+                    Some((
+                        Category::Unsupported,
+                        match &report.detected {
+                            Some(d) => tr!("{kind}: no safe decoder in Mori", kind = d.label),
+                            None => tr!("This format: no safe decoder in Mori"),
+                        },
+                    ))
                 };
             }
             // A thumbnail already made (or failed) for this exact version answers it.
@@ -98,31 +103,31 @@ fn check(state: &AppState, root: &std::path::Path, job: &Job) -> Option<(Categor
             let _ = std::io::Seek::rewind(&mut file);
             let bytes = match secure::read_limited(file, &meta, worker::MAX_INPUT) {
                 Ok(b) => b,
-                Err(_) => return Some((Category::Failed, "Larger than the safe decoding limit".into())),
+                Err(_) => return Some((Category::Failed, tr!("Larger than the safe decoding limit"))),
             };
             state.decoded.fetch_add(1, Ordering::Relaxed);
             match worker::run(Op::Thumb, 64, bytes, Duration::from_secs(12)) {
                 Ok(_) => None,
                 Err(WorkerError::Unsupported) => {
-                    Some((Category::Unsupported, "Image variant the decoder doesn't support".into()))
+                    Some((Category::Unsupported, tr!("Image variant the decoder doesn't support")))
                 }
-                Err(WorkerError::Decode) => Some((Category::Broken, "The image data is damaged".into())),
-                Err(WorkerError::Limits) => Some((Category::Failed, "Exceeds Mori's safe decoding limits".into())),
-                Err(WorkerError::Timeout) => Some((Category::Failed, "Decoding took too long and was stopped".into())),
-                Err(WorkerError::Failed) => Some((Category::Failed, "The sandboxed decoder failed".into())),
+                Err(WorkerError::Decode) => Some((Category::Broken, tr!("The image data is damaged"))),
+                Err(WorkerError::Limits) => Some((Category::Failed, tr!("Exceeds Mori's safe decoding limits"))),
+                Err(WorkerError::Timeout) => Some((Category::Failed, tr!("Decoding took too long and was stopped"))),
+                Err(WorkerError::Failed) => Some((Category::Failed, tr!("The sandboxed decoder failed"))),
             }
         }
         Kind::Video => {
             if !detected.is_video() {
                 return if unknown {
-                    Some((Category::Broken, "Not recognisable as a video".into()))
+                    Some((Category::Broken, tr!("Not recognisable as a video")))
                 } else {
                     Some((
                         Category::Unsupported,
-                        format!(
-                            "{} isn't previewed by Mori",
-                            report.detected.as_ref().map_or("This container", |d| d.label)
-                        ),
+                        match &report.detected {
+                            Some(d) => tr!("{kind} isn't previewed by Mori", kind = d.label),
+                            None => tr!("This container isn't previewed by Mori"),
+                        },
                     ))
                 };
             }
@@ -132,21 +137,24 @@ fn check(state: &AppState, root: &std::path::Path, job: &Job) -> Option<(Categor
                 video::VideoStatus::Playable => None,
                 video::VideoStatus::UnsupportedCodec => Some((
                     Category::Unsupported,
-                    format!("Codec {} isn't supported for secure preview", info.video_codec.unwrap_or_default()),
+                    tr!(
+                        "Codec {codec} isn't supported for secure preview",
+                        codec = info.video_codec.unwrap_or_default()
+                    ),
                 )),
-                video::VideoStatus::NoVideo => Some((Category::Broken, "No video track".into())),
+                video::VideoStatus::NoVideo => Some((Category::Broken, tr!("No video track"))),
                 video::VideoStatus::Damaged => {
-                    Some((Category::Broken, "The video container is damaged or incomplete".into()))
+                    Some((Category::Broken, tr!("The video container is damaged or incomplete")))
                 }
                 video::VideoStatus::Blocked => {
-                    Some((Category::Failed, "It stopped the system video engine before".into()))
+                    Some((Category::Failed, tr!("It stopped the system video engine before")))
                 }
             }
         }
         Kind::Audio => match &report.detected {
-            _ if unknown => Some((Category::Broken, "Not recognisable as an audio file".into())),
+            _ if unknown => Some((Category::Broken, tr!("Not recognisable as an audio file"))),
             Some(d) if d.family != crate::filetype::Family::Audio && d.family != crate::filetype::Family::Video => {
-                Some((Category::Unsupported, format!("{}: not an audio format", d.label)))
+                Some((Category::Unsupported, tr!("{kind}: not an audio format", kind = d.label)))
             }
             _ => None,
         },
@@ -173,9 +181,9 @@ struct Done {
 
 #[tauri::command]
 pub fn health_start(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let root = state.root_canon().ok_or("No folder selected")?;
+    let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
     if state.health_running.swap(true, Ordering::SeqCst) {
-        return Err("A health check is already running.".into());
+        return Err(tr!("A health check is already running."));
     }
     let idx = state.index();
     let jobs: Vec<Job> = idx
@@ -202,7 +210,7 @@ pub fn health_start(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(job) = jobs.get(i) else { return Ok(()) };
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(&state, &root, job)))
-                    .unwrap_or_else(|_| Some((Category::Failed, "Checking this file failed unexpectedly".into())));
+                    .unwrap_or_else(|_| Some((Category::Failed, tr!("Checking this file failed unexpectedly"))));
                 if let Some((category, reason)) = r {
                     found.lock().unwrap_or_else(PoisonError::into_inner).push(Finding {
                         rel: job.rel.clone(),

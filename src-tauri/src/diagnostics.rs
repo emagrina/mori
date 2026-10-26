@@ -29,6 +29,9 @@ pub enum Status {
 #[serde(rename_all = "camelCase")]
 pub struct Check {
     pub section: &'static str,
+    /// Stable, untranslated identifier (the English label) the UI matches on.
+    pub id: &'static str,
+    /// The label in the interface language.
     pub label: String,
     pub status: Status,
     /// Short value shown next to the label.
@@ -37,8 +40,46 @@ pub struct Check {
     pub detail: String,
 }
 
-fn check(section: &'static str, label: &str, status: Status, value: &str, detail: &str) -> Check {
-    Check { section, label: label.into(), status, value: value.into(), detail: detail.into() }
+fn check(section: &'static str, id: &'static str, status: Status, value: String, detail: String) -> Check {
+    Check { section, id, label: label(id), status, value, detail }
+}
+
+/// The translated label of a check id.
+fn label(id: &'static str) -> String {
+    match id {
+        "PDF safe preview" => tr!("PDF safe preview"),
+        "Video preview" => tr!("Video preview"),
+        "Audio preview" => tr!("Audio preview"),
+        "Real file type detection" => tr!("Real file type detection"),
+        "Restricted decoder workers" => tr!("Restricted decoder workers"),
+        "Preview isolation" => tr!("Preview isolation"),
+        "Resource limits" => tr!("Resource limits"),
+        "Malformed media" => tr!("Malformed media"),
+        "Archive traversal protection" => tr!("Archive traversal protection"),
+        "Symlink protection" => tr!("Symlink protection"),
+        "Read-only enforcement" => tr!("Read-only enforcement"),
+        "Protected folders" => tr!("Protected folders"),
+        "Filesystem checks" => tr!("Filesystem checks"),
+        "Cloud account" => tr!("Cloud account"),
+        "Telemetry & analytics" => tr!("Telemetry & analytics"),
+        "Remote processing" => tr!("Remote processing"),
+        "Persistent local index" => tr!("Persistent local index"),
+        "Web view storage" => tr!("Web view storage"),
+        "Required for core functionality" => tr!("Required for core functionality"),
+        "Network features configured" => tr!("Network features configured"),
+        "Web view remote content" => tr!("Web view remote content"),
+        "Decoder worker network access" => tr!("Decoder worker network access"),
+        "Main process" => tr!("Main process"),
+        "Temporary session" => tr!("Temporary session"),
+        "Startup cleanup" => tr!("Startup cleanup"),
+        "Persistent records during session" => tr!("Persistent records during session"),
+        "External app launching" => tr!("External app launching"),
+        "Local data store" => tr!("Local data store"),
+        "Temporary files" => tr!("Temporary files"),
+        "Logs" => tr!("Logs"),
+        // Format names (JPEG, PNG, WebP, GIF, HEIC / HEIF) aren't translated.
+        _ => id.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------- fixtures
@@ -202,15 +243,19 @@ pub fn run(
                 "media",
                 name,
                 s,
-                "Available",
-                "A synthetic image was decoded by the sandboxed worker just now.",
+                tr!("Available"),
+                tr!("A synthetic image was decoded by the sandboxed worker just now."),
             )),
             Err(e) => v.push(check(
                 "media",
                 name,
                 Status::Fail,
-                "Not working",
-                &format!("The sandboxed worker couldn't decode a synthetic {name} ({e:?}).",),
+                tr!("Not working"),
+                tr!(
+                    "The sandboxed worker couldn't decode a synthetic {name} ({error}).",
+                    name = name,
+                    error = format!("{e:?}")
+                ),
             )),
         }
     }
@@ -220,22 +265,22 @@ pub fn run(
             "media",
             "HEIC / HEIF",
             s,
-            "Available",
-            "A bundled 2×2 HEIC test image was decoded by the system decoder inside the HEIF sandbox profile.",
+            tr!("Available"),
+            tr!("A bundled 2×2 HEIC test image was decoded by the system decoder inside the HEIF sandbox profile."),
         )),
         Err(_) if !cfg!(target_os = "macos") => v.push(check(
             "media",
             "HEIC / HEIF",
             Status::Limited,
-            "Unavailable",
-            "HEIC is decoded only on macOS (system decoder).",
+            tr!("Unavailable"),
+            tr!("HEIC is decoded only on macOS (system decoder)."),
         )),
         Err(e) => v.push(check(
             "media",
             "HEIC / HEIF",
             Status::Fail,
-            "Not working",
-            &format!("The bundled HEIC test image couldn't be decoded ({e:?})."),
+            tr!("Not working"),
+            tr!("The bundled HEIC test image couldn't be decoded ({error}).", error = format!("{e:?}")),
         )),
     }
     let pdf_ok = worker::run(Op::PdfInfo, 64, pdf(), Duration::from_secs(10))
@@ -245,18 +290,18 @@ pub fn run(
     page.extend(pdf());
     let page_ok = worker::run(Op::PdfPage, 200, page, Duration::from_secs(15)).is_ok();
     v.push(match (pdf_ok, page_ok) {
-        (true, true) => check("media", "PDF safe preview", s, "Available", "A synthetic PDF with an automatic JavaScript action was read and rasterised in the PDF sandbox; the action was reported, not run."),
-        _ if !cfg!(target_os = "macos") => check("media", "PDF safe preview", Status::Limited, "Unavailable", "PDF pages are rendered only on macOS (CoreGraphics in the worker)."),
-        _ => check("media", "PDF safe preview", Status::Fail, "Not working", "The synthetic PDF couldn't be read or rendered in the sandbox."),
+        (true, true) => check("media", "PDF safe preview", s, tr!("Available"), tr!("A synthetic PDF with an automatic JavaScript action was read and rasterised in the PDF sandbox; the action was reported, not run.")),
+        _ if !cfg!(target_os = "macos") => check("media", "PDF safe preview", Status::Limited, tr!("Unavailable"), tr!("PDF pages are rendered only on macOS (CoreGraphics in the worker).")),
+        _ => check("media", "PDF safe preview", Status::Fail, tr!("Not working"), tr!("The synthetic PDF couldn't be read or rendered in the sandbox.")),
     });
     v.push(check(
         "media",
         "Video preview",
         Status::Info,
-        "System media engine",
-        "Containers are probed by Mori's sandboxed worker; playback uses the operating system's media engine through the web view, under Mori's hang/crash watchdog. Supported codecs are checked per file. Mori doesn't bundle FFmpeg.",
+        tr!("System media engine"),
+        tr!("Containers are probed by Mori's sandboxed worker; playback uses the operating system's media engine through the web view, under Mori's hang/crash watchdog. Supported codecs are checked per file. Mori doesn't bundle FFmpeg."),
     ));
-    v.push(check("media", "Audio preview", Status::Info, "System media engine", "MP3, AAC/M4A, WAV, AIFF and FLAC verified by magic bytes, played by the system media engine. Not played in the isolated view."));
+    v.push(check("media", "Audio preview", Status::Info, tr!("System media engine"), tr!("MP3, AAC/M4A, WAV, AIFF and FLAC verified by magic bytes, played by the system media engine. Not played in the isolated view.")));
 
     // ----------------------------------------------------------- security
     let png = encode(sample(), image::ImageFormat::Png);
@@ -265,62 +310,60 @@ pub fn run(
     let dbl = crate::risk::name_findings("invoice.pdf.app").iter().any(|f| f.level == crate::risk::Level::High);
     let bidi = crate::risk::name_findings("photo\u{202E}gpj.exe").iter().any(|f| f.level == crate::risk::Level::High);
     v.push(if ft.id == "png" && exp && dbl && bidi {
-        check("security", "Real file type detection", s, "Active", "A PNG named .jpg was identified as PNG and flagged as an extension mismatch; “invoice.pdf.app” and a right-to-left override name were flagged.")
+        check("security", "Real file type detection", s, tr!("Active"), tr!("A PNG named .jpg was identified as PNG and flagged as an extension mismatch; “invoice.pdf.app” and a right-to-left override name were flagged."))
     } else {
-        check("security", "Real file type detection", Status::Fail, "Not working", "A synthetic disguised file wasn't detected.")
+        check("security", "Real file type detection", Status::Fail, tr!("Not working"), tr!("A synthetic disguised file wasn't detected."))
     });
-    let sandbox_line = |p: Option<(bool, bool, bool, bool)>, what: &str| {
-        match p {
-        Some((true, true, true, true)) => (Status::Pass, "Active".to_string(), format!("{what}: reading user files, writing files, opening network sockets and starting processes were all refused inside the worker just now.")),
-        Some((f, w, n, sp)) => (
-            Status::Limited,
-            "Limited".to_string(),
-            format!("{what}: file reads denied={f}, writes denied={w}, network denied={n}, processes denied={sp}."),
-        ),
-        None => (Status::Fail, "Not working".to_string(), format!("{what}: the worker couldn't be started.")),
-    }
-    };
     let base = selftest(None);
     if cfg!(target_os = "macos") {
-        let (st, val, det) = sandbox_line(base, "Pure-computation sandbox");
-        v.push(Check {
-            section: "security",
-            label: "Restricted decoder workers".into(),
-            status: st,
-            value: val,
-            detail: det,
+        v.push(match base {
+            Some((true, true, true, true)) => check("security", "Restricted decoder workers", s, tr!("Active"), tr!("Pure-computation sandbox: reading user files, writing files, opening network sockets and starting processes were all refused inside the worker just now.")),
+            Some((f, w, n, sp)) => check(
+                "security",
+                "Restricted decoder workers",
+                Status::Limited,
+                tr!("Limited"),
+                tr!(
+                    "Pure-computation sandbox: file reads denied={f}, writes denied={w}, network denied={n}, processes denied={sp}.",
+                    f = f,
+                    w = w,
+                    n = n,
+                    sp = sp
+                ),
+            ),
+            None => check("security", "Restricted decoder workers", Status::Fail, tr!("Not working"), tr!("Pure-computation sandbox: the worker couldn't be started.")),
         });
         let heif = selftest(Some("heif"));
         let pdfp = selftest(Some("pdf"));
         let all = [base, heif, pdfp].iter().all(|p| matches!(p, Some((true, true, true, true))));
         v.push(if all {
-            check("security", "Preview isolation", s, "Active", "Every worker profile (standard, HEIF, PDF) denied file access, writes, network and processes just now. The UI only receives re-encoded copies.")
+            check("security", "Preview isolation", s, tr!("Active"), tr!("Every worker profile (standard, HEIF, PDF) denied file access, writes, network and processes just now. The UI only receives re-encoded copies."))
         } else {
-            check("security", "Preview isolation", Status::Limited, "Limited", "At least one worker profile didn't deny everything it should (see the worker checks).")
+            check("security", "Preview isolation", Status::Limited, tr!("Limited"), tr!("At least one worker profile didn't deny everything it should (see the worker checks)."))
         });
     } else {
         let detail = if cfg!(windows) {
-            "Workers run in a Job object (memory, single process, no UI) and never receive a path, but there is no filesystem-denying sandbox on Windows."
+            tr!("Workers run in a Job object (memory, single process, no UI) and never receive a path, but there is no filesystem-denying sandbox on Windows.")
         } else {
-            "Workers use resource limits and no_new_privs, but no seccomp filter yet."
+            tr!("Workers use resource limits and no_new_privs, but no seccomp filter yet.")
         };
-        v.push(check("security", "Restricted decoder workers", Status::Limited, "Limited", detail));
-        v.push(check("security", "Preview isolation", Status::Limited, "Limited", detail));
+        v.push(check("security", "Restricted decoder workers", Status::Limited, tr!("Limited"), detail.clone()));
+        v.push(check("security", "Preview isolation", Status::Limited, tr!("Limited"), detail));
     }
     v.push(match decodes(bomb_png()) {
         Err(WorkerError::Limits) => check(
             "security",
             "Resource limits",
             s,
-            "Active",
-            "A PNG claiming 100,000 × 100,000 pixels was refused before allocation.",
+            tr!("Active"),
+            tr!("A PNG claiming 100,000 × 100,000 pixels was refused before allocation."),
         ),
         r => check(
             "security",
             "Resource limits",
             Status::Fail,
-            "Not working",
-            &format!("The decompression-bomb test returned {r:?}."),
+            tr!("Not working"),
+            tr!("The decompression-bomb test returned {result}.", result = format!("{r:?}")),
         ),
     });
     let mut jpeg = encode(image::DynamicImage::ImageRgb8(sample().to_rgb8()), image::ImageFormat::Jpeg);
@@ -330,10 +373,16 @@ pub fn run(
             "security",
             "Malformed media",
             s,
-            "Contained",
-            "A truncated JPEG was handled by the worker without affecting Mori.",
+            tr!("Contained"),
+            tr!("A truncated JPEG was handled by the worker without affecting Mori."),
         ),
-        r => check("security", "Malformed media", Status::Limited, "Unexpected", &format!("Result: {r:?}.")),
+        r => check(
+            "security",
+            "Malformed media",
+            Status::Limited,
+            tr!("Unexpected"),
+            tr!("Result: {result}.", result = format!("{r:?}")),
+        ),
     });
     let evil = zip(&[("../../escape.txt", b"x"), ("/etc/absolute.txt", b"y"), ("ok.txt", b"z")]);
     let nested = zip(&[("inner.zip", &zip(&[("deeper.zip", &zip(&[("deepest.zip", &zip(&[("x.txt", b"x")]))]))]))]);
@@ -344,9 +393,9 @@ pub fn run(
     };
     let (ca, cb) = (codes(&a), codes(&b));
     v.push(if ca.contains(&"archive-traversal") && ca.contains(&"archive-absolute") && cb.iter().any(|c| c.starts_with("archive-nest")) {
-        check("security", "Archive traversal protection", s, "Active", "A ZIP with “../” and absolute paths was flagged, and a ZIP nested four levels deep was flagged; nothing was extracted.")
+        check("security", "Archive traversal protection", s, tr!("Active"), tr!("A ZIP with “../” and absolute paths was flagged, and a ZIP nested four levels deep was flagged; nothing was extracted."))
     } else {
-        check("security", "Archive traversal protection", Status::Fail, "Not working", &format!("Findings: {ca:?} / {cb:?}."))
+        check("security", "Archive traversal protection", Status::Fail, tr!("Not working"), tr!("Findings: {a} / {b}.", a = format!("{ca:?}"), b = format!("{cb:?}")))
     });
 
     let scratch = Scratch::new();
@@ -382,25 +431,25 @@ pub fn run(
             })();
             let (link, loops, ro, prot) = ok.unwrap_or((false, false, false, false));
             v.push(if link && loops {
-                check("security", "Symlink protection", s, "Active", "A link pointing outside a folder was refused, and a link loop didn't pull anything into the index.")
+                check("security", "Symlink protection", s, tr!("Active"), tr!("A link pointing outside a folder was refused, and a link loop didn't pull anything into the index."))
             } else {
-                check("security", "Symlink protection", Status::Fail, "Not working", "A synthetic link escape or loop wasn't handled.")
+                check("security", "Symlink protection", Status::Fail, tr!("Not working"), tr!("A synthetic link escape or loop wasn't handled."))
             });
             v.push(if ro {
                 check(
                     "security",
                     "Read-only enforcement",
                     s,
-                    if read_only_setting { "On" } else { "Available" },
-                    "With Read-only Mode, the backend refused a rename of a scratch file; the file was unchanged.",
+                    if read_only_setting { tr!("On") } else { tr!("Available") },
+                    tr!("With Read-only Mode, the backend refused a rename of a scratch file; the file was unchanged."),
                 )
             } else {
                 check(
                     "security",
                     "Read-only enforcement",
                     Status::Fail,
-                    "Not working",
-                    "A rename went through in Read-only Mode.",
+                    tr!("Not working"),
+                    tr!("A rename went through in Read-only Mode."),
                 )
             });
             v.push(if prot {
@@ -408,16 +457,16 @@ pub fn run(
                     "security",
                     "Protected folders",
                     s,
-                    "Available",
-                    "A rename inside a scratch “Never Modify” folder was refused.",
+                    tr!("Available"),
+                    tr!("A rename inside a scratch “Never Modify” folder was refused."),
                 )
             } else {
                 check(
                     "security",
                     "Protected folders",
                     Status::Fail,
-                    "Not working",
-                    "A rename inside a protected folder went through.",
+                    tr!("Not working"),
+                    tr!("A rename inside a protected folder went through."),
                 )
             });
         }
@@ -425,8 +474,8 @@ pub fn run(
             "security",
             "Filesystem checks",
             Status::Fail,
-            "Not run",
-            "A scratch folder couldn't be created in the system temporary directory.",
+            tr!("Not run"),
+            tr!("A scratch folder couldn't be created in the system temporary directory."),
         )),
     }
 
@@ -435,56 +484,56 @@ pub fn run(
         "privacy",
         "Cloud account",
         Status::Info,
-        "None",
-        "Mori has no account, login or registration, and creates no remote identity (code fact).",
+        tr!("None"),
+        tr!("Mori has no account, login or registration, and creates no remote identity (code fact)."),
     ));
     v.push(check(
         "privacy",
         "Telemetry & analytics",
         Status::Info,
-        "None",
-        "No telemetry, analytics, crash-reporting or tracking code or dependencies (code fact; dependencies audited).",
+        tr!("None"),
+        tr!("No telemetry, analytics, crash-reporting or tracking code or dependencies (code fact; dependencies audited)."),
     ));
     v.push(check(
         "privacy",
         "Remote processing",
         Status::Info,
-        "None",
-        "Media, metadata, checksums and analyses are processed on this computer. No uploads, no remote AI (code fact).",
+        tr!("None"),
+        tr!("Media, metadata, checksums and analyses are processed on this computer. No uploads, no remote AI (code fact)."),
     ));
     v.push(if temporary {
         check(
             "privacy",
             "Persistent local index",
             s,
-            "Off (temporary session)",
-            "This session's index stays in memory; nothing about the folder is written.",
+            tr!("Off (temporary session)"),
+            tr!("This session's index stays in memory; nothing about the folder is written."),
         )
     } else {
         check(
             "privacy",
             "Persistent local index",
             Status::Info,
-            &format!("On · {}", human(index_bytes)),
-            "Folder indexes are cached in Mori's app data to make browsing fast. Use a Temporary Session to avoid it.",
+            tr!("On · {size}", size = human(index_bytes)),
+            tr!("Folder indexes are cached in Mori's app data to make browsing fast. Use a Temporary Session to avoid it."),
         )
     });
-    v.push(check("privacy", "Web view storage", Status::Info, "In memory only", "The web view uses a non-persistent data store: no cookies, local storage, IndexedDB or HTTP cache are written (configuration fact)."));
+    v.push(check("privacy", "Web view storage", Status::Info, tr!("In memory only"), tr!("The web view uses a non-persistent data store: no cookies, local storage, IndexedDB or HTTP cache are written (configuration fact).")));
 
     // ----------------------------------------------------------- network
     v.push(check(
         "network",
         "Required for core functionality",
         Status::Info,
-        "No",
-        "Browsing, previews, analyses, metadata, checksums and integrity checks run locally.",
+        tr!("No"),
+        tr!("Browsing, previews, analyses, metadata, checksums and integrity checks run locally."),
     ));
     v.push(check(
         "network",
         "Network features configured",
         Status::Info,
-        "None",
-        "Mori contains no update checks, map tiles, fonts, or other remote requests (code fact).",
+        tr!("None"),
+        tr!("Mori contains no update checks, map tiles, fonts, or other remote requests (code fact)."),
     ));
     let remote = ["http:", "https:", "ws:", "wss:"].iter().any(|scheme| {
         csp.split(';').any(|d| {
@@ -494,44 +543,53 @@ pub fn run(
         })
     });
     v.push(if !csp.is_empty() && !remote {
-        check("network", "Web view remote content", s, "Blocked", "The active Content-Security-Policy allows only Mori's own bundled UI, IPC and the local mori: protocol; every remote origin is refused by the web view.")
+        check("network", "Web view remote content", s, tr!("Blocked"), tr!("The active Content-Security-Policy allows only Mori's own bundled UI, IPC and the local mori: protocol; every remote origin is refused by the web view."))
     } else {
-        check("network", "Web view remote content", Status::Limited, "Not restricted", "The Content-Security-Policy doesn't block every remote origin.")
+        check("network", "Web view remote content", Status::Limited, tr!("Not restricted"), tr!("The Content-Security-Policy doesn't block every remote origin."))
     });
     v.push(match base {
         Some((_, _, true, _)) => check(
             "network",
             "Decoder worker network access",
             s,
-            "Blocked",
-            "Enforced by the OS sandbox; verified just now on the loopback interface (no outside server is contacted).",
+            tr!("Blocked"),
+            tr!("Enforced by the OS sandbox; verified just now on the loopback interface (no outside server is contacted)."),
         ),
         _ => check(
             "network",
             "Decoder worker network access",
             Status::Limited,
-            "Not enforced",
-            "No OS-level network denial for workers on this platform; they contain no network code.",
+            tr!("Not enforced"),
+            tr!("No OS-level network denial for workers on this platform; they contain no network code."),
         ),
     });
-    v.push(check("network", "Main process", Status::Info, "No network code", "The main process has no network functionality configured. It isn't sandboxed from the network at OS level, so this is a code fact, not an enforced barrier."));
+    v.push(check("network", "Main process", Status::Info, tr!("No network code"), tr!("The main process has no network functionality configured. It isn't sandboxed from the network at OS level, so this is a code fact, not an enforced barrier.")));
 
     // --------------------------------------------------------- ephemeral
-    v.push(check("ephemeral", "Temporary session", s, if temporary { "Active" } else { "Available" }, "Index, thumbnails, previews, frames, checksums, analyses and history stay in memory and are cleared when the session ends."));
-    v.push(check("ephemeral", "Startup cleanup", s, "Active", &format!("At launch Mori removes leftovers of interrupted writes inside its own folders ({stale_cleaned} this time).")));
+    v.push(check("ephemeral", "Temporary session", s, if temporary { tr!("Active") } else { tr!("Available") }, tr!("Index, thumbnails, previews, frames, checksums, analyses and history stay in memory and are cleared when the session ends.")));
+    v.push(check(
+        "ephemeral",
+        "Startup cleanup",
+        s,
+        tr!("Active"),
+        tr!(
+            "At launch Mori removes leftovers of interrupted writes inside its own folders ({count} this time).",
+            count = stale_cleaned
+        ),
+    ));
     v.push(if temporary {
-        check("ephemeral", "Persistent records during session", s, "Disabled", "Saving tags, favorites, folder rules, integrity snapshots or drive settings is refused while the session lasts.")
+        check("ephemeral", "Persistent records during session", s, tr!("Disabled"), tr!("Saving tags, favorites, folder rules, integrity snapshots or drive settings is refused while the session lasts."))
     } else {
-        check("ephemeral", "Persistent records during session", Status::Info, "Disabled in sessions", "Start a Temporary Session or Private Inspection to turn them off.")
+        check("ephemeral", "Persistent records during session", Status::Info, tr!("Disabled in sessions"), tr!("Start a Temporary Session or Private Inspection to turn them off."))
     });
-    v.push(check("ephemeral", "External app launching", if temporary { s } else { Status::Info }, if temporary { "Blocked" } else { "Blocked in sessions" }, "During a temporary session Mori refuses “Open with Default App” and “Show in Finder”, which could create history in other apps."));
+    v.push(check("ephemeral", "External app launching", if temporary { s } else { Status::Info }, if temporary { tr!("Blocked") } else { tr!("Blocked in sessions") }, tr!("During a temporary session Mori refuses “Open with Default App” and “Show in Finder”, which could create history in other apps.")));
     let writable = if temporary {
         check(
             "ephemeral",
             "Local data store",
             Status::Info,
-            "Not checked",
-            "Not tested during a temporary session (the test writes a file).",
+            tr!("Not checked"),
+            tr!("Not tested during a temporary session (the test writes a file)."),
         )
     } else {
         let probe = data_dir.join("selftest.probe");
@@ -543,16 +601,16 @@ pub fn run(
                 "ephemeral",
                 "Local data store",
                 s,
-                "Writable",
-                "Mori's app-data folder was written, read back and cleaned just now.",
+                tr!("Writable"),
+                tr!("Mori's app-data folder was written, read back and cleaned just now."),
             )
         } else {
             check(
                 "ephemeral",
                 "Local data store",
                 Status::Fail,
-                "Not writable",
-                "Mori couldn't write to its app-data folder; settings and records won't be saved.",
+                tr!("Not writable"),
+                tr!("Mori couldn't write to its app-data folder; settings and records won't be saved."),
             )
         }
     };
@@ -564,30 +622,30 @@ pub fn run(
             "ephemeral",
             "Temporary files",
             s,
-            "Created and removed",
-            "The self-test's scratch folder was created and fully removed.",
+            tr!("Created and removed"),
+            tr!("The self-test's scratch folder was created and fully removed."),
         ),
         Some(_) => check(
             "ephemeral",
             "Temporary files",
             Status::Fail,
-            "Left behind",
-            "The self-test's scratch folder couldn't be removed.",
+            tr!("Left behind"),
+            tr!("The self-test's scratch folder couldn't be removed."),
         ),
         None => check(
             "ephemeral",
             "Temporary files",
             Status::Fail,
-            "Not created",
-            "The system temporary directory isn't writable.",
+            tr!("Not created"),
+            tr!("The system temporary directory isn't writable."),
         ),
     });
 
     // ----------------------------------------------------------- logging
     v.push(if cfg!(debug_assertions) {
-        check("logging", "Logs", Status::Limited, "Developer build", "This is a debug build: developer diagnostics may print paths to the terminal when explicitly enabled with MORI_DEBUG_* variables.")
+        check("logging", "Logs", Status::Limited, tr!("Developer build"), tr!("This is a debug build: developer diagnostics may print paths to the terminal when explicitly enabled with MORI_DEBUG_* variables."))
     } else {
-        check("logging", "Logs", Status::Info, "None", "Release builds write no logs. After a crash, a marker with the time, thread name and source-code line (never a message, path or file name) is kept in Mori's app data.")
+        check("logging", "Logs", Status::Info, tr!("None"), tr!("Release builds write no logs. After a crash, a marker with the time, thread name and source-code line (never a message, path or file name) is kept in Mori's app data."))
     });
     v
 }

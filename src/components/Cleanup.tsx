@@ -5,7 +5,6 @@ import {
   formatSize,
   isMac,
   parentOf,
-  plural,
   previewUrl,
   typeLabel,
   type Entry,
@@ -40,27 +39,28 @@ import {
   type SavedSession,
 } from "../cleanup";
 import { click, EMPTY_SELECTION, selectAll, selectedItems, type Selection } from "../selection";
+import { fmtNum, msg, t, tn, tx } from "../i18n";
 import { Icon, type IconName } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { PreviewBody } from "./Preview";
 import { Thumb } from "./Thumb";
 
 const KINDS: { kind: CleanupKind; label: string; icon: IconName }[] = [
-  { kind: "all", label: "All", icon: "all" },
-  { kind: "photo", label: "Photos", icon: "photo" },
-  { kind: "video", label: "Videos", icon: "video" },
-  { kind: "gif", label: "GIFs", icon: "gif" },
-  { kind: "document", label: "Documents", icon: "document" },
-  { kind: "audio", label: "Audio", icon: "audio" },
-  { kind: "other", label: "Other", icon: "other" },
+  { kind: "all", label: msg("All"), icon: "all" },
+  { kind: "photo", label: msg("Photos"), icon: "photo" },
+  { kind: "video", label: msg("Videos"), icon: "video" },
+  { kind: "gif", label: msg("GIFs"), icon: "gif" },
+  { kind: "document", label: msg("Documents"), icon: "document" },
+  { kind: "audio", label: msg("Audio"), icon: "audio" },
+  { kind: "other", label: msg("Other"), icon: "other" },
 ];
 
 const ORDERS: { order: CleanupOrder; label: string }[] = [
-  { order: "browser", label: "Current sort order" },
-  { order: "oldest", label: "Oldest first" },
-  { order: "newest", label: "Newest first" },
-  { order: "largest", label: "Largest first" },
-  { order: "smallest", label: "Smallest first" },
+  { order: "browser", label: msg("Current sort order") },
+  { order: "oldest", label: msg("Oldest first") },
+  { order: "newest", label: msg("Newest first") },
+  { order: "largest", label: msg("Largest first") },
+  { order: "smallest", label: msg("Smallest first") },
 ];
 
 /** Photos preloaded ahead (worker-rendered copies only; never during Safe Inspection). */
@@ -156,8 +156,8 @@ export function QuickCleanup(p: Props) {
   // Save decisions to resume later — ids only, never in a temporary session.
   useEffect(() => {
     if (!persist || !s || !s.decisions.size || (stage !== "review" && stage !== "marked")) return;
-    const t = window.setTimeout(() => api.cleanupSave(toSaved(s, p.folder.id, optionsRef.current)).catch(() => {}), 500);
-    return () => window.clearTimeout(t);
+    const timer = window.setTimeout(() => api.cleanupSave(toSaved(s, p.folder.id, optionsRef.current)).catch(() => {}), 500);
+    return () => window.clearTimeout(timer);
   }, [persist, s?.decisions, s?.cursor, stage]);
 
   const start = async (resume: SavedSession | null) => {
@@ -191,7 +191,7 @@ export function QuickCleanup(p: Props) {
     const cur = latest.current;
     if (!cur) return;
     const r = decide(cur, d, performance.now(), { repeat });
-    if (r.refused === "protected") p.onToast("Protected (Never Modify): Mori won't move this file to the Trash.", 3000);
+    if (r.refused === "protected") p.onToast(t("Protected (Never Modify): Mori won't move this file to the Trash."), 3000);
     if (r.refused) return;
     latest.current = r.state;
     setS(r.state);
@@ -218,8 +218,8 @@ export function QuickCleanup(p: Props) {
   useEffect(() => {
     if (!reviewing || confirm || leaving) return;
     const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement;
-      if (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA") return;
+      const el = e.target as HTMLElement;
+      if (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA") return;
       const mod = isMac ? e.metaKey : e.ctrlKey;
       const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
       if (mod && k === "z" && !e.shiftKey) {
@@ -328,8 +328,8 @@ export function QuickCleanup(p: Props) {
 
   useEffect(() => {
     if (!pulse) return;
-    const t = window.setTimeout(() => setPulse(null), 420);
-    return () => window.clearTimeout(t);
+    const timer = window.setTimeout(() => setPulse(null), 420);
+    return () => window.clearTimeout(timer);
   }, [pulse]);
 
   // ------------------------------------------------------------- trash
@@ -351,36 +351,36 @@ export function QuickCleanup(p: Props) {
 
   const header = (
     <header className="cleanup-bar" data-tauri-drag-region>
-      <button className="icon-btn" onClick={close} title="Close (Esc)" aria-label="Close Quick Cleanup">
+      <button className="icon-btn" onClick={close} title={t("Close (Esc)")} aria-label={t("Close Quick Cleanup")}>
         <Icon name="close" size={16} />
       </button>
       <div className="cleanup-title" data-tauri-drag-region>
-        <div className="truncate">Quick Cleanup · {p.folder.name}</div>
+        <div className="truncate">{t("Quick Cleanup · {folder}", { folder: p.folder.name })}</div>
         <div className="sub">
           {p.status.privateInspection
-            ? "Private Inspection: read-only, decisions stay in memory"
+            ? t("Private Inspection: read-only, decisions stay in memory")
             : p.status.temporary
-              ? "Temporary session: decisions aren't saved"
-              : "Nothing moves until you confirm at the end"}
+              ? t("Temporary session: decisions aren't saved")
+              : t("Nothing moves until you confirm at the end")}
         </div>
       </div>
       {s && c && stage !== "setup" && stage !== "done" && (
         <>
-          <div className="cleanup-progress" aria-label="Progress">
+          <div className="cleanup-progress" aria-label={t("Progress")}>
             <span className="count">
-              {Math.min(s.cursor + 1, c.total).toLocaleString()} / {c.total.toLocaleString()}
+              {fmtNum(Math.min(s.cursor + 1, c.total))} / {fmtNum(c.total)}
             </span>
             <span className="bar">
               <span style={{ width: `${c.total ? ((c.kept + c.marked) / c.total) * 100 : 0}%` }} />
             </span>
           </div>
           <div className="cleanup-counts">
-            <span>Kept {c.kept.toLocaleString()}</span>
-            <span className={c.marked ? "marked" : ""}>Marked {c.marked.toLocaleString()}</span>
+            <span>{t("Kept {n}", { n: c.kept })}</span>
+            <span className={c.marked ? "marked" : ""}>{t("Marked {n}", { n: c.marked })}</span>
           </div>
           {stage === "review" && !finished(s) && (
-            <button className="btn small" onClick={() => setStage("marked")} disabled={!c.marked} title="Review the items marked for Trash (R)">
-              Review Marked <kbd>R</kbd>
+            <button className="btn small" onClick={() => setStage("marked")} disabled={!c.marked} title={t("Review the items marked for Trash (R)")}>
+              {t("Review Marked")} <kbd>R</kbd>
             </button>
           )}
         </>
@@ -394,35 +394,37 @@ export function QuickCleanup(p: Props) {
     body = (
       <div className="cleanup-setup">
         <Icon name="gallery" size={34} stroke={1.3} />
-        <h1>Quick Cleanup</h1>
+        <h1>{t("Quick Cleanup")}</h1>
         <p className="lead">
-          Go through <strong>{p.folder.name}</strong> one file at a time and decide <strong>Keep</strong> or <strong>Mark for Trash</strong>. Marking only
-          records your decision: files stay where they are until you review the marked items and confirm moving them to the Trash.
+          {tx(
+            "Go through {folder} one file at a time and decide {keep} or {mark}. Marking only records your decision: files stay where they are until you review the marked items and confirm moving them to the Trash.",
+            { folder: <strong>{p.folder.name}</strong>, keep: <strong>{t("Keep")}</strong>, mark: <strong>{t("Mark for Trash")}</strong> },
+          )}
         </p>
         {saved && (
           <div className="cleanup-resume">
             <div>
-              <strong>Unfinished cleanup</strong>
+              <strong>{t("Unfinished cleanup")}</strong>
               <span className="muted small">
                 {" "}
-                · {plural(saved.kept.length + saved.marked.length, "decision")} · {saved.marked.length.toLocaleString()} marked
+                · {tn(saved.kept.length + saved.marked.length, "{n} decision", "{n} decisions")} · {t("{n} marked", { n: saved.marked.length })}
               </span>
             </div>
             <button className="btn small" onClick={discardSaved}>
-              Discard
+              {t("Discard")}
             </button>
             <button className="btn small primary" onClick={() => start(saved)} autoFocus>
-              Resume
+              {t("Resume")}
             </button>
           </div>
         )}
         <div className="cleanup-options">
-          <label className="toggle" title="Also review files in subfolders (private folders inside stay out)">
+          <label className="toggle" title={t("Also review files in subfolders (private folders inside stay out)")}>
             <input type="checkbox" checked={options.recursive} onChange={(e) => setOptions({ ...options, recursive: e.target.checked })} />
             <span className="switch" aria-hidden />
-            Include subfolders
+            {t("Include subfolders")}
           </label>
-          <div className="segmented small" role="radiogroup" aria-label="File type">
+          <div className="segmented small" role="radiogroup" aria-label={t("File type")}>
             {KINDS.map((k) => (
               <button
                 key={k.kind}
@@ -430,40 +432,41 @@ export function QuickCleanup(p: Props) {
                 aria-checked={options.kind === k.kind}
                 className={options.kind === k.kind ? "on" : ""}
                 onClick={() => setOptions({ ...options, kind: k.kind })}
-                title={k.label}
+                title={t(k.label)}
               >
                 <Icon name={k.icon} size={13} />
-                <span className="label">{k.label}</span>
+                <span className="label">{t(k.label)}</span>
               </button>
             ))}
           </div>
           <label className="select-label">
-            Order
+            {t("Order")}
             <select value={options.order} onChange={(e) => setOptions({ ...options, order: e.target.value as CleanupOrder })}>
               {ORDERS.map((o) => (
                 <option key={o.order} value={o.order}>
-                  {o.label}
+                  {t(o.label)}
                 </option>
               ))}
             </select>
           </label>
         </div>
         <p className="muted small">
-          {preview === null ? "Counting…" : n ? `${plural(n, "file")} to review` : "No files to review with these options."}
-          {preview?.truncated && " (only the first 50,000)"}
+          {preview === null ? t("Counting…") : n ? tn(n, "{n} file to review", "{n} files to review") : t("No files to review with these options.")}
+          {preview?.truncated && <> {t("(only the first {n})", { n: 50000 })}</>}
         </p>
         {!canTrash && (
           <p className="dialog-note">
-            {p.status.privateInspection ? "Private Inspection is read-only" : "Read-only Mode is on"}: you can review and mark files, but moving them to the
-            Trash is unavailable{p.status.privateInspection ? " in this session" : " until it's turned off"}.
+            {p.status.privateInspection
+              ? t("Private Inspection is read-only: you can review and mark files, but moving them to the Trash is unavailable in this session.")
+              : t("Read-only Mode is on: you can review and mark files, but moving them to the Trash is unavailable until it's turned off.")}
           </p>
         )}
         <div className="dialog-actions center">
           <button className="btn" onClick={p.onClose}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button className={`btn ${saved ? "" : "primary"}`} disabled={!n} onClick={() => start(null)} autoFocus={!saved}>
-            {saved ? "Start Over" : "Start"} <kbd>↩</kbd>
+            {saved ? t("Start Over") : t("Start")} <kbd>↩</kbd>
           </button>
         </div>
         <Keys />
@@ -474,14 +477,14 @@ export function QuickCleanup(p: Props) {
     body = (
       <div className="cleanup-setup">
         <Icon name={result.trashed.length ? "trash" : "warning"} size={34} stroke={1.3} />
-        <h1>{result.trashed.length ? `Moved ${plural(result.trashed.length, "item")} to the Trash` : "Nothing was moved to the Trash"}</h1>
+        <h1>{result.trashed.length ? tn(result.trashed.length, "Moved {n} item to the Trash", "Moved {n} items to the Trash") : t("Nothing was moved to the Trash")}</h1>
         <p className="lead">
-          {result.trashed.length > 0 && <>{formatSize(result.bytes)} · they can be restored from the Trash. </>}
-          Kept and undecided files were left untouched.
+          {result.trashed.length > 0 && <>{t("{size} · they can be restored from the Trash.", { size: formatSize(result.bytes) })} </>}
+          {t("Kept and undecided files were left untouched.")}
         </p>
         {failed > 0 && (
           <>
-            <p className="attn">{plural(failed, "item")} couldn't be moved:</p>
+            <p className="attn">{tn(failed, "{n} item couldn't be moved:", "{n} items couldn't be moved:")}</p>
             <div className="op-list">
               {result.failed.slice(0, 200).map((f, i) => (
                 <div key={i} className="op-row blocked">
@@ -494,12 +497,12 @@ export function QuickCleanup(p: Props) {
         )}
         <div className="dialog-actions center">
           {result.trashed.length > 0 && (
-            <button className="btn" onClick={p.onUndo} title="Put the items back from the Trash">
-              Undo <kbd>{isMac ? "⌘Z" : "Ctrl+Z"}</kbd>
+            <button className="btn" onClick={p.onUndo} title={t("Put the items back from the Trash")}>
+              {t("Undo")} <kbd>{isMac ? "⌘Z" : "Ctrl+Z"}</kbd>
             </button>
           )}
           <button className="btn primary" onClick={p.onClose} autoFocus>
-            Done
+            {t("Done")}
           </button>
         </div>
       </div>
@@ -510,7 +513,7 @@ export function QuickCleanup(p: Props) {
         state={s}
         finishedAll={finished(s)}
         canTrash={canTrash}
-        readOnlyNote={p.status.privateInspection ? "Private Inspection is read-only." : "Read-only Mode is on."}
+        readOnlyNote={p.status.privateInspection ? t("Private Inspection is read-only.") : t("Read-only Mode is on.")}
         onKeep={(ids) => setS((cur) => cur && keep(cur, ids))}
         onOpen={(id) => {
           setS(
@@ -539,10 +542,10 @@ export function QuickCleanup(p: Props) {
         <div className="preview-stage cleanup-stage">
           {(d || e.guarded) && (
             <div className="cleanup-badges">
-              {d && <span className={`chip ${d === "trash" ? "danger" : ""}`}>{d === "trash" ? "Marked for Trash" : "Kept"}</span>}
+              {d && <span className={`chip ${d === "trash" ? "danger" : ""}`}>{d === "trash" ? t("Marked for Trash") : t("Kept")}</span>}
               {e.guarded && (
-                <span className="chip" title="Inside a protected folder: Mori won't change it">
-                  <Icon name="shield" size={11} /> Never Modify
+                <span className="chip" title={t("Inside a protected folder: Mori won't change it")}>
+                  <Icon name="shield" size={11} /> {t("Never Modify")}
                 </span>
               )}
             </div>
@@ -560,7 +563,7 @@ export function QuickCleanup(p: Props) {
           />
           {pulse && (
             <div className={`cleanup-pulse ${pulse.kind}`} key={pulse.n}>
-              {pulse.kind === "trash" ? "Marked for Trash" : "Kept"}
+              {pulse.kind === "trash" ? t("Marked for Trash") : t("Kept")}
             </div>
           )}
         </div>
@@ -572,27 +575,27 @@ export function QuickCleanup(p: Props) {
           <span className="truncate">{parentOf(e.path) || "/"}</span>
         </footer>
         <div className="cleanup-actions">
-          <button className="decide trash" onClick={() => act("trash")} disabled={!!e.guarded} title="Mark for Trash (← or D). Nothing is moved yet.">
-            <Icon name="left" size={15} /> Mark for Trash <kbd>D</kbd>
+          <button className="decide trash" onClick={() => act("trash")} disabled={!!e.guarded} title={t("Mark for Trash (← or D). Nothing is moved yet.")}>
+            <Icon name="left" size={15} /> {t("Mark for Trash")} <kbd>D</kbd>
           </button>
           <div className="cleanup-minor">
             <button
               className="btn small ghost"
               onClick={() => setS((cur) => cur && undo(cur))}
               disabled={!s.steps.length}
-              title={`Undo last decision (U or ${isMac ? "⌘Z" : "Ctrl+Z"})`}
+              title={t("Undo last decision (U or {key})", { key: isMac ? "⌘Z" : "Ctrl+Z" })}
             >
-              Undo <kbd>U</kbd>
+              {t("Undo")} <kbd>U</kbd>
             </button>
-            <button className="btn small ghost" onClick={() => setS((cur) => cur && go(cur, -1))} disabled={s.cursor === 0} title="Previous item (↑ or P)">
-              Back <kbd>↑</kbd>
+            <button className="btn small ghost" onClick={() => setS((cur) => cur && go(cur, -1))} disabled={s.cursor === 0} title={t("Previous item (↑ or P)")}>
+              {t("Back")} <kbd>↑</kbd>
             </button>
-            <button className="btn small ghost" onClick={() => setS((cur) => cur && go(cur, 1))} title="Next item without deciding (↓ or S)">
-              Skip <kbd>↓</kbd>
+            <button className="btn small ghost" onClick={() => setS((cur) => cur && go(cur, 1))} title={t("Next item without deciding (↓ or S)")}>
+              {t("Skip")} <kbd>↓</kbd>
             </button>
           </div>
-          <button className="decide keep" onClick={() => act("keep")} title="Keep (→ or K)">
-            Keep <kbd>K</kbd> <Icon name="right" size={15} />
+          <button className="decide keep" onClick={() => act("keep")} title={t("Keep (→ or K)")}>
+            {t("Keep")} <kbd>K</kbd> <Icon name="right" size={15} />
           </button>
         </div>
       </div>
@@ -600,20 +603,26 @@ export function QuickCleanup(p: Props) {
   }
 
   return (
-    <div className="cleanup" role="dialog" aria-label={`Quick Cleanup of ${p.folder.name}`}>
+    <div className="cleanup" role="dialog" aria-label={t("Quick Cleanup of {folder}", { folder: p.folder.name })}>
       {header}
       {body}
       {confirm && s && <ConfirmTrash ids={trashIds(s)} bytes={counts(s).markedBytes} onCancel={() => setConfirm(false)} onConfirm={trash} />}
       {leaving && (
         <ModalFrame onCancel={() => setLeaving(false)}>
-          <h2>Leave Quick Cleanup?</h2>
-          <p>This is a temporary session, so your {plural(s?.decisions.size ?? 0, "decision")} aren't saved and will be lost. No files were changed.</p>
+          <h2>{t("Leave Quick Cleanup?")}</h2>
+          <p>
+            {tn(
+              s?.decisions.size ?? 0,
+              "This is a temporary session, so your {n} decision isn't saved and will be lost. No files were changed.",
+              "This is a temporary session, so your {n} decisions aren't saved and will be lost. No files were changed.",
+            )}
+          </p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setLeaving(false)} autoFocus>
-              Stay
+              {t("Stay")}
             </button>
             <button className="btn primary" onClick={p.onClose}>
-              Leave
+              {t("Leave")}
             </button>
           </div>
         </ModalFrame>
@@ -712,13 +721,14 @@ function MarkedReview({
     <div className="cleanup-marked">
       <div className="marked-head">
         <div>
-          <h1>{finishedAll ? "All files reviewed" : "Marked for Trash"}</h1>
+          <h1>{finishedAll ? t("All files reviewed") : t("Marked for Trash")}</h1>
           <p className="muted">
-            {finishedAll && `Kept ${c.kept.toLocaleString()} · ${c.undecided ? `${c.undecided.toLocaleString()} undecided · ` : ""}`}
+            {finishedAll && `${t("Kept {n}", { n: c.kept })} · ${c.undecided ? `${t("{n} undecided", { n: c.undecided })} · ` : ""}`}
             <strong>
-              {plural(c.marked, "item")} marked · {formatSize(c.markedBytes)}
+              {tn(c.marked, "{n} item marked", "{n} items marked")} · {formatSize(c.markedBytes)}
             </strong>
-            {" · "}Nothing has been moved yet.
+            {" · "}
+            {t("Nothing has been moved yet.")}
           </p>
         </div>
         <div className="marked-actions">
@@ -726,29 +736,29 @@ function MarkedReview({
             className="btn"
             onClick={() => (onKeep(chosen.map((e) => e.id)), setSel(EMPTY_SELECTION))}
             disabled={!chosen.length}
-            title="Restore the selected items to Keep"
+            title={t("Restore the selected items to Keep")}
           >
-            Keep Selected{chosen.length ? ` (${chosen.length.toLocaleString()})` : ""}
+            {chosen.length ? t("Keep Selected ({n})", { n: chosen.length }) : t("Keep Selected")}
           </button>
           <button className="btn" onClick={() => onKeep()} disabled={!c.marked}>
-            Keep All
+            {t("Keep All")}
           </button>
           <button className="btn" onClick={onBack}>
-            {finishedAll ? "Back to Last File" : "Back to Cleanup"}
+            {finishedAll ? t("Back to Last File") : t("Back to Cleanup")}
           </button>
           <button
             className="btn primary danger-fill"
             onClick={onTrash}
             disabled={!c.marked || !canTrash}
-            title={canTrash ? "Move the marked items to the system Trash (one confirmation first)" : `${readOnlyNote} Files can't be moved to the Trash.`}
+            title={canTrash ? t("Move the marked items to the system Trash (one confirmation first)") : t("{note} Files can't be moved to the Trash.", { note: readOnlyNote })}
           >
-            Move {plural(c.marked, "Item")} to Trash
+            {tn(c.marked, "Move {n} Item to Trash", "Move {n} Items to Trash")}
           </button>
         </div>
       </div>
-      {!canTrash && <p className="dialog-note">{readOnlyNote} You can review your decisions, but nothing can be moved to the Trash right now.</p>}
+      {!canTrash && <p className="dialog-note">{t("{note} You can review your decisions, but nothing can be moved to the Trash right now.", { note: readOnlyNote })}</p>}
       {marked.length ? (
-        <div className="marked-grid" role="listbox" aria-multiselectable aria-label="Marked items">
+        <div className="marked-grid" role="listbox" aria-multiselectable aria-label={t("Marked items")}>
           {marked.map((e) => (
             <div
               key={e.id}
@@ -756,7 +766,7 @@ function MarkedReview({
               aria-selected={sel.ids.has(e.id)}
               className="marked-tile"
               data-selected={sel.ids.has(e.id) || undefined}
-              title={`${e.name} — double-click to look at it again`}
+              title={t("{name} — double-click to look at it again", { name: e.name })}
               onClick={(ev) => setSel((cur) => click(cur, order, e.id, { toggle: isMac ? ev.metaKey : ev.ctrlKey, range: ev.shiftKey }))}
               onDoubleClick={() => onOpen(e.id)}
               onMouseDown={(ev) => ev.shiftKey && ev.preventDefault()}
@@ -770,7 +780,7 @@ function MarkedReview({
           ))}
         </div>
       ) : (
-        <p className="muted marked-empty">No items are marked for Trash.</p>
+        <p className="muted marked-empty">{t("No items are marked for Trash.")}</p>
       )}
     </div>
   );
@@ -791,14 +801,16 @@ function ConfirmTrash({ ids, bytes, onCancel, onConfirm }: { ids: string[]; byte
       <div className="dialog-icon">
         <Icon name="trash" size={20} />
       </div>
-      <h2>Move {plural(ids.length, "item")} to the Trash?</h2>
+      <h2>{tn(ids.length, "Move {n} item to the Trash?", "Move {n} items to the Trash?")}</h2>
       <p>
-        {formatSize(bytes)}. They go to the system Trash and can be restored from there (or with Undo, {isMac ? "⌘Z" : "Ctrl+Z"}). Nothing is deleted
-        permanently.
+        {t("{size}. They go to the system Trash and can be restored from there (or with Undo, {key}). Nothing is deleted permanently.", {
+          size: formatSize(bytes),
+          key: isMac ? "⌘Z" : "Ctrl+Z",
+        })}
       </p>
       {blocked.length > 0 && (
         <>
-          <p className="attn">{plural(blocked.length, "item")} will stay where they are:</p>
+          <p className="attn">{tn(blocked.length, "{n} item will stay where it is:", "{n} items will stay where they are:")}</p>
           <div className="op-list">
             {blocked.slice(0, 100).map((e) => (
               <div key={e.id} className="op-row blocked">
@@ -812,10 +824,10 @@ function ConfirmTrash({ ids, bytes, onCancel, onConfirm }: { ids: string[]; byte
       {error && <p className="field-error">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={onCancel} autoFocus>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="btn primary danger-fill" onClick={onConfirm} disabled={!plan || n <= 0}>
-          Move {plural(Math.max(0, n), "Item")} to Trash
+          {tn(Math.max(0, n), "Move {n} Item to Trash", "Move {n} Items to Trash")}
         </button>
       </div>
     </ModalFrame>
@@ -824,14 +836,14 @@ function ConfirmTrash({ ids, bytes, onCancel, onConfirm }: { ids: string[]; byte
 
 function Keys() {
   const rows: [string, string][] = [
-    ["→  K", "Keep, next file"],
-    ["←  D  ⌫", "Mark for Trash, next file"],
-    [`U  ${isMac ? "⌘Z" : "Ctrl+Z"}`, "Undo last decision"],
-    ["↑  ↓", "Previous / next without deciding"],
-    ["Space", "Play / pause video"],
-    ["Z", "Zoom photo"],
-    ["R", "Review marked items"],
-    ["Esc", "Close (in normal sessions you can resume later)"],
+    ["→  K", t("Keep, next file")],
+    ["←  D  ⌫", t("Mark for Trash, next file")],
+    [`U  ${isMac ? "⌘Z" : "Ctrl+Z"}`, t("Undo last decision")],
+    ["↑  ↓", t("Previous / next without deciding")],
+    [t("Space"), t("Play / pause video")],
+    ["Z", t("Zoom photo")],
+    ["R", t("Review marked items")],
+    [t("Esc"), t("Close (in normal sessions you can resume later)")],
   ];
   return (
     <dl className="cleanup-keys">

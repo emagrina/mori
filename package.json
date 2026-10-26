@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "i18n:check": "node scripts/i18n-check.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",

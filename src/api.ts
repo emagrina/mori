@@ -1,7 +1,19 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { SavedSession } from "./cleanup";
 import { frameFraction } from "./filmstrip";
+import { currentLocale, msg, t } from "./i18n";
+
+let onFailure: () => void = () => {};
+/** Called whenever a backend call fails (a cancelled picker isn't a failure). */
+export const onCallFailure = (f: () => void) => (onFailure = f);
+
+function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  return tauriInvoke<T>(cmd, args).catch((e) => {
+    if (String(e) !== "cancelled") onFailure();
+    throw e;
+  });
+}
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
 export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
@@ -113,6 +125,8 @@ export type DiagStatus = "pass" | "limited" | "fail" | "info";
 
 export interface DiagCheck {
   section: "media" | "security" | "privacy" | "network" | "ephemeral" | "logging";
+  /** Stable identifier (the English label). */
+  id: string;
   label: string;
   status: DiagStatus;
   value: string;
@@ -367,13 +381,14 @@ export interface SanitizeOutcome {
   error: string | null;
 }
 
-export const CATEGORY_LABEL: Record<MetaCategory, string> = {
-  location: "Location",
-  person: "People & authors",
-  device: "Device",
-  software: "Software",
-  comment: "Comments & descriptions",
-  identifier: "Unique IDs",
+/** Translated when read (getters), so `CATEGORY_LABEL[c]` follows the interface language. */
+export const CATEGORY_LABEL: Readonly<Record<MetaCategory, string>> = {
+  get location() { return t("Location"); },
+  get person() { return t("People & authors"); },
+  get device() { return t("Device"); },
+  get software() { return t("Software"); },
+  get comment() { return t("Comments & descriptions"); },
+  get identifier() { return t("Unique IDs"); },
 };
 
 export interface StorageBucket {
@@ -704,9 +719,39 @@ export interface SimView {
   groups: SimGroup[];
 }
 
+/** Whether this build is in a store (see src-tauri/src/review.rs). */
+export interface ReviewInfo {
+  store: "mac" | "microsoft" | null;
+  nativePrompt: boolean;
+  version: string;
+}
+
+/** Rating-prompt counters, kept in settings.json (see src/review.ts). */
+export interface ReviewState {
+  sessions: number;
+  usageMs: number;
+  successes: number;
+  successesSinceAsk: number;
+  firstSeenAt: number | null;
+  lastAskedAt: number | null;
+  askCount: number;
+  ratedVersion: string | null;
+  lastProblemAt: number | null;
+  lastLaunch: number | null;
+}
+
 export const api = {
   init: () => invoke<InitInfo>("init"),
   updateSettings: (s: Settings) => invoke<void>("update_settings", { ...s }),
+  reviewInfo: () => invoke<ReviewInfo>("review_info"),
+  reviewState: () => invoke<ReviewState>("review_state"),
+  saveReviewState: (review: ReviewState) => invoke<void>("save_review_state", { review }),
+  requestReview: () => invoke<boolean>("request_review"),
+  openStoreReview: () => invoke<void>("open_store_review"),
+  /** The saved interface language (null: follow the system). */
+  savedLanguage: () => invoke<string | null>("saved_language"),
+  /** Sets the language of Mori's own messages; `save` also remembers the choice (null: system). */
+  setLanguage: (active: string, save?: { pref: string | null }) => invoke<void>("set_language", { active, save: save !== undefined, pref: save?.pref ?? null }),
   chooseRoot: () => invoke<Status>("choose_root"),
   rescan: () => invoke<void>("rescan"),
   clearCache: () => invoke<void>("clear_cache"),
@@ -1054,7 +1099,7 @@ export function startSimilarCaptureService(): () => void {
               "mori-codec": r.codec,
             });
           }
-          await invoke("similar_frames", r ? r.planes : new Uint8Array(0), { headers }).catch(() => {});
+          await tauriInvoke("similar_frames", r ? r.planes : new Uint8Array(0), { headers }).catch(() => {});
           return true;
         },
         done: () => {},
@@ -1183,7 +1228,7 @@ async function captureVideoThumb(e: Entry, signal: AbortSignal): Promise<boolean
     end();
   }
   if (!png || signal.aborted) return false;
-  return invoke<boolean>("store_frame", png, { headers: { "mori-id": e.id } }).catch(() => false);
+  return tauriInvoke<boolean>("store_frame", png, { headers: { "mori-id": e.id } }).catch(() => false);
 }
 
 /**
@@ -1201,7 +1246,7 @@ export async function captureFrames(id: string, count: number, explicit: boolean
     await grabSequence(mediaUrl(id, explicit), count, signal, async (k, png) => {
       const headers: Record<string, string> = { "mori-id": id, "mori-frame": String(k) };
       if (explicit) headers["mori-explicit"] = "1";
-      if (await invoke<boolean>("store_frame", png, { headers }).catch(() => false)) {
+      if (await tauriInvoke<boolean>("store_frame", png, { headers }).catch(() => false)) {
         stored++;
         onFrame(k);
       }
@@ -1391,48 +1436,70 @@ export function resetThumbs() {
 // ------------------------------------------------------------ formatting
 
 export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
+  if (bytes < 1024) return t("{size} B", { size: bytes });
+  const units = [t("{size} KB"), t("{size} MB"), t("{size} GB"), t("{size} TB")];
   let v = bytes / 1024;
   let i = 0;
   while (v >= 1024 && i < units.length - 1) {
     v /= 1024;
     i++;
   }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+  const size = new Intl.NumberFormat(currentLocale(), { maximumFractionDigits: v < 10 ? 1 : 0, minimumFractionDigits: v < 10 ? 1 : 0 }).format(v);
+  return units[i].replace("{size}", size);
 }
 
-const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-const shortDateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
-export const formatDate = (ms: number | null) => (ms ? dateFmt.format(ms) : "—");
-export const formatShortDate = (ms: number | null) => (ms ? shortDateFmt.format(ms) : "—");
+let fmtLocale = "";
+let dateFmt: Intl.DateTimeFormat;
+let shortDateFmt: Intl.DateTimeFormat;
+function dateFormats() {
+  if (fmtLocale !== currentLocale()) {
+    fmtLocale = currentLocale();
+    dateFmt = new Intl.DateTimeFormat(fmtLocale, { dateStyle: "medium", timeStyle: "short" });
+    shortDateFmt = new Intl.DateTimeFormat(fmtLocale, { dateStyle: "medium" });
+  }
+  return { dateFmt, shortDateFmt };
+}
+export const formatDate = (ms: number | null) => (ms ? dateFormats().dateFmt.format(ms) : "—");
+export const formatShortDate = (ms: number | null) => (ms ? dateFormats().shortDateFmt.format(ms) : "—");
 
-export const KIND_LABEL: Record<Kind, string> = {
-  link: "Link",
-  folder: "Folder",
-  photo: "Photo",
-  video: "Video",
-  gif: "GIF",
-  document: "Document",
-  audio: "Audio",
-  other: "File",
+/** Translated when read (getters), so `KIND_LABEL[k]` follows the interface language. */
+export const KIND_LABEL: Readonly<Record<Kind, string>> = {
+  get link() { return t("Link"); },
+  get folder() { return t("Folder"); },
+  get photo() { return t("Photo"); },
+  get video() { return t("Video"); },
+  get gif() { return t("GIF"); },
+  get document() { return t("Document"); },
+  get audio() { return t("Audio"); },
+  get other() { return t("File"); },
 };
 
 export function typeLabel(e: Entry): string {
-  if (e.kind === "folder") return "Folder";
-  if (e.kind === "link") return "Symbolic link";
-  const noun = { photo: "image", gif: "image", video: "video", audio: "audio", document: "document", other: "file" }[e.kind];
-  return e.ext ? `${e.ext.toUpperCase()} ${noun}` : KIND_LABEL[e.kind];
+  if (e.kind === "folder") return t("Folder");
+  if (e.kind === "link") return t("Symbolic link");
+  if (!e.ext) return KIND_LABEL[e.kind];
+  const ext = e.ext.toUpperCase();
+  switch (e.kind) {
+    case "photo":
+    case "gif":
+      return t("{ext} image", { ext });
+    case "video":
+      return t("{ext} video", { ext });
+    case "audio":
+      return t("{ext} audio", { ext });
+    case "document":
+      return t("{ext} document", { ext });
+    default:
+      return t("{ext} file", { ext });
+  }
 }
 
 export const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 
 export const isMac = navigator.userAgent.includes("Mac");
 
-/** Tooltip for the private-folder indicator. */
-export const PRIVATE_HINT = "Private: contents are hidden from global and recursive views.";
-
-export const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+/** Tooltip for the private-folder indicator (English; show it with `t(PRIVATE_HINT)`). */
+export const PRIVATE_HINT = msg("Private: contents are hidden from global and recursive views.");
 
 export const formatDuration = (ms: number | null) => {
   if (ms === null) return "—";

@@ -7,7 +7,6 @@ import {
   formatSize,
   isMac,
   parentOf,
-  plural,
   previewUrl,
   setPreviewOpen,
   type AnalysisDone,
@@ -23,6 +22,8 @@ import {
   type SimView,
 } from "../api";
 import { FinalReview, LocationList, ProgressBar, Reasons, Summary, ToolSwitch } from "./Analyzer";
+import { currentLocale, fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
@@ -38,17 +39,17 @@ import { Thumb } from "./Thumb";
 type Phase = "setup" | "running" | "results" | "review" | "cleaning" | "summary";
 
 const SENSITIVITY: { key: Sensitivity; label: string; text: string }[] = [
-  { key: "strict", label: "Strict", text: "Only extremely similar media." },
-  { key: "balanced", label: "Balanced", text: "Recommended." },
-  { key: "broad", label: "Broad", text: "May find edited, cropped or recompressed versions, but can produce more false positives." },
+  { key: "strict", label: msg("Strict"), text: msg("Only extremely similar media.") },
+  { key: "balanced", label: msg("Balanced"), text: msg("Recommended.") },
+  { key: "broad", label: msg("Broad"), text: msg("May find edited, cropped or recompressed versions, but can produce more false positives.") },
 ];
 
 const STAGE: Record<SimProgress["stage"], string> = {
-  collecting: "Finding photos and videos",
-  photos: "Generating visual fingerprints",
-  videos: "Sampling video frames",
-  comparing: "Comparing candidates",
-  done: "Finishing",
+  collecting: msg("Finding photos and videos"),
+  photos: msg("Generating visual fingerprints"),
+  videos: msg("Sampling video frames"),
+  comparing: msg("Comparing candidates"),
+  done: msg("Finishing"),
 };
 
 const keyOf = (m: SimMember) => m.files[0].id;
@@ -112,8 +113,8 @@ export function SimilarAnalyzer({
           refresh().then((v) => setPhase(v ? "results" : "setup"));
         } else {
           setPhase("setup");
-          if (e.payload.status === "cancelled") onToast("Analysis cancelled — nothing was changed");
-          else setError(e.payload.message ?? "The analysis failed.");
+          if (e.payload.status === "cancelled") onToast(t("Analysis cancelled — nothing was changed"));
+          else setError(e.payload.message ?? t("The analysis failed."));
         }
       }),
       listen<{ done: number; total: number }>("cleanup-progress", (e) => setCleanup(e.payload)),
@@ -163,7 +164,7 @@ export function SimilarAnalyzer({
   const keepCopy = (g: SimGroup, i: number) => update((n) => n.delete(keyOf(g.members[i])));
   const selectForTrash = (g: SimGroup, i: number) => {
     if (marks.has(keyOf(g.members[i]))) return;
-    if (marked(g) + 1 >= g.members.length) return onToast("At least one copy must be kept.", 3000);
+    if (marked(g) + 1 >= g.members.length) return onToast(t("At least one copy must be kept."), 3000);
     update((n) => n.add(keyOf(g.members[i])));
   };
   const toggle = (g: SimGroup, i: number) => (marks.has(keyOf(g.members[i])) ? keepCopy(g, i) : selectForTrash(g, i));
@@ -180,7 +181,7 @@ export function SimilarAnalyzer({
     keepAll(g);
     await api.similarDismiss(g.index, member).catch((e) => onToast(String(e)));
     await refresh();
-    onToast(member === null ? "Marked as not duplicates — Mori won't suggest these again" : "Removed from this group — Mori won't suggest this match again", 3500);
+    onToast(member === null ? t("Marked as not duplicates — Mori won't suggest these again") : t("Removed from this group — Mori won't suggest this match again"), 3500);
   };
   const autoSelect = () => {
     const next = new Set<string>();
@@ -231,7 +232,7 @@ export function SimilarAnalyzer({
     setIgnored(new Set());
     setOutcome(null);
     setPhase("setup");
-    onToast("Analysis cleared");
+    onToast(t("Analysis cleared"));
   };
 
   const runCleanup = async () => {
@@ -240,7 +241,10 @@ export function SimilarAnalyzer({
     setCancelling(false);
     setPhase("cleaning");
     try {
-      setOutcome(await api.similarCleanup(plan.items));
+      const o = await api.similarCleanup(plan.items);
+      setOutcome(o);
+      if (o.failures.length) review.problem();
+      else if (o.trashedFiles && !o.cancelled) review.success("similar");
     } catch (e) {
       setOutcome({ trashedFiles: 0, trashedBytes: 0, keptFiles: 0, groupsCleaned: 0, groupsSkipped: 0, failures: [{ path: "", reason: String(e) }], cancelled: false });
     }
@@ -251,9 +255,9 @@ export function SimilarAnalyzer({
 
   const copyPath = async (id: string) => {
     const text = await api.copyPath(id).catch(() => null);
-    if (!text) return onToast("Path unavailable");
+    if (!text) return onToast(t("Path unavailable"));
     await navigator.clipboard.writeText(text).catch(() => {});
-    onToast("Path copied");
+    onToast(t("Path copied"));
   };
 
   const openPreview = (g: SimGroup, f: SimFile) => {
@@ -295,26 +299,28 @@ export function SimilarAnalyzer({
       </header>
       <div className="page-head">
         <div className="crumbs">
-          <span className="crumb">Analyze</span>
+          <span className="crumb">{t("Analyze")}</span>
         </div>
         <div className="title-row">
           <h1 className="page-title">
-            Similar Media
-            {phase !== "setup" && phase !== "running" && view && <span className="scope-note">in {view.locations.map((l) => l.label).join(", ")}</span>}
+            {t("Similar Media")}
+            {phase !== "setup" && phase !== "running" && view && (
+              <span className="scope-note">{t("in {places}", { places: view.locations.map((l) => l.label).join(", ") })}</span>
+            )}
           </h1>
           {(phase === "results" || phase === "summary") && view && (
             <>
-              <button className="btn" onClick={clear} title="Forget these results (they are only kept in memory)">
-                Clear Analysis
+              <button className="btn" onClick={clear} title={t("Forget these results (they are only kept in memory)")}>
+                {t("Clear Analysis")}
               </button>
               <button className="btn" onClick={() => setPhase("setup")}>
-                New Analysis
+                {t("New Analysis")}
               </button>
             </>
           )}
           {phase === "results" && live.length > 0 && (
-            <button className="btn primary" onClick={autoSelect} title="Keep the suggested copy in every group (except ignored ones) and review the rest">
-              Auto-select
+            <button className="btn primary" onClick={autoSelect} title={t("Keep the suggested copy in every group (except ignored ones) and review the rest")}>
+              {t("Auto-select")}
             </button>
           )}
         </div>
@@ -325,12 +331,13 @@ export function SimilarAnalyzer({
           <div className="setup">
             <ToolSwitch current="similar" onSwitch={onSwitch} />
             <p className="lead">
-              Finds photos and videos that look like the same picture or clip even though their files differ — another format, size, compression or
-              metadata. These are <strong>estimates</strong>: review every group before cleaning. For files that are identical byte for byte, use Exact
-              Duplicates.
+              {tx(
+                "Finds photos and videos that look like the same picture or clip even though their files differ — another format, size, compression or metadata. These are {estimates}: review every group before cleaning. For files that are identical byte for byte, use Exact Duplicates.",
+                { estimates: <strong>{t("estimates")}</strong> },
+              )}
             </p>
             <section>
-              <h3>Where to look</h3>
+              <h3>{t("Where to look")}</h3>
               <LocationList
                 locations={locations}
                 chosen={chosen}
@@ -344,61 +351,61 @@ export function SimilarAnalyzer({
               />
             </section>
             <section>
-              <h3>Media</h3>
+              <h3>{t("Media")}</h3>
               <div className="chips">
                 <button className={`chip ${photos ? "on" : ""}`} onClick={() => setPhotos((v) => !v)} aria-pressed={photos}>
-                  <Icon name="photo" size={14} /> Photos
+                  <Icon name="photo" size={14} /> {t("Photos")}
                 </button>
                 <button className={`chip ${videos ? "on" : ""}`} onClick={() => setVideos((v) => !v)} aria-pressed={videos}>
-                  <Icon name="video" size={14} /> Videos
+                  <Icon name="video" size={14} /> {t("Videos")}
                 </button>
               </div>
               <label className="toggle">
                 <input type="checkbox" checked={recursive} onChange={(e) => setRecursive(e.target.checked)} />
                 <span className="switch" aria-hidden />
-                Include subfolders
+                {t("Include subfolders")}
               </label>
             </section>
             <section>
-              <h3>Similarity</h3>
-              <div className="segmented sensitivity" role="radiogroup" aria-label="Similarity">
+              <h3>{t("Similarity")}</h3>
+              <div className="segmented sensitivity" role="radiogroup" aria-label={t("Similarity")}>
                 {SENSITIVITY.map((s) => (
                   <button key={s.key} className={sensitivity === s.key ? "on" : ""} onClick={() => setSensitivity(s.key)} role="radio" aria-checked={sensitivity === s.key}>
-                    {s.label}
+                    {t(s.label)}
                   </button>
                 ))}
               </div>
-              <p className="hint-line">{SENSITIVITY.find((s) => s.key === sensitivity)!.text}</p>
+              <p className="hint-line">{t(SENSITIVITY.find((s) => s.key === sensitivity)!.text)}</p>
             </section>
             {error && <p className="field-error">{error}</p>}
             <div className="setup-actions">
               {view && (
                 <button className="btn" onClick={() => setPhase("results")}>
-                  Back to Results
+                  {t("Back to Results")}
                 </button>
               )}
               <button className="btn primary large" disabled={!locations.some((l) => chosen.has(l.key)) || (!photos && !videos)} onClick={start}>
-                Analyze
+                {t("Analyze")}
               </button>
             </div>
             <p className="fineprint">
-              Everything happens on this computer: photos are decoded in Mori's sandboxed worker and videos are sampled at 12 points by the system video
-              engine, then reduced to small grayscale fingerprints. Fingerprints are cached locally (removed by Clear Cache); nothing is uploaded.
-              Private folders inside the chosen locations are skipped; choose a private folder directly to analyze it.
+              {t(
+                "Everything happens on this computer: photos are decoded in Mori's sandboxed worker and videos are sampled at 12 points by the system video engine, then reduced to small grayscale fingerprints. Fingerprints are cached locally (removed by Clear Cache); nothing is uploaded. Private folders inside the chosen locations are skipped; choose a private folder directly to analyze it.",
+              )}
               {dismissedCount > 0 && (
                 <>
                   {" "}
-                  {plural(dismissedCount, "match", "matches")} you marked as not duplicates won't be suggested again.{" "}
+                  {tn(dismissedCount, "{n} match you marked as not duplicates won't be suggested again.", "{n} matches you marked as not duplicates won't be suggested again.")}{" "}
                   <button
                     className="link"
                     onClick={() =>
                       api.similarForgetDecisions().then(() => {
                         setDismissedCount(0);
-                        onToast("Not-duplicate decisions forgotten");
+                        onToast(t("Not-duplicate decisions forgotten"));
                       })
                     }
                   >
-                    Forget these decisions
+                    {t("Forget these decisions")}
                   </button>
                 </>
               )}
@@ -409,7 +416,7 @@ export function SimilarAnalyzer({
         {phase === "running" && (
           <div className="analyzer-center">
             <div className="progress-card">
-              <h2>{progress ? STAGE[progress.stage] : "Starting"}…</h2>
+              <h2>{progress ? t(STAGE[progress.stage]) : t("Starting")}…</h2>
               <ProgressBar
                 value={
                   !progress
@@ -426,20 +433,20 @@ export function SimilarAnalyzer({
               />
               <dl className="facts">
                 <div>
-                  <dt>Photos</dt>
-                  <dd>{progress && progress.stage !== "collecting" ? `${progress.photosDone.toLocaleString()} of ${progress.photosTotal.toLocaleString()}` : "—"}</dd>
+                  <dt>{t("Photos")}</dt>
+                  <dd>{progress && progress.stage !== "collecting" ? t("{done} of {total}", { done: progress.photosDone, total: progress.photosTotal }) : "—"}</dd>
                 </div>
                 <div>
-                  <dt>Videos</dt>
-                  <dd>{progress && progress.stage !== "collecting" ? `${progress.videosDone.toLocaleString()} of ${progress.videosTotal.toLocaleString()}` : "—"}</dd>
+                  <dt>{t("Videos")}</dt>
+                  <dd>{progress && progress.stage !== "collecting" ? t("{done} of {total}", { done: progress.videosDone, total: progress.videosTotal }) : "—"}</dd>
                 </div>
                 <div>
-                  <dt>Comparing</dt>
-                  <dd>{progress?.stage === "comparing" ? `${Math.round((100 * progress.compareDone) / Math.max(1, progress.compareTotal))}%` : "—"}</dd>
+                  <dt>{t("Comparing")}</dt>
+                  <dd>{progress?.stage === "comparing" ? t("{pct}%", { pct: Math.round((100 * progress.compareDone) / Math.max(1, progress.compareTotal)) }) : "—"}</dd>
                 </div>
                 <div>
-                  <dt>Similar groups</dt>
-                  <dd>{progress?.stage === "done" ? progress.groups.toLocaleString() : "—"}</dd>
+                  <dt>{t("Similar groups")}</dt>
+                  <dd>{progress?.stage === "done" ? fmtNum(progress.groups) : "—"}</dd>
                 </div>
               </dl>
               <div className="dialog-actions">
@@ -451,7 +458,7 @@ export function SimilarAnalyzer({
                     api.similarCancel();
                   }}
                 >
-                  {cancelling ? "Cancelling…" : "Cancel"}
+                  {cancelling ? t("Cancelling…") : t("Cancel")}
                 </button>
               </div>
             </div>
@@ -463,25 +470,25 @@ export function SimilarAnalyzer({
             <div className="dup-summary">
               {groups.length ? (
                 <>
-                  <strong>{plural(groups.length, "similar group")}</strong>
-                  <span>{formatSize(recoverable)} potentially recoverable</span>
-                  {ignored.size > 0 && <span>{plural(ignored.size, "group")} ignored</span>}
+                  <strong>{tn(groups.length, "{n} similar group", "{n} similar groups")}</strong>
+                  <span>{t("{size} potentially recoverable", { size: formatSize(recoverable) })}</span>
+                  {ignored.size > 0 && <span>{tn(ignored.size, "{n} group ignored", "{n} groups ignored")}</span>}
                 </>
               ) : (
-                <strong>No similar media found</strong>
+                <strong>{t("No similar media found")}</strong>
               )}
               {st && (
                 <span className="muted">
-                  {plural(st.photos, "photo")} and {plural(st.videos, "video")} analyzed
-                  {st.unanalyzable > 0 && ` · ${plural(st.unanalyzable, "file")} could not be safely analyzed`}
-                  {st.dismissed > 0 && ` · ${plural(st.dismissed, "match", "matches")} hidden (not duplicates)`}
+                  {t("{photos} and {videos} analyzed", { photos: tn(st.photos, "{n} photo", "{n} photos"), videos: tn(st.videos, "{n} video", "{n} videos") })}
+                  {st.unanalyzable > 0 && ` · ${tn(st.unanalyzable, "{n} file could not be safely analyzed", "{n} files could not be safely analyzed")}`}
+                  {st.dismissed > 0 && ` · ${tn(st.dismissed, "{n} match hidden (not duplicates)", "{n} matches hidden (not duplicates)")}`}
                 </span>
               )}
             </div>
             {groups.length === 0 ? (
               <div className="empty">
                 <Icon name="check" size={34} stroke={1.3} />
-                <p>Mori found no photos or videos that look like copies of each other here.</p>
+                <p>{t("Mori found no photos or videos that look like copies of each other here.")}</p>
               </div>
             ) : (
               <div className="dup-list">
@@ -489,7 +496,7 @@ export function SimilarAnalyzer({
                   <Fragment key={groupKey(g)}>
                     {(i === 0 || list[i - 1].video !== g.video) && (
                       <h3 className="list-heading">
-                        {g.video ? `Similar videos · ${videoGroups.length}` : `Similar photos · ${photoGroups.length}`}
+                        {g.video ? t("Similar videos · {count}", { count: videoGroups.length }) : t("Similar photos · {count}", { count: photoGroups.length })}
                       </h3>
                     )}
                     {card(g)}
@@ -497,7 +504,7 @@ export function SimilarAnalyzer({
                 ))}
                 {shown < groups.length && (
                   <button className="btn more" onClick={() => setShown((n) => n + PAGE)}>
-                    Show more ({(groups.length - shown).toLocaleString()} groups left)
+                    {tn(groups.length - shown, "Show more ({n} group left)", "Show more ({n} groups left)")}
                   </button>
                 )}
               </div>
@@ -505,14 +512,17 @@ export function SimilarAnalyzer({
             {plan.items.length > 0 && (
               <div className="selection-bar">
                 <span>
-                  <strong>{plural(plan.trash.length, "file")}</strong> selected for Trash · {formatSize(plan.bytes)}
+                  {tx(tn(plan.trash.length, "{files} selected for Trash · {size}", "{files} selected for Trash · {size}"), {
+                    files: <strong>{tn(plan.trash.length, "{n} file", "{n} files")}</strong>,
+                    size: formatSize(plan.bytes),
+                  })}
                 </span>
                 <div className="spacer" />
                 <button className="btn" onClick={() => setMarks(new Set())}>
-                  Keep All
+                  {t("Keep All")}
                 </button>
                 <button className="btn primary" onClick={() => setPhase("review")}>
-                  Review…
+                  {t("Review…")}
                 </button>
               </div>
             )}
@@ -522,10 +532,10 @@ export function SimilarAnalyzer({
         {phase === "cleaning" && cleanup && (
           <div className="analyzer-center">
             <div className="progress-card">
-              <h2>Moving selected files to Trash…</h2>
+              <h2>{t("Moving selected files to Trash…")}</h2>
               <ProgressBar value={cleanup.total ? cleanup.done / cleanup.total : 0} />
               <p className="muted">
-                {cleanup.done.toLocaleString()} of {plural(cleanup.total, "file")} · each kept copy is re-checked first
+                {tn(cleanup.total, "{done} of {n} file · each kept copy is re-checked first", "{done} of {n} files · each kept copy is re-checked first", { done: cleanup.done })}
               </p>
               <div className="dialog-actions">
                 <button
@@ -536,7 +546,7 @@ export function SimilarAnalyzer({
                     api.analysisCleanupCancel();
                   }}
                 >
-                  {cancelling ? "Stopping…" : "Stop"}
+                  {cancelling ? t("Stopping…") : t("Stop")}
                 </button>
               </div>
             </div>
@@ -548,8 +558,8 @@ export function SimilarAnalyzer({
 
       {phase === "review" && (
         <FinalReview
-          title="Similar media cleanup"
-          confirmLabel="Move Selected Files to Trash"
+          title={t("Similar media cleanup")}
+          confirmLabel={t("Move Selected Files to Trash")}
           plan={plan}
           reviewed={groups.length}
           ignored={ignored.size}
@@ -565,26 +575,26 @@ export function SimilarAnalyzer({
       {menu && (
         <div className="menu" style={{ left: Math.min(menu.x, window.innerWidth - 230), top: Math.min(menu.y, window.innerHeight - 250) }} onContextMenu={(e) => e.preventDefault()}>
           <button onClick={() => openPreview(menu.group, menu.group.members[menu.member].files[0])}>
-            <Icon name="gallery" size={14} /> Preview
+            <Icon name="gallery" size={14} /> {t("Preview")}
           </button>
-          <button onClick={() => api.revealFile(menu.group.members[menu.member].files[0].id).catch(() => onToast("File unavailable"))}>
-            <Icon name="reveal" size={14} /> {isMac ? "Show in Finder" : "Show in Folder"}
+          <button onClick={() => api.revealFile(menu.group.members[menu.member].files[0].id).catch(() => onToast(t("File unavailable")))}>
+            <Icon name="reveal" size={14} /> {isMac ? t("Show in Finder") : t("Show in Folder")}
           </button>
           <button onClick={() => copyPath(menu.group.members[menu.member].files[0].id)}>
-            <Icon name="copy" size={14} /> Copy Path
+            <Icon name="copy" size={14} /> {t("Copy Path")}
           </button>
           <div className="sep" />
           <button onClick={() => keepCopy(menu.group, menu.member)}>
-            <Icon name="keep" size={14} /> Keep This Copy
+            <Icon name="keep" size={14} /> {t("Keep This Copy")}
           </button>
           <button className="danger" onClick={() => selectForTrash(menu.group, menu.member)}>
-            <Icon name="trash" size={14} /> Select for Trash
+            <Icon name="trash" size={14} /> {t("Select for Trash")}
           </button>
           {menu.member > 0 && (
             <>
               <div className="sep" />
               <button onClick={() => notDuplicates(menu.group, menu.member)}>
-                <Icon name="close" size={14} /> Not a Match
+                <Icon name="close" size={14} /> {t("Not a Match")}
               </button>
             </>
           )}
@@ -644,10 +654,10 @@ function SimGroupCard({
         <header>
           <div className="dup-title">
             <div className="truncate">{g.members[0].files[0].name}</div>
-            <div className="muted">Ignored — not part of any cleanup</div>
+            <div className="muted">{t("Ignored — not part of any cleanup")}</div>
           </div>
           <button className="btn small" onClick={() => onIgnore(false)}>
-            Undo
+            {t("Undo")}
           </button>
         </header>
       </section>
@@ -658,44 +668,52 @@ function SimGroupCard({
       <header>
         <div className="pair-thumbs">
           {g.members.slice(0, 2).map((m) => (
-            <button key={keyOf(m)} className="dup-thumb" onClick={() => onPreview(m.files[0])} title="Preview">
+            <button key={keyOf(m)} className="dup-thumb" onClick={() => onPreview(m.files[0])} title={t("Preview")}>
               <Thumb entry={simEntry(m.files[0])} fit="cover" iconSize={22} />
             </button>
           ))}
         </div>
         <div className="dup-title">
           <div className="truncate">
-            {allExact ? "Identical content (verified by hash)" : `${g.similarity}% estimated visual similarity`}
+            {allExact ? t("Identical content (verified by hash)") : t("{pct}% estimated visual similarity", { pct: g.similarity })}
           </div>
           <div className="muted">
-            {allExact ? <span className="tag">Exact duplicate</span> : <span className="tag" title="Looks alike; the files are not byte-identical. Use Compare Integrity for an exact SHA-256 check.">Visually similar</span>}
-            {g.members.some((m) => m.files.length > 1) && <span className="tag">Live Photo</span>}
-            {g.burst && (
-              <span className="tag" title="Taken in quick succession by the same camera (from capture times)">
-                Burst · {g.burst.frames} frames in {(g.burst.spanMs / 1000).toFixed(1)} s
+            {allExact ? (
+              <span className="tag">{t("Exact duplicate")}</span>
+            ) : (
+              <span className="tag" title={t("Looks alike; the files are not byte-identical. Use Compare Integrity for an exact SHA-256 check.")}>
+                {t("Visually similar")}
               </span>
             )}
-            {plural(g.members.length, "copy", "copies")}
+            {g.members.some((m) => m.files.length > 1) && <span className="tag">{t("Live Photo")}</span>}
+            {g.burst && (
+              <span className="tag" title={t("Taken in quick succession by the same camera (from capture times)")}>
+                {tn(g.burst.frames, "Burst · {n} frame in {secs} s", "Burst · {n} frames in {secs} s", {
+                  secs: (g.burst.spanMs / 1000).toLocaleString(currentLocale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+                })}
+              </span>
+            )}
+            {tn(g.members.length, "{n} copy", "{n} copies")}
           </div>
         </div>
         <div className="dup-saving">
           <span>{formatSize(trashCount ? g.members.filter((m) => marks.has(keyOf(m))).reduce((n, m) => n + m.files.reduce((k, f) => k + f.size, 0), 0) : g.recoverable)}</span>
-          <span className="muted">{trashCount ? "selected" : "potential saving"}</span>
+          <span className="muted">{trashCount ? t("selected") : t("potential saving")}</span>
         </div>
         <div className="group-actions">
           {!g.video && g.members.length > 1 && (
-            <button className="btn small" onClick={() => onCompare(1)} title="Compare side by side">
-              Compare
+            <button className="btn small" onClick={() => onCompare(1)} title={t("Compare side by side")}>
+              {t("Compare")}
             </button>
           )}
           <button className="btn small" onClick={onKeepAll} disabled={!trashCount}>
-            Keep All
+            {t("Keep All")}
           </button>
-          <button className="btn small" onClick={() => onIgnore(true)} title="Set this group aside for now; it won't be cleaned">
-            Ignore
+          <button className="btn small" onClick={() => onIgnore(true)} title={t("Set this group aside for now; it won't be cleaned")}>
+            {t("Ignore")}
           </button>
-          <button className="btn small" onClick={onNotDuplicates} title="These are different photos or videos. Mori will remember and not suggest them again.">
-            Not Duplicates
+          <button className="btn small" onClick={onNotDuplicates} title={t("These are different photos or videos. Mori will remember and not suggest them again.")}>
+            {t("Not Duplicates")}
           </button>
         </div>
       </header>
@@ -706,7 +724,7 @@ function SimGroupCard({
           const f = m.files[0];
           return (
             <div key={keyOf(m)} className={`dup-row sim ${trash ? "trash" : ""}`} onContextMenu={(ev) => onMenu(ev, i)}>
-              <button className="mini-thumb" onClick={() => onPreview(f)} title="Preview">
+              <button className="mini-thumb" onClick={() => onPreview(f)} title={t("Preview")}>
                 <Thumb entry={simEntry(f)} fit="cover" iconSize={16} />
               </button>
               <div className="dup-info">
@@ -715,8 +733,14 @@ function SimGroupCard({
                     {m.files[0].name}
                     {m.files.length > 1 && ` + ${m.files[1].ext.toUpperCase()}`}
                   </span>
-                  {i === 0 && <span className="tag suggested">★ Suggested original</span>}
-                  {i > 0 && (m.exact ? <span className="tag" title="Byte-for-byte identical, confirmed by a full content hash">Identical bytes (verified)</span> : <span className="tag">{m.similarity}% similar</span>)}
+                  {i === 0 && <span className="tag suggested">{t("★ Suggested original")}</span>}
+                  {i > 0 && (m.exact ? (
+                      <span className="tag" title={t("Byte-for-byte identical, confirmed by a full content hash")}>
+                        {t("Identical bytes (verified)")}
+                      </span>
+                    ) : (
+                      <span className="tag">{t("{pct}% similar", { pct: m.similarity })}</span>
+                    ))}
                 </div>
                 <div className="truncate muted" title={`${f.location}/${f.path}`}>
                   {[f.location, ...parentOf(f.path).split("/").filter(Boolean)].join(" / ")}
@@ -728,15 +752,15 @@ function SimGroupCard({
                 <span>{g.video ? [f.container, f.codec].filter(Boolean).join(" · ") || f.ext.toUpperCase() : formatSize(f.size)}</span>
                 <span>{g.video ? formatSize(f.size) : formatShortDate(f.created ?? f.modified)}</span>
               </div>
-              <div className="dup-drive muted" title="Storage location">
+              <div className="dup-drive muted" title={t("Storage location")}>
                 <Icon name="drive" size={13} /> <span className="truncate">{f.drive}</span>
               </div>
-              <button className={`state-pill ${trash ? "trash" : "keep"}`} onClick={() => onToggle(i)} title={trash ? "Selected for Trash — click to keep" : "Kept — click to select for Trash"}>
+              <button className={`state-pill ${trash ? "trash" : "keep"}`} onClick={() => onToggle(i)} title={trash ? t("Selected for Trash — click to keep") : t("Kept — click to select for Trash")}>
                 <Icon name={trash ? "trash" : "keep"} size={12} />
-                {trash ? "Trash" : "Keep"}
+                {trash ? t("Trash") : t("Keep")}
               </button>
-              <button className="btn small" onClick={() => onKeepOnly(i)} title="Keep this copy and select the others for Trash">
-                Keep This One
+              <button className="btn small" onClick={() => onKeepOnly(i)} title={t("Keep this copy and select the others for Trash")}>
+                {t("Keep This One")}
               </button>
             </div>
           );
@@ -778,11 +802,11 @@ function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number;
   const caption = (f: SimFile, k: number) => (
     <figcaption key={f.id}>
       <div className="truncate">
-        {k === 0 ? <span className="tag suggested">★ A · Suggested</span> : <span className="tag">B</span>} {f.name}
+        {k === 0 ? <span className="tag suggested">{t("★ A · Suggested")}</span> : <span className="tag">B</span>} {f.name}
       </div>
       <div className="muted">
         {resolution(f)} · {f.ext.toUpperCase()} · {formatSize(f.size)} · {formatShortDate(f.created ?? f.modified)}
-        {f.exif ? " · camera metadata" : ""}
+        {f.exif ? ` · ${t("camera metadata")}` : ""}
       </div>
       <div className="muted truncate">
         {f.location} / {f.path}
@@ -792,29 +816,29 @@ function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number;
   return (
     <ModalFrame onCancel={onClose} wide>
       <div className="compare-head">
-        <h2>Compare</h2>
-        <div className="segmented small" role="tablist" aria-label="Mode">
+        <h2>{t("Compare")}</h2>
+        <div className="segmented small" role="tablist" aria-label={t("Mode")}>
           {(
             [
               ["side", "A | B"],
-              ["slider", "Slider"],
-              ["diff", "Difference"],
+              ["slider", msg("Slider")],
+              ["diff", msg("Difference")],
             ] as const
           ).map(([m, label]) => (
             <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)} role="tab" aria-selected={mode === m}>
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
-        <div className="segmented small" role="group" aria-label="Zoom">
+        <div className="segmented small" role="group" aria-label={t("Zoom")}>
           {[1, 2, 4].map((z) => (
             <button key={z} className={zoom === z ? "on" : ""} onClick={() => setZ(z)}>
-              {z === 1 ? "Fit" : `${z}×`}
+              {z === 1 ? t("Fit") : `${z}×`}
             </button>
           ))}
         </div>
         {group.members.length > 2 && (
-          <select className="compare-pick" value={b} onChange={(e) => onPick(Number(e.target.value))} aria-label="Compare with">
+          <select className="compare-pick" value={b} onChange={(e) => onPick(Number(e.target.value))} aria-label={t("Compare with")}>
             {group.members.map((m, i) =>
               i === a ? null : (
                 <option key={i} value={i}>
@@ -824,7 +848,7 @@ function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number;
             )}
           </select>
         )}
-        <button className="icon-btn" onClick={onClose} aria-label="Close">
+        <button className="icon-btn" onClick={onClose} aria-label={t("Close")}>
           <Icon name="close" size={14} />
         </button>
       </div>
@@ -853,7 +877,7 @@ function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number;
               <span className="slider-label left">A</span>
               <span className="slider-label right">B</span>
             </div>
-            <input className="slider-handle" type="range" min={0} max={100} value={split} onChange={(e) => setSplit(Number(e.target.value))} aria-label="Slider position" />
+            <input className="slider-handle" type="range" min={0} max={100} value={split} onChange={(e) => setSplit(Number(e.target.value))} aria-label={t("Slider position")} />
           </div>
           <div className="compare-captions">{files.map(caption)}</div>
         </>
@@ -867,8 +891,10 @@ function Compare({ group, a, b, onPick, onClose }: { group: SimGroup; a: number;
         </>
       )}
       <p className="muted compare-note">
-        {group.members[b].exact ? "Identical bytes, verified by hash." : `${group.members[b].similarity}% estimated similarity — an estimate, not a guarantee.`}
-        {mode === "diff" && " Bright areas differ; black is identical (after scaling both to the same size)."}
+        {group.members[b].exact
+          ? t("Identical bytes, verified by hash.")
+          : t("{pct}% estimated similarity — an estimate, not a guarantee.", { pct: group.members[b].similarity })}
+        {mode === "diff" && ` ${t("Bright areas differ; black is identical (after scaling both to the same size).")}`}
       </p>
     </ModalFrame>
   );
@@ -932,8 +958,8 @@ function DiffView({ a, b, style }: { a: string; b: string; style: React.CSSPrope
     <div className="compare-stage">
       <canvas ref={canvas} style={{ ...style, visibility: typeof state === "object" ? "visible" : "hidden" }} />
       {state === "loading" && <div className="spinner" />}
-      {state === "failed" && <p className="muted">The difference couldn't be computed for these previews.</p>}
-      {typeof state === "object" && <span className="diff-stat">{(state.changed * 100).toFixed(1)}% of pixels differ noticeably</span>}
+      {state === "failed" && <p className="muted">{t("The difference couldn't be computed for these previews.")}</p>}
+      {typeof state === "object" && <span className="diff-stat">{t("{pct}% of pixels differ noticeably", { pct: (state.changed * 100).toLocaleString(currentLocale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 }) })}</span>}
     </div>
   );
 }

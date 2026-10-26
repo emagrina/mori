@@ -46,19 +46,19 @@ pub fn sha256(file: &mut File, len: u64, cancel: &AtomicBool, progress: &AtomicU
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return Err("the file couldn't be read".into()),
+            Err(_) => return Err(tr!("the file couldn't be read")),
         };
         h.update(&buf[..n]);
         total += n as u64;
         progress.fetch_add(n as u64, Ordering::Relaxed);
         if total > len {
-            return Err("the file changed while it was read".into());
+            return Err(tr!("the file changed while it was read"));
         }
     }
     // Don't keep file contents around longer than needed.
     buf.fill(0);
     if total != len {
-        return Err("the file changed while it was read".into());
+        return Err(tr!("the file changed while it was read"));
     }
     Ok(hex(&h.finalize()))
 }
@@ -289,12 +289,12 @@ impl Store {
     }
 
     pub fn save(&self, s: &Snapshot) -> Result<(), String> {
-        let f = self.file(&s.id).ok_or("invalid id")?;
-        fs::create_dir_all(&self.dir).map_err(|_| "Could not save the snapshot.")?;
+        let f = self.file(&s.id).ok_or_else(|| tr!("invalid id"))?;
+        fs::create_dir_all(&self.dir).map_err(|_| tr!("Could not save the snapshot."))?;
         let tmp = f.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_vec(s).map_err(|_| "Could not save the snapshot.")?)
-            .map_err(|_| "Could not save the snapshot.")?;
-        fs::rename(tmp, f).map_err(|_| "Could not save the snapshot.".to_string())
+        fs::write(&tmp, serde_json::to_vec(s).map_err(|_| tr!("Could not save the snapshot."))?)
+            .map_err(|_| tr!("Could not save the snapshot."))?;
+        fs::rename(tmp, f).map_err(|_| tr!("Could not save the snapshot."))
     }
 
     pub fn load(&self, id: &str) -> Option<Snapshot> {
@@ -316,8 +316,8 @@ impl Store {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        let f = self.file(id).ok_or("invalid id")?;
-        fs::remove_file(f).map_err(|_| "That snapshot no longer exists.".to_string())
+        let f = self.file(id).ok_or_else(|| tr!("invalid id"))?;
+        fs::remove_file(f).map_err(|_| tr!("That snapshot no longer exists."))
     }
 }
 

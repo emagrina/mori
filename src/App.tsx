@@ -3,7 +3,6 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   api,
   isMac,
-  plural,
   PRIVATE_HINT,
   resetThumbs,
   setPreviewOpen,
@@ -45,6 +44,9 @@ import { CommandPalette, ShortcutsHelp, type Command } from "./components/Comman
 import { StorageView } from "./components/StorageView";
 import { Preview } from "./components/Preview";
 import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
+import { LanguageDialog } from "./components/Language";
+import { currentLocale, fmtNum, msg, t, tn, tx } from "./i18n";
+import { initReview, review } from "./review";
 
 interface Location {
   scope: Scope;
@@ -52,44 +54,48 @@ interface Location {
 }
 
 const FILTERS: { kind: KindFilter; label: string; icon: IconName }[] = [
-  { kind: "all", label: "All", icon: "all" },
-  { kind: "photo", label: "Photos", icon: "photo" },
-  { kind: "video", label: "Videos", icon: "video" },
-  { kind: "gif", label: "GIFs", icon: "gif" },
-  { kind: "document", label: "Documents", icon: "document" },
-  { kind: "audio", label: "Audio", icon: "audio" },
-  { kind: "other", label: "Other", icon: "other" },
+  { kind: "all", label: msg("All"), icon: "all" },
+  { kind: "photo", label: msg("Photos"), icon: "photo" },
+  { kind: "video", label: msg("Videos"), icon: "video" },
+  { kind: "gif", label: msg("GIFs"), icon: "gif" },
+  { kind: "document", label: msg("Documents"), icon: "document" },
+  { kind: "audio", label: msg("Audio"), icon: "audio" },
+  { kind: "other", label: msg("Other"), icon: "other" },
 ];
 
 /** Guessed from names and the macOS screen-capture attribute; correctable per file. */
 const CAPTURE_FILTERS: { kind: KindFilter; label: string; icon: IconName }[] = [
-  { kind: "screenshot", label: "Screenshots", icon: "screenshot" },
-  { kind: "recording", label: "Screen Recordings", icon: "recording" },
+  { kind: "screenshot", label: msg("Screenshots"), icon: "screenshot" },
+  { kind: "recording", label: msg("Screen Recordings"), icon: "recording" },
 ];
 
 const filterIcon = (k: KindFilter) => [...FILTERS, ...CAPTURE_FILTERS].find((f) => f.kind === k)?.icon ?? "all";
 
+/** Translated title of a library view (tag names are the user's own). */
 const viewTitle = (k: ViewKind, tags: TagInfo[]) =>
-  k === "favorites" ? "Favorites" : k.startsWith("tag:") ? tags.find((t) => `tag:${t.id}` === k)?.name ?? "Tag" : LIBRARY_TITLE[k as KindFilter];
+  k === "favorites" ? t("Favorites") : k.startsWith("tag:") ? tags.find((x) => `tag:${x.id}` === k)?.name ?? t("Tag") : t(LIBRARY_TITLE[k as KindFilter]);
+
+/** A view title inside a sentence: lower case, except where nouns keep their capital. */
+const inSentence = (title: string) => (currentLocale() === "de" ? title : title.toLocaleLowerCase(currentLocale()));
 
 const LIBRARY_TITLE: Record<KindFilter, string> = {
-  screenshot: "Screenshots",
-  recording: "Screen Recordings",
-  all: "All Files",
-  photo: "Photos",
-  video: "Videos",
-  gif: "GIFs",
-  document: "Documents",
-  audio: "Audio",
-  other: "Other Files",
+  screenshot: msg("Screenshots"),
+  recording: msg("Screen Recordings"),
+  all: msg("All Files"),
+  photo: msg("Photos"),
+  video: msg("Videos"),
+  gif: msg("GIFs"),
+  document: msg("Documents"),
+  audio: msg("Audio"),
+  other: msg("Other Files"),
 };
 
 const SORTS: { key: SortKey; label: string }[] = [
-  { key: "name", label: "Name" },
-  { key: "modified", label: "Date Modified" },
-  { key: "created", label: "Date Created" },
-  { key: "size", label: "Size" },
-  { key: "type", label: "Type" },
+  { key: "name", label: msg("Name") },
+  { key: "modified", label: msg("Date Modified") },
+  { key: "created", label: msg("Date Created") },
+  { key: "size", label: msg("Size") },
+  { key: "type", label: msg("Type") },
 ];
 
 type Dialog =
@@ -109,7 +115,8 @@ type Dialog =
   | { kind: "compare"; a: Entry; b: Entry }
   | { kind: "integrity" }
   | { kind: "diagnostics" }
-  | { kind: "privacy" };
+  | { kind: "privacy" }
+  | { kind: "language" };
 
 /** Loaded when first opened. */
 const QuickCleanup = lazy(() => import("./components/Cleanup").then((m) => ({ default: m.QuickCleanup })));
@@ -171,10 +178,17 @@ export default function App() {
   // The Similar Media analyzer asks the webview for sampled video frames.
   useEffect(() => startSimilarCaptureService(), []);
 
+  // Store builds only: when to ask for a rating (see review.ts).
+  const temporaryRef = useRef(false);
+  temporaryRef.current = !!status?.temporary;
+  const [canRate, setCanRate] = useState(false);
+
   useEffect(() => {
     api.init().then((i) => {
       setInfo(i);
       setStatus(i.status);
+      temporaryRef.current = i.status.temporary;
+      initReview(i.launchId, () => temporaryRef.current).then((r) => setCanRate(r.canRate));
       if (i.view) setView(i.view);
       if (i.sort) setSort(i.sort);
       if (i.desc !== null) setDesc(i.desc);
@@ -192,7 +206,7 @@ export default function App() {
       settingsLoaded.current = true;
       api.takeRecovered().then((names) => {
         if (names.length) {
-          setToast(`Mori recovered after the video engine stopped responding on “${names[names.length - 1]}”. That file won't be previewed again.`);
+          setToast(t("Mori recovered after the video engine stopped responding on “{name}”. That file won't be previewed again.", { name: names[names.length - 1] }));
           setTimeout(() => setToast(null), 7000);
         }
       });
@@ -346,7 +360,12 @@ export default function App() {
   const undoLast = async () => {
     try {
       const r = await api.historyUndo(null);
-      flash(r.failed.length ? `Undo: ${plural(r.restored, "change")} restored · ${r.failed[0]}` : `Undone (${plural(r.restored, "change")})`, 3500);
+      flash(
+        r.failed.length
+          ? tn(r.restored, "Undo: {n} change restored · {reason}", "Undo: {n} changes restored · {reason}", { reason: r.failed[0] })
+          : tn(r.restored, "Undone ({n} change)", "Undone ({n} changes)"),
+        3500,
+      );
       setAnalysisVersion((v) => v + 1);
     } catch (e) {
       flash(String(e), 3500);
@@ -400,10 +419,15 @@ export default function App() {
         setHistory([]);
       }
     }
-    const what = gone.length === 1 ? `“${gone[0].name}”` : plural(gone.length, "item");
-    if (!r.failed.length) flash(`Moved ${what} to Trash · ${isMac ? "⌘Z" : "Ctrl+Z"} to undo`, 3000);
-    else if (!gone.length) flash(targets.length === 1 ? `Couldn't move to Trash: ${r.failed[0].reason}` : `Nothing was moved to Trash (${r.failed[0].reason})`, 5000);
-    else flash(`Moved ${what} to Trash · ${plural(r.failed.length, "item")} couldn't be moved (${r.failed[0].reason})`, 6000);
+    const undoKey = isMac ? "⌘Z" : "Ctrl+Z";
+    const moved = gone.length === 1 ? t("Moved “{name}” to Trash", { name: gone[0].name }) : tn(gone.length, "Moved {n} item to Trash", "Moved {n} items to Trash");
+    if (!r.failed.length) flash(`${moved} · ${t("{key} to undo", { key: undoKey })}`, 3000);
+    else if (!gone.length)
+      flash(
+        targets.length === 1 ? t("Couldn't move to Trash: {reason}", { reason: r.failed[0].reason }) : t("Nothing was moved to Trash ({reason})", { reason: r.failed[0].reason }),
+        5000,
+      );
+    else flash(`${moved} · ${tn(r.failed.length, "{n} item couldn't be moved ({reason})", "{n} items couldn't be moved ({reason})", { reason: r.failed[0].reason })}`, 6000);
   };
 
   const renamed = (entry: Entry, newId: string, name: string) => {
@@ -413,7 +437,7 @@ export default function App() {
     selectOnly(newId);
     if (previewId === entry.id) setPreviewId(newId);
     if (loc.scope === "folder" && loc.folder === entry.id) setLoc({ scope: "folder", folder: newId });
-    flash("Renamed");
+    flash(t("Renamed"));
   };
 
   const requestTransfer = (op: TransferOp, targets: Entry[]) => {
@@ -436,18 +460,37 @@ export default function App() {
       }
     } else if (r.done.length) setAnalysisVersion((v) => v + 1);
     const first = entries.find((e) => e.id === r.done[0]?.id);
-    const what = r.done.length === 1 && first ? `“${first.name}”` : plural(r.done.length, "item");
-    const parts = [r.done.length ? `${op === "move" ? "Moved" : "Copied"} ${what} to “${plan.destName}”` : `Nothing was ${op === "move" ? "moved" : "copied"}`];
-    if (r.skipped) parts.push(`${plural(r.skipped, "item")} skipped`);
-    if (r.failed.length) parts.push(`${plural(r.failed.length, "item")} failed (${r.failed[0].reason})`);
-    if (r.originalsKept.length) parts.push(`${plural(r.originalsKept.length, "original")} kept (${r.originalsKept[0].reason})`);
-    if (r.cancelled) parts.push("stopped");
-    if (r.done.length) parts.push(`${isMac ? "⌘Z" : "Ctrl+Z"} to undo`);
+    const dest = plan.destName;
+    const one = r.done.length === 1 && first;
+    const head = !r.done.length
+      ? op === "move"
+        ? t("Nothing was moved")
+        : t("Nothing was copied")
+      : op === "move"
+        ? one
+          ? t("Moved “{name}” to “{dest}”", { name: first.name, dest })
+          : tn(r.done.length, "Moved {n} item to “{dest}”", "Moved {n} items to “{dest}”", { dest })
+        : one
+          ? t("Copied “{name}” to “{dest}”", { name: first.name, dest })
+          : tn(r.done.length, "Copied {n} item to “{dest}”", "Copied {n} items to “{dest}”", { dest });
+    const parts = [head];
+    if (r.skipped) parts.push(tn(r.skipped, "{n} item skipped", "{n} items skipped"));
+    if (r.failed.length) parts.push(tn(r.failed.length, "{n} item failed ({reason})", "{n} items failed ({reason})", { reason: r.failed[0].reason }));
+    if (r.originalsKept.length)
+      parts.push(tn(r.originalsKept.length, "{n} original kept ({reason})", "{n} originals kept ({reason})", { reason: r.originalsKept[0].reason }));
+    if (r.cancelled) parts.push(t("stopped"));
+    if (r.done.length) parts.push(t("{key} to undo", { key: isMac ? "⌘Z" : "Ctrl+Z" }));
     flash(parts.join(" · "), r.failed.length || r.originalsKept.length ? 7000 : 3500);
+    if (r.failed.length || r.originalsKept.length) review.problem();
+    else if (r.done.length && !r.cancelled) review.success("transfer");
   };
+
+  const rateMori = () => review.rate().catch((e) => flash(String(e), 4000));
 
   const cleanupTrashed = (r: TrashResult) => {
     setAnalysisVersion((v) => v + 1);
+    if (r.failed.length) review.problem();
+    else if (r.trashed.length) review.success("quick-cleanup");
     if (r.trashed.length) {
       const gone = new Set(r.trashed);
       removeFromView((e) => gone.has(e.id));
@@ -508,7 +551,7 @@ export default function App() {
       // The index is re-published with the new boundaries; refresh now.
       setIndexVersion((v) => v + 1);
       setAnalysisVersion((v) => v + 1);
-      flash(isPrivate ? `“${entry.name}” is now private` : `“${entry.name}” is public again`, 2500);
+      flash(isPrivate ? t("“{name}” is now private", { name: entry.name }) : t("“{name}” is public again", { name: entry.name }), 2500);
     } catch (e) {
       flash(String(e), 4000);
     }
@@ -519,7 +562,7 @@ export default function App() {
     try {
       await api.setFolderProtected(entry.id, on);
       setIndexVersion((v) => v + 1);
-      flash(on ? `“${entry.name}” is protected: Mori won't change anything inside it` : `Protection removed from “${entry.name}”`, 3000);
+      flash(on ? t("“{name}” is protected: Mori won't change anything inside it", { name: entry.name }) : t("Protection removed from “{name}”", { name: entry.name }), 3000);
     } catch (e) {
       flash(String(e), 4000);
     }
@@ -534,7 +577,14 @@ export default function App() {
       // Show it right away; the index refresh that follows confirms it (and updates Favorites and its count).
       const ids = new Set(targets.map((t) => t.id));
       setResult((res) => ({ ...res, items: res.items.map((e) => (ids.has(e.id) ? { ...e, favorite: on } : e)) }));
-      flash(on ? `Added ${targets.length === 1 ? `“${targets[0].name}”` : plural(targets.length, "item")} to Favorites` : "Removed from Favorites", 2200);
+      flash(
+        !on
+          ? t("Removed from Favorites")
+          : targets.length === 1
+            ? t("Added “{name}” to Favorites", { name: targets[0].name })
+            : tn(targets.length, "Added {n} item to Favorites", "Added {n} items to Favorites"),
+        2200,
+      );
     } catch (e) {
       flash(String(e), 4000);
     }
@@ -563,7 +613,7 @@ export default function App() {
     forgetRecentDestinations();
     setAnalysisVersion((v) => v + 1);
     rootChanged(s);
-    flash("Session cleared", 3000);
+    flash(t("Session cleared"), 3000);
   };
 
   const startPrivate = async (key: string | null) => {
@@ -582,7 +632,15 @@ export default function App() {
         // nothing stored
       }
       resetThumbs();
-      flash(`Mori forgot “${r.drive}” (${plural(r.indexes, "index", "indexes")}, thumbnails and records). Nothing on the drive was changed.`, 6000);
+      flash(
+        tn(
+          r.indexes,
+          "Mori forgot “{drive}” ({n} index, thumbnails and records). Nothing on the drive was changed.",
+          "Mori forgot “{drive}” ({n} indexes, thumbnails and records). Nothing on the drive was changed.",
+          { drive: r.drive },
+        ),
+        6000,
+      );
       setStatus(await api.status());
     } catch (e) {
       flash(String(e), 4000);
@@ -600,7 +658,7 @@ export default function App() {
     setHistory([]);
     setSearch("");
     setAnalysisVersion((v) => v + 1);
-    flash("Session data cleared: analysis results and folders picked this session are forgotten", 3500);
+    flash(t("Session data cleared: analysis results and folders picked this session are forgotten"), 3500);
   };
 
   const toggleReadOnly = async () => {
@@ -608,7 +666,7 @@ export default function App() {
     try {
       await api.setReadOnly(next);
       setReadOnlyState(next);
-      flash(next ? "Read-only Mode on: Mori won't change any files" : "Read-only Mode off", 2500);
+      flash(next ? t("Read-only Mode on: Mori won't change any files") : t("Read-only Mode off"), 2500);
     } catch (e) {
       flash(String(e), 4000);
     }
@@ -630,7 +688,7 @@ export default function App() {
 
   const copyPath = async (e: Entry) => {
     const text = await api.copyPath(e.id).catch(() => null);
-    if (!text) return flash("Path unavailable");
+    if (!text) return flash(t("Path unavailable"));
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -641,7 +699,7 @@ export default function App() {
       document.execCommand("copy");
       ta.remove();
     }
-    flash("Path copied");
+    flash(t("Path copied"));
   };
 
   const chooseRoot = async () => {
@@ -797,72 +855,84 @@ export default function App() {
   // --------------------------------------------------------------- render
 
   const focused = selected >= 0 ? items[selected] : null;
+  // Section names are headings in the palette: translated here, where they're built.
+  const sView = t("View"),
+    sGo = t("Go"),
+    sLibrary = t("Library"),
+    sTag = t("Tag"),
+    sAnalyze = t("Analyze"),
+    sSelection = t("Selection"),
+    sMori = t("Mori"),
+    sEdit = t("Edit"),
+    sHelp = t("Help");
   const commands: Command[] = [
-    { id: "v-list", title: "List View", section: "View", icon: "list", keys: `${isMac ? "⌘" : "Ctrl+"}1`, run: () => setView("list") },
-    { id: "v-grid", title: "Grid View", section: "View", icon: "grid", keys: `${isMac ? "⌘" : "Ctrl+"}2`, run: () => setView("grid") },
-    { id: "v-gallery", title: "Gallery View", section: "View", icon: "gallery", keys: `${isMac ? "⌘" : "Ctrl+"}3`, run: () => setView("gallery") },
-    { id: "v-sub", title: recursive ? "Hide Subfolder Contents" : "Include Subfolders", section: "View", icon: "folder", run: () => setRecursive(!recursive) },
-    { id: "g-search", title: "Search", section: "Go", icon: "search", keys: `${isMac ? "⌘" : "Ctrl+"}F`, run: () => setTimeout(() => searchRef.current?.focus(), 0) },
-    { id: "g-drive", title: `Go to ${status?.rootName ?? "Drive"}`, section: "Go", icon: "drive", run: () => navigate({ scope: "folder", folder: "" }) },
+    { id: "v-list", title: t("List View"), section: sView, icon: "list", keys: `${isMac ? "⌘" : "Ctrl+"}1`, run: () => setView("list") },
+    { id: "v-grid", title: t("Grid View"), section: sView, icon: "grid", keys: `${isMac ? "⌘" : "Ctrl+"}2`, run: () => setView("grid") },
+    { id: "v-gallery", title: t("Gallery View"), section: sView, icon: "gallery", keys: `${isMac ? "⌘" : "Ctrl+"}3`, run: () => setView("gallery") },
+    { id: "v-sub", title: recursive ? t("Hide Subfolder Contents") : t("Include Subfolders"), section: sView, icon: "folder", run: () => setRecursive(!recursive) },
+    { id: "g-search", title: t("Search"), section: sGo, icon: "search", keys: `${isMac ? "⌘" : "Ctrl+"}F`, run: () => setTimeout(() => searchRef.current?.focus(), 0) },
+    { id: "g-drive", title: t("Go to {name}", { name: status?.rootName ?? t("Drive") }), section: sGo, icon: "drive", run: () => navigate({ scope: "folder", folder: "" }) },
     ...[...FILTERS, ...CAPTURE_FILTERS].map((f) => ({
       id: `l-${f.kind}`,
-      title: LIBRARY_TITLE[f.kind],
-      section: "Library",
+      title: t(LIBRARY_TITLE[f.kind]),
+      section: sLibrary,
       icon: f.icon,
       run: () => {
         navigate({ scope: "library", folder: "" }, { keepKind: true });
         setKind(f.kind);
       },
     })),
-    { id: "l-fav", title: "Favorites", section: "Library", icon: "star", run: () => (navigate({ scope: "library", folder: "" }, { keepKind: true }), setKind("favorites")) },
-    ...tags.map((t) => ({ id: `t-${t.id}`, title: t.name, section: "Tag", icon: "tag" as IconName, run: () => (navigate({ scope: "library", folder: "" }, { keepKind: true }), setKind(`tag:${t.id}`)) })),
-    { id: "a-center", title: "Analysis Center", section: "Analyze", icon: "all", run: () => setMode("center") },
-    { id: "a-storage", title: "Storage", section: "Analyze", icon: "drive", words: "space size treemap empty folders", run: () => setMode("storage") },
-    { id: "a-dupes", title: "Exact Duplicates", section: "Analyze", icon: "duplicate", run: () => setMode("analyzer") },
-    { id: "a-similar", title: "Similar Media", section: "Analyze", icon: "gallery", words: "bursts compare", run: () => setMode("similar") },
-    { id: "a-meta", title: "Sensitive Metadata", section: "Analyze", icon: "tag", words: "exif gps location privacy", run: () => setMode("metadata") },
-    { id: "a-places", title: "Places", section: "Analyze", icon: "pin", words: "map gps", run: () => setMode("places") },
-    { id: "a-health", title: "Media Health", section: "Analyze", icon: "warning", words: "broken unsupported", run: () => setMode("health") },
+    { id: "l-fav", title: t("Favorites"), section: sLibrary, icon: "star", run: () => (navigate({ scope: "library", folder: "" }, { keepKind: true }), setKind("favorites")) },
+    ...tags.map((tag) => ({ id: `t-${tag.id}`, title: tag.name, section: sTag, icon: "tag" as IconName, run: () => (navigate({ scope: "library", folder: "" }, { keepKind: true }), setKind(`tag:${tag.id}`)) })),
+    { id: "a-center", title: t("Analysis Center"), section: sAnalyze, icon: "all", run: () => setMode("center") },
+    { id: "a-storage", title: t("Storage"), section: sAnalyze, icon: "drive", words: "space size treemap empty folders", run: () => setMode("storage") },
+    { id: "a-dupes", title: t("Exact Duplicates"), section: sAnalyze, icon: "duplicate", run: () => setMode("analyzer") },
+    { id: "a-similar", title: t("Similar Media"), section: sAnalyze, icon: "gallery", words: "bursts compare", run: () => setMode("similar") },
+    { id: "a-meta", title: t("Sensitive Metadata"), section: sAnalyze, icon: "tag", words: "exif gps location privacy", run: () => setMode("metadata") },
+    { id: "a-places", title: t("Places"), section: sAnalyze, icon: "pin", words: "map gps", run: () => setMode("places") },
+    { id: "a-health", title: t("Media Health"), section: sAnalyze, icon: "warning", words: "broken unsupported", run: () => setMode("health") },
     ...(focused && focused.kind !== "link"
       ? [
           ...(focused.kind !== "folder"
             ? [
-                { id: "s-ql", title: `Quick Look “${focused.name}”`, section: "Selection", icon: "gallery" as IconName, keys: "Space", run: () => (setPreviewQuick(true), setPreviewId(focused.id)) },
-                { id: "s-iso", title: `Open “${focused.name}” in Isolation`, section: "Selection", icon: "shield" as IconName, run: () => (setPreviewIso(true), setPreviewId(focused.id)) },
+                { id: "s-ql", title: t("Quick Look “{name}”", { name: focused.name }), section: sSelection, icon: "gallery" as IconName, keys: t("Space"), run: () => (setPreviewQuick(true), setPreviewId(focused.id)) },
+                { id: "s-iso", title: t("Open “{name}” in Isolation", { name: focused.name }), section: sSelection, icon: "shield" as IconName, run: () => (setPreviewIso(true), setPreviewId(focused.id)) },
               ]
             : []),
-          { id: "s-info", title: `Get Info for “${focused.name}”`, section: "Selection", icon: "info" as IconName, keys: "I", run: () => setInspectId(focused.id) },
-          { id: "s-fav", title: focused.favorite ? `Remove “${focused.name}” from Favorites` : `Add “${focused.name}” to Favorites`, section: "Selection", icon: "star" as IconName, keys: "F", run: () => setFavorite([focused], !focused.favorite) },
-          { id: "s-tags", title: `Tags for “${focused.name}”…`, section: "Selection", icon: "tag" as IconName, run: () => setDialog({ kind: "tags", entries: selectionTargets() }) },
-          { id: "s-copy", title: "Copy Path", section: "Selection", icon: "copy" as IconName, run: () => copyPath(focused) },
-          { id: "s-reveal", title: isMac ? "Show in Finder" : "Show in Folder", section: "Selection", icon: "reveal" as IconName, run: () => api.revealFile(focused.id) },
+          { id: "s-info", title: t("Get Info for “{name}”", { name: focused.name }), section: sSelection, icon: "info" as IconName, keys: "I", run: () => setInspectId(focused.id) },
+          { id: "s-fav", title: focused.favorite ? t("Remove “{name}” from Favorites", { name: focused.name }) : t("Add “{name}” to Favorites", { name: focused.name }), section: sSelection, icon: "star" as IconName, keys: "F", run: () => setFavorite([focused], !focused.favorite) },
+          { id: "s-tags", title: t("Tags for “{name}”…", { name: focused.name }), section: sSelection, icon: "tag" as IconName, run: () => setDialog({ kind: "tags", entries: selectionTargets() }) },
+          { id: "s-copy", title: t("Copy Path"), section: sSelection, icon: "copy" as IconName, run: () => copyPath(focused) },
+          { id: "s-reveal", title: isMac ? t("Show in Finder") : t("Show in Folder"), section: sSelection, icon: "reveal" as IconName, run: () => api.revealFile(focused.id) },
         ]
       : []),
-    { id: "m-ro", title: readOnly ? "Turn Off Read-only Mode" : "Turn On Read-only Mode", section: "Mori", icon: "shield", run: toggleReadOnly },
-    { id: "m-change", title: "Change Folder…", section: "Mori", icon: "folder", run: chooseRoot },
-    { id: "m-temp", title: "Temporary Session…", section: "Mori", icon: "clock", words: "browse without indexing ephemeral", run: startTemporary },
-    { id: "m-private", title: "Private Inspection…", section: "Mori", icon: "shield", words: "usb drive unknown read-only temporary safe", run: () => startPrivate(null) },
-    { id: "m-integrity", title: "Integrity Snapshots…", section: "Mori", icon: "check", words: "sha-256 checksum verify", run: () => setDialog({ kind: "integrity" }) },
-    { id: "m-privacy", title: "Privacy & Local Data…", section: "Mori", icon: "lock", words: "clear data reset storage", run: () => setDialog({ kind: "privacy" }) },
-    { id: "m-diag", title: "Diagnostics…", section: "Mori", icon: "info", words: "self-test capabilities offline security", run: () => setDialog({ kind: "diagnostics" }) },
-    ...(focused && focused.kind !== "folder" && focused.kind !== "link" ? [{ id: "s-sum", title: `Calculate Checksum of “${focused.name}”`, section: "Selection", icon: "check" as IconName, words: "sha-256 hash integrity", run: () => setDialog({ kind: "checksum", entry: focused }) }] : []),
-    { id: "m-tags", title: "Manage Tags…", section: "Mori", icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
-    { id: "m-session", title: "Clear Session Data…", section: "Mori", icon: "close", run: () => setDialog({ kind: "clearSession" }) },
-    { id: "m-rescan", title: "Rescan", section: "Mori", icon: "refresh", run: () => api.rescan() },
-    { id: "m-undo", title: "Undo", section: "Edit", icon: "refresh", keys: `${isMac ? "⌘" : "Ctrl+"}Z`, run: undoLast },
-    { id: "m-history", title: "Undo History…", section: "Edit", icon: "clock", run: () => setDialog({ kind: "history" }) },
-    ...(focused && focused.kind !== "link" ? [{ id: "s-del", title: `Delete “${focused.name}” Permanently…`, section: "Selection", icon: "close" as IconName, words: "remove erase", run: () => setDialog({ kind: "op", op: "delete", entries: selectionTargets() }) }] : []),
-    ...(items.length ? [{ id: "s-all", title: "Select All", section: "Edit", icon: "check" as IconName, keys: `${isMac ? "⌘" : "Ctrl+"}A`, run: () => setSel((cur) => selectAll(cur, order)) }] : []),
+    { id: "m-ro", title: readOnly ? t("Turn Off Read-only Mode") : t("Turn On Read-only Mode"), section: sMori, icon: "shield", run: toggleReadOnly },
+    { id: "m-change", title: t("Change Folder…"), section: sMori, icon: "folder", run: chooseRoot },
+    { id: "m-temp", title: t("Temporary Session…"), section: sMori, icon: "clock", words: "browse without indexing ephemeral", run: startTemporary },
+    { id: "m-private", title: t("Private Inspection…"), section: sMori, icon: "shield", words: "usb drive unknown read-only temporary safe", run: () => startPrivate(null) },
+    { id: "m-integrity", title: t("Integrity Snapshots…"), section: sMori, icon: "check", words: "sha-256 checksum verify", run: () => setDialog({ kind: "integrity" }) },
+    { id: "m-privacy", title: t("Privacy & Local Data…"), section: sMori, icon: "lock", words: "clear data reset storage", run: () => setDialog({ kind: "privacy" }) },
+    { id: "m-diag", title: t("Diagnostics…"), section: sMori, icon: "info", words: "self-test capabilities offline security", run: () => setDialog({ kind: "diagnostics" }) },
+    { id: "m-language", title: t("Language…"), section: sMori, icon: "globe", words: "language idioma langue sprache translate locale", run: () => setDialog({ kind: "language" }) },
+    ...(canRate ? [{ id: "m-rate", title: t("Rate Mori…"), section: sMori, icon: "star" as IconName, words: "rate review stars store valorar", run: () => rateMori() }] : []),
+    ...(focused && focused.kind !== "folder" && focused.kind !== "link" ? [{ id: "s-sum", title: t("Calculate Checksum of “{name}”", { name: focused.name }), section: sSelection, icon: "check" as IconName, words: "sha-256 hash integrity", run: () => setDialog({ kind: "checksum", entry: focused }) }] : []),
+    { id: "m-tags", title: t("Manage Tags…"), section: sMori, icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
+    { id: "m-session", title: t("Clear Session Data…"), section: sMori, icon: "close", run: () => setDialog({ kind: "clearSession" }) },
+    { id: "m-rescan", title: t("Rescan"), section: sMori, icon: "refresh", run: () => api.rescan() },
+    { id: "m-undo", title: t("Undo"), section: sEdit, icon: "refresh", keys: `${isMac ? "⌘" : "Ctrl+"}Z`, run: undoLast },
+    { id: "m-history", title: t("Undo History…"), section: sEdit, icon: "clock", run: () => setDialog({ kind: "history" }) },
+    ...(focused && focused.kind !== "link" ? [{ id: "s-del", title: t("Delete “{name}” Permanently…", { name: focused.name }), section: sSelection, icon: "close" as IconName, words: "remove erase", run: () => setDialog({ kind: "op", op: "delete", entries: selectionTargets() }) }] : []),
+    ...(items.length ? [{ id: "s-all", title: t("Select All"), section: sEdit, icon: "check" as IconName, keys: `${isMac ? "⌘" : "Ctrl+"}A`, run: () => setSel((cur) => selectAll(cur, order)) }] : []),
     ...(focused && canModify
       ? [
-          { id: "s-move", title: marked.size > 1 ? `Move ${plural(marked.size, "Item")} to…` : `Move “${focused.name}” to…`, section: "Selection", icon: "folder" as IconName, keys: "M", run: () => requestTransfer("move", selectionTargets()) },
-          { id: "s-copyto", title: marked.size > 1 ? `Copy ${plural(marked.size, "Item")} to…` : `Copy “${focused.name}” to…`, section: "Selection", icon: "copy" as IconName, keys: "⇧M", run: () => requestTransfer("copy", selectionTargets()) },
-          { id: "s-rename", title: `Rename “${focused.name}”…`, section: "Selection", icon: "rename" as IconName, keys: "F2", run: () => setDialog({ kind: "rename", entry: focused }) },
+          { id: "s-move", title: marked.size > 1 ? tn(marked.size, "Move {n} Item to…", "Move {n} Items to…") : t("Move “{name}” to…", { name: focused.name }), section: sSelection, icon: "folder" as IconName, keys: "M", run: () => requestTransfer("move", selectionTargets()) },
+          { id: "s-copyto", title: marked.size > 1 ? tn(marked.size, "Copy {n} Item to…", "Copy {n} Items to…") : t("Copy “{name}” to…", { name: focused.name }), section: sSelection, icon: "copy" as IconName, keys: "⇧M", run: () => requestTransfer("copy", selectionTargets()) },
+          { id: "s-rename", title: t("Rename “{name}”…", { name: focused.name }), section: sSelection, icon: "rename" as IconName, keys: "F2", run: () => setDialog({ kind: "rename", entry: focused }) },
         ]
       : []),
-    ...(focused?.kind === "folder" ? [{ id: "s-clean", title: `Quick Cleanup of “${focused.name}”…`, section: "Selection", icon: "gallery" as IconName, words: "keep mark trash review photos", run: () => startCleanup(focused) }] : []),
-    ...(loc.scope === "folder" ? [{ id: "m-clean", title: "Quick Cleanup of This Folder…", section: "Mori", icon: "gallery" as IconName, words: "keep mark trash review photos", run: () => startCleanup(null) }] : []),
-    { id: "m-keys", title: "Keyboard Shortcuts", section: "Help", icon: "command", words: "keys help", run: () => setShortcuts(true) },
+    ...(focused?.kind === "folder" ? [{ id: "s-clean", title: t("Quick Cleanup of “{name}”…", { name: focused.name }), section: sSelection, icon: "gallery" as IconName, words: "keep mark trash review photos", run: () => startCleanup(focused) }] : []),
+    ...(loc.scope === "folder" ? [{ id: "m-clean", title: t("Quick Cleanup of This Folder…"), section: sMori, icon: "gallery" as IconName, words: "keep mark trash review photos", run: () => startCleanup(null) }] : []),
+    { id: "m-keys", title: t("Keyboard Shortcuts"), section: sHelp, icon: "command", words: "keys help", run: () => setShortcuts(true) },
   ];
 
   if (!info) return <div className="app loading" />;
@@ -871,24 +941,26 @@ export default function App() {
           <div className="dialog-icon">
             <Icon name="drive" size={20} />
           </div>
-          <h2>“{newDrive.label}” connected</h2>
+          <h2>{t("“{name}” connected", { name: newDrive.label })}</h2>
           <p>
-            Inspect it safely with Mori: only names, sizes and dates are indexed. Nothing on the drive is opened or decoded until you choose to generate
-            previews.
+            {t(
+              "Inspect it safely with Mori: only names, sizes and dates are indexed. Nothing on the drive is opened or decoded until you choose to generate previews.",
+            )}
           </p>
           <p className="dialog-note">
-            <strong>Temporary inspection</strong> also makes the session read-only and keeps no Mori index, previews, history or drive record after
-            you end it.
+            {tx("{strong} also makes the session read-only and keeps no Mori index, previews, history or drive record after you end it.", {
+              strong: <strong>{t("Temporary inspection")}</strong>,
+            })}
           </p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setNewDrive(null)}>
-              Not Now
+              {t("Not Now")}
             </button>
             <button className="btn" onClick={() => inspectDriveSafely(newDrive)}>
-              Inspect Safely
+              {t("Inspect Safely")}
             </button>
             <button className="btn primary" onClick={() => startPrivate(newDrive.key)} autoFocus>
-              Temporary Inspection
+              {t("Temporary Inspection")}
             </button>
           </div>
         </ModalFrame>
@@ -909,12 +981,12 @@ export default function App() {
   const driveWide = !folderScope || (searching && searchGlobal);
   const recursiveView = folderScope && recursive;
   const searchPlaceholder = !folderScope
-    ? `Search ${viewTitle(kind, tags).toLowerCase()} in ${status.rootName}…`
+    ? t("Search {what} in {drive}…", { what: inSentence(viewTitle(kind, tags)), drive: status.rootName })
     : searchGlobal
-      ? `Search all of ${status.rootName}…`
+      ? t("Search all of {drive}…", { drive: status.rootName })
       : recursive
-        ? `Search in ${folderName} and subfolders…`
-        : `Search in ${folderName}…`;
+        ? t("Search in {folder} and subfolders…", { folder: folderName })
+        : t("Search in {folder}…", { folder: folderName });
   const showLocation = recursiveView || searching || !folderScope;
   const count = (k: ViewKind) => (stats && !k.startsWith("tag:") && k !== "favorites" ? (k === "all" ? stats.files : stats[k as Exclude<KindFilter, "all">]) : undefined);
 
@@ -927,10 +999,17 @@ export default function App() {
   const clearCache = () =>
     api.clearCache().then(() => {
       resetThumbs();
-      flash("Thumbnails and index cleared");
+      flash(t("Thumbnails and index cleared"));
     });
-  const pageTitle = searching && driveWide ? `Results for “${debounced}”` : !folderScope ? viewTitle(kind, tags) : folderName;
-  const pageNote = searching && driveWide ? `in all of ${status.rootName}` : !folderScope ? `across ${status.rootName}` : searching ? `results for “${debounced}”` : "";
+  const pageTitle = searching && driveWide ? t("Results for “{query}”", { query: debounced }) : !folderScope ? viewTitle(kind, tags) : folderName;
+  const pageNote =
+    searching && driveWide
+      ? t("in all of {drive}", { drive: status.rootName })
+      : !folderScope
+        ? t("across {drive}", { drive: status.rootName })
+        : searching
+          ? t("results for “{query}”", { query: debounced })
+          : "";
   const canGoBack = history.length > 0 || !!search || (loc.scope === "folder" && !!loc.folder);
   // Parent trail shown above the title (the current folder is the title itself).
   const trail = folderScope && !(searching && driveWide) ? crumbs.slice(0, -1) : [];
@@ -954,7 +1033,7 @@ export default function App() {
             <Icon name="drive" />
             <span className="truncate">{status.rootName}</span>
           </button>
-          <div className="side-heading">Library</div>
+          <div className="side-heading">{t("Library")}</div>
           {FILTERS.filter((f) => f.kind !== "other" || (stats?.other ?? 0) > 0).map((f) => (
             <button
               key={f.kind}
@@ -965,8 +1044,8 @@ export default function App() {
               }}
             >
               <Icon name={f.icon} />
-              <span>{LIBRARY_TITLE[f.kind]}</span>
-              <span className="count">{count(f.kind)?.toLocaleString()}</span>
+              <span>{t(LIBRARY_TITLE[f.kind])}</span>
+              <span className="count">{count(f.kind) !== undefined ? fmtNum(count(f.kind)!) : undefined}</span>
             </button>
           ))}
           {CAPTURE_FILTERS.filter((f) => (count(f.kind) ?? 0) > 0).map((f) => (
@@ -977,11 +1056,11 @@ export default function App() {
                 navigate({ scope: "library", folder: "" }, { keepKind: true });
                 setKind(f.kind);
               }}
-              title="Recognised from file names and the system's screen-capture mark. Right-click a file to correct it."
+              title={t("Recognised from file names and the system's screen-capture mark. Right-click a file to correct it.")}
             >
               <Icon name={f.icon} />
-              <span>{f.label}</span>
-              <span className="count">{count(f.kind)?.toLocaleString()}</span>
+              <span>{t(f.label)}</span>
+              <span className="count">{count(f.kind) !== undefined ? fmtNum(count(f.kind)!) : undefined}</span>
             </button>
           ))}
           <button
@@ -990,16 +1069,16 @@ export default function App() {
               navigate({ scope: "library", folder: "" }, { keepKind: true });
               setKind("favorites");
             }}
-            title="Files and folders you marked as favorites"
+            title={t("Files and folders you marked as favorites")}
           >
             <Icon name="star" />
-            <span>Favorites</span>
-            {(stats?.favorites ?? 0) > 0 && <span className="count">{stats!.favorites.toLocaleString()}</span>}
+            <span>{t("Favorites")}</span>
+            {(stats?.favorites ?? 0) > 0 && <span className="count">{fmtNum(stats!.favorites)}</span>}
           </button>
           {tags.length > 0 && (
             <div className="side-heading with-action">
-              Tags
-              <button className="icon-btn tiny" onClick={() => setDialog({ kind: "manageTags" })} title="Manage tags" aria-label="Manage tags">
+              {t("Tags")}
+              <button className="icon-btn tiny" onClick={() => setDialog({ kind: "manageTags" })} title={t("Manage tags")} aria-label={t("Manage tags")}>
                 <Icon name="more" size={12} />
               </button>
             </div>
@@ -1008,41 +1087,41 @@ export default function App() {
             tags={tags}
             active={browsing && loc.scope === "library" && kind.startsWith("tag:") && !searching ? Number(kind.slice(4)) : null}
             canEdit={!status.temporary}
-            onOpen={(t) => {
+            onOpen={(tag) => {
               navigate({ scope: "library", folder: "" }, { keepKind: true });
-              setKind(`tag:${t.id}`);
+              setKind(`tag:${tag.id}`);
             }}
-            onRename={(t) => setDialog({ kind: "renameTag", tag: t })}
-            onDelete={(t) => setDialog({ kind: "deleteTag", tag: t })}
+            onRename={(tag) => setDialog({ kind: "renameTag", tag })}
+            onDelete={(tag) => setDialog({ kind: "deleteTag", tag })}
           />
-          <button className={`side-heading as-button ${mode === "center" ? "on" : ""}`} onClick={() => setMode("center")} title="All analyses">
-            Analyze
+          <button className={`side-heading as-button ${mode === "center" ? "on" : ""}`} onClick={() => setMode("center")} title={t("All analyses")}>
+            {t("Analyze")}
           </button>
-          <button className={`side-item ${mode === "storage" ? "on" : ""}`} onClick={() => setMode("storage")} title="Where the space goes, largest items, empty folders">
+          <button className={`side-item ${mode === "storage" ? "on" : ""}`} onClick={() => setMode("storage")} title={t("Where the space goes, largest items, empty folders")}>
             <Icon name="drive" />
-            <span>Storage</span>
+            <span>{t("Storage")}</span>
           </button>
-          <button className={`side-item ${mode === "analyzer" ? "on" : ""}`} onClick={() => setMode("analyzer")} title="Exact byte-identical files">
+          <button className={`side-item ${mode === "analyzer" ? "on" : ""}`} onClick={() => setMode("analyzer")} title={t("Exact byte-identical files")}>
             <Icon name="duplicate" />
-            <span>Duplicates</span>
+            <span>{t("Duplicates")}</span>
           </button>
-          <button className={`side-item ${mode === "similar" ? "on" : ""}`} onClick={() => setMode("similar")} title="Visually similar photos and videos">
+          <button className={`side-item ${mode === "similar" ? "on" : ""}`} onClick={() => setMode("similar")} title={t("Visually similar photos and videos")}>
             <Icon name="gallery" />
-            <span>Similar Media</span>
+            <span>{t("Similar Media")}</span>
           </button>
-          <button className={`side-item ${mode === "metadata" ? "on" : ""}`} onClick={() => setMode("metadata")} title="Location, people, device and other revealing metadata">
+          <button className={`side-item ${mode === "metadata" ? "on" : ""}`} onClick={() => setMode("metadata")} title={t("Location, people, device and other revealing metadata")}>
             <Icon name="tag" />
-            <span>Sensitive Metadata</span>
+            <span>{t("Sensitive Metadata")}</span>
           </button>
-          <button className={`side-item ${mode === "places" ? "on" : ""}`} onClick={() => setMode("places")} title="Where photos and videos were taken (offline map)">
+          <button className={`side-item ${mode === "places" ? "on" : ""}`} onClick={() => setMode("places")} title={t("Where photos and videos were taken (offline map)")}>
             <Icon name="pin" />
-            <span>Places</span>
+            <span>{t("Places")}</span>
           </button>
-          <button className={`side-item ${mode === "health" ? "on" : ""}`} onClick={() => setMode("health")} title="Broken, unsupported and risk-flagged media">
+          <button className={`side-item ${mode === "health" ? "on" : ""}`} onClick={() => setMode("health")} title={t("Broken, unsupported and risk-flagged media")}>
             <Icon name="warning" />
-            <span>Media Health</span>
+            <span>{t("Media Health")}</span>
           </button>
-          {topFolders.length > 0 && <div className="side-heading">Folders</div>}
+          {topFolders.length > 0 && <div className="side-heading">{t("Folders")}</div>}
           <FolderTree
             roots={topFolders}
             activeId={browsing && folderScope && !searching ? loc.folder : null}
@@ -1065,26 +1144,26 @@ export default function App() {
             // never changes the saved setting unless that setting is what's on.
             onClick={readOnly ? toggleReadOnly : undefined}
             disabled={!readOnly}
-            title={readOnly ? "Read-only Mode is on: Mori won't change any files. Click to turn it off." : "Read-only for this Private Inspection. It ends with the session."}
+            title={readOnly ? t("Read-only Mode is on: Mori won't change any files. Click to turn it off.") : t("Read-only for this Private Inspection. It ends with the session.")}
           >
-            <Icon name="shield" size={12} /> Read-only Mode
+            <Icon name="shield" size={12} /> {t("Read-only Mode")}
           </button>
         )}
         <div className="side-footer">
           {status.scanning ? (
             <div className="scan-status">
               <span className="dot-spinner" />
-              <span className="truncate">Scanning… {status.scanCount.toLocaleString()} files</span>
+              <span className="truncate">{tn(status.scanCount, "Scanning… {n} file", "Scanning… {n} files")}</span>
             </div>
           ) : (
             <div className="scan-status">
-              <span className="truncate">{status.fileCount.toLocaleString()} files indexed</span>
+              <span className="truncate">{tn(status.fileCount, "{n} file indexed", "{n} files indexed")}</span>
             </div>
           )}
-          <button className="icon-btn" onClick={() => api.rescan()} disabled={status.scanning} title="Rescan" aria-label="Rescan">
+          <button className="icon-btn" onClick={() => api.rescan()} disabled={status.scanning} title={t("Rescan")} aria-label={t("Rescan")}>
             <Icon name="refresh" size={15} />
           </button>
-          <button className={`icon-btn ${pop?.kind === "more" ? "on" : ""}`} onClick={openPop("more")} title="More" aria-label="More">
+          <button className={`icon-btn ${pop?.kind === "more" ? "on" : ""}`} onClick={openPop("more")} title={t("More")} aria-label={t("More")}>
             <Icon name="more" size={16} />
           </button>
         </div>
@@ -1105,39 +1184,43 @@ export default function App() {
               autoCapitalize="off"
             />
             {search ? (
-              <button className="clear" onClick={() => setSearch("")} title="Clear" aria-label="Clear search">
+              <button className="clear" onClick={() => setSearch("")} title={t("Clear")} aria-label={t("Clear search")}>
                 <Icon name="close" size={11} />
               </button>
             ) : (
               <kbd>{isMac ? "⌘F" : "Ctrl F"}</kbd>
             )}
           </label>
-          <div className="segmented filters" role="tablist" aria-label="File type">
+          <div className="segmented filters" role="tablist" aria-label={t("File type")}>
             {FILTERS.map((f) => (
-              <button key={f.kind} className={kind === f.kind ? "on" : ""} onClick={() => setKind(f.kind)} title={f.label} role="tab" aria-selected={kind === f.kind}>
+              <button key={f.kind} className={kind === f.kind ? "on" : ""} onClick={() => setKind(f.kind)} title={t(f.label)} role="tab" aria-selected={kind === f.kind}>
                 <Icon name={f.icon} size={14} />
-                <span className="label">{f.label}</span>
+                <span className="label">{t(f.label)}</span>
               </button>
             ))}
           </div>
           <div className="spacer" data-tauri-drag-region />
-          <div className="icon-group" aria-label="View">
-            {(["list", "grid", "gallery"] as const).map((v, i) => (
+          <div className="icon-group" aria-label={t("View")}>
+            {([
+              ["list", msg("List")],
+              ["grid", msg("Grid")],
+              ["gallery", msg("Gallery")],
+            ] as const).map(([v, label], i) => (
               <button
                 key={v}
                 className={`icon-btn ${view === v ? "on" : ""}`}
                 onClick={() => setView(v)}
-                title={`${v[0].toUpperCase() + v.slice(1)} (${isMac ? "⌘" : "Ctrl+"}${i + 1})`}
-                aria-label={v}
+                title={`${t(label)} (${isMac ? "⌘" : "Ctrl+"}${i + 1})`}
+                aria-label={t(label)}
                 aria-pressed={view === v}
               >
                 <Icon name={v} size={15} />
               </button>
             ))}
           </div>
-          <button className={`dropdown ${pop?.kind === "sort" ? "open" : ""}`} onClick={openPop("sort")} title="Sort" aria-haspopup="menu">
+          <button className={`dropdown ${pop?.kind === "sort" ? "open" : ""}`} onClick={openPop("sort")} title={t("Sort")} aria-haspopup="menu">
             <Icon name={desc ? "down" : "up"} size={13} />
-            <span className="sort-label">{SORTS.find((s) => s.key === sort)?.label}</span>
+            <span className="sort-label">{t(SORTS.find((s) => s.key === sort)?.label ?? "")}</span>
             <Icon name="chevronDown" size={13} />
           </button>
         </header>
@@ -1145,48 +1228,50 @@ export default function App() {
         {status.temporary && (
           <div className="session-banner" role="status">
             <Icon name={status.privateInspection ? "shield" : "clock"} size={13} />
-            <span className="safe-title">{status.privateInspection ? "PRIVATE INSPECTION" : "TEMPORARY SESSION"}</span>
+            <span className="safe-title">{status.privateInspection ? t("PRIVATE INSPECTION") : t("TEMPORARY SESSION")}</span>
             {status.privateInspection ? (
               <>
-                <span className="safe-stat">Read-only {status.readOnly ? "✓" : "—"}</span>
-                <span className="safe-stat">Temporary session ✓</span>
-                <span className="safe-stat">Automatic decoding {status.safeMode ? "Off" : "On"}</span>
-                <span className="safe-stat">Persistent indexing Off</span>
-                <span className="safe-stat">Network required No</span>
+                <span className="safe-stat">
+                  {t("Read-only")} {status.readOnly ? "✓" : "—"}
+                </span>
+                <span className="safe-stat">{t("Temporary session")} ✓</span>
+                <span className="safe-stat">{status.safeMode ? t("Automatic decoding Off") : t("Automatic decoding On")}</span>
+                <span className="safe-stat">{t("Persistent indexing Off")}</span>
+                <span className="safe-stat">{t("Network required No")}</span>
               </>
             ) : (
-              <span className="safe-stat">No Mori history, index or previews are kept after the session ends</span>
+              <span className="safe-stat">{t("No Mori history, index or previews are kept after the session ends")}</span>
             )}
             <span className="spacer" />
             <button className="btn small" onClick={endTemporary}>
-              End Session
+              {t("End Session")}
             </button>
           </div>
         )}
         {status.safeMode &&
           (safeCollapsed ? (
-            <button className="safe-banner collapsed" onClick={() => setSafeCollapsed(false)} title="Safe Inspection Mode">
-              <Icon name="shield" size={12} /> Safe Inspection Mode
+            <button className="safe-banner collapsed" onClick={() => setSafeCollapsed(false)} title={t("Safe Inspection Mode")}>
+              <Icon name="shield" size={12} /> {t("Safe Inspection Mode")}
             </button>
           ) : (
             <div className="safe-banner" role="status">
               <Icon name="shield" size={13} />
-              <span className="safe-title">SAFE INSPECTION MODE</span>
-              <span className="safe-stat">Files indexed {status.fileCount.toLocaleString()}</span>
-              <span className="safe-stat">Media decoded {status.decoded.toLocaleString()}</span>
+              <span className="safe-title">{t("SAFE INSPECTION MODE")}</span>
+              <span className="safe-stat">{t("Files indexed {count}", { count: status.fileCount })}</span>
+              <span className="safe-stat">{t("Media decoded {count}", { count: status.decoded })}</span>
               <span className="spacer" />
-              <button className="btn small" onClick={() => setDrivePreviews(true)} title="Allow thumbnails and previews for this drive">
-                Generate previews
+              <button className="btn small" onClick={() => setDrivePreviews(true)} title={t("Allow thumbnails and previews for this drive")}>
+                {t("Generate previews")}
               </button>
-              <button className="btn small ghost" onClick={() => setSafeCollapsed(true)} title="Keep browsing names, sizes and dates only">
-                Browse metadata only
+              <button className="btn small ghost" onClick={() => setSafeCollapsed(true)} title={t("Keep browsing names, sizes and dates only")}>
+                {t("Browse metadata only")}
               </button>
             </div>
           ))}
 
         <div className="page-head">
           <div className="crumbs">
-            <button className="icon-btn back" onClick={goBack} disabled={!canGoBack} title="Back" aria-label="Back">
+            <button className="icon-btn back" onClick={goBack} disabled={!canGoBack} title={t("Back")} aria-label={t("Back")}>
               <Icon name="left" size={14} />
             </button>
             {trail.length > 0 || (folderScope && crumbs.length > 0) ? (
@@ -1204,7 +1289,7 @@ export default function App() {
                 ))}
               </>
             ) : (
-              <span className="crumb">{folderScope && !searching ? "Drive" : status.rootName}</span>
+              <span className="crumb">{folderScope && !searching ? t("Drive") : status.rootName}</span>
             )}
           </div>
           <div className="title-row">
@@ -1212,41 +1297,41 @@ export default function App() {
               {pageTitle}
               {pageNote && <span className="scope-note">{pageNote}</span>}
               {folderScope && !(searching && searchGlobal) && result.protectedScope && (
-                <span className="private-chip" title="Never Modify: Mori won't rename, move or delete anything here.">
-                  <Icon name="shield" size={11} /> Never Modify
+                <span className="private-chip" title={t("Never Modify: Mori won't rename, move or delete anything here.")}>
+                  <Icon name="shield" size={11} /> {t("Never Modify")}
                 </span>
               )}
               {folderScope && !(searching && searchGlobal) && result.privateScope && (
-                <span className="private-chip" title={PRIVATE_HINT}>
-                  <Icon name="lock" size={11} /> Private
+                <span className="private-chip" title={t(PRIVATE_HINT)}>
+                  <Icon name="lock" size={11} /> {t("Private")}
                 </span>
               )}
             </h1>
             {searching && folderScope && (
-              <div className="segmented small" role="radiogroup" aria-label="Search scope">
-                <button className={!searchGlobal ? "on" : ""} onClick={() => setSearchGlobal(false)} title={`Search only in ${folderName}`}>
-                  In {folderName}
+              <div className="segmented small" role="radiogroup" aria-label={t("Search scope")}>
+                <button className={!searchGlobal ? "on" : ""} onClick={() => setSearchGlobal(false)} title={t("Search only in {folder}", { folder: folderName })}>
+                  {t("In {folder}", { folder: folderName })}
                 </button>
-                <button className={searchGlobal ? "on" : ""} onClick={() => setSearchGlobal(true)} title="Search the whole drive">
-                  Entire drive
+                <button className={searchGlobal ? "on" : ""} onClick={() => setSearchGlobal(true)} title={t("Search the whole drive")}>
+                  {t("Entire drive")}
                 </button>
               </div>
             )}
             {folderScope && !(searching && searchGlobal) && (
-              <label className="toggle" title="Show every file in this folder and all of its subfolders together">
+              <label className="toggle" title={t("Show every file in this folder and all of its subfolders together")}>
                 <input type="checkbox" checked={recursive} onChange={(e) => setRecursive(e.target.checked)} />
                 <span className="switch" aria-hidden />
-                Include subfolders
+                {t("Include subfolders")}
               </label>
             )}
             <div className="item-count" aria-live="polite">
-              {marked.size > 0 && <span className="selected-count">{marked.size.toLocaleString()} selected · </span>}
-              {result.total.toLocaleString()} {result.total === 1 ? "item" : "items"}
-              {result.truncated && ` · first ${items.length.toLocaleString()}`}
+              {marked.size > 0 && <span className="selected-count">{t("{count} selected", { count: marked.size })} · </span>}
+              {tn(result.total, "{n} item", "{n} items")}
+              {result.truncated && ` · ${t("first {count}", { count: items.length })}`}
             </div>
             {folderScope && !searching && files.length > 0 && (
-              <button className="btn small ghost" onClick={() => startCleanup(null)} title="Go through these files one by one: Keep or Mark for Trash. Nothing moves until you confirm.">
-                <Icon name="gallery" size={13} /> Quick Cleanup
+              <button className="btn small ghost" onClick={() => startCleanup(null)} title={t("Go through these files one by one: Keep or Mark for Trash. Nothing moves until you confirm.")}>
+                <Icon name="gallery" size={13} /> {t("Quick Cleanup")}
               </button>
             )}
           </div>
@@ -1294,27 +1379,33 @@ export default function App() {
         ) : status.scanning && !status.fileCount ? (
           <div className="empty">
             <span className="dot-spinner large" />
-            <p>Scanning {status.rootName}…</p>
+            <p>{t("Scanning {name}…", { name: status.rootName })}</p>
           </div>
         ) : searching ? (
           <div className="empty">
             <Logo size={64} className="mark" />
-            <h2>No files found</h2>
+            <h2>{t("No files found")}</h2>
             <p>
-              Nothing matches “{debounced}”{driveWide ? "" : recursive ? ` in ${folderName} or its subfolders` : ` in ${folderName}`}.
+              {driveWide
+                ? t("Nothing matches “{query}”.", { query: debounced })
+                : recursive
+                  ? t("Nothing matches “{query}” in {folder} or its subfolders.", { query: debounced, folder: folderName })
+                  : t("Nothing matches “{query}” in {folder}.", { query: debounced, folder: folderName })}
             </p>
           </div>
         ) : kind === "all" ? (
           <div className="empty">
             <Logo size={64} className="mark" />
-            <h2>{recursiveView ? "No files here" : "This folder is empty"}</h2>
-            {recursiveView && <p>No files in this folder or its subfolders.</p>}
+            <h2>{recursiveView ? t("No files here") : t("This folder is empty")}</h2>
+            {recursiveView && <p>{t("No files in this folder or its subfolders.")}</p>}
           </div>
         ) : (
           <div className="empty">
             <Icon name={kind === "favorites" ? "star" : kind.startsWith("tag:") ? "tag" : filterIcon(kind as KindFilter)} size={34} stroke={1.3} />
             <p>
-              No {viewTitle(kind, tags).toLowerCase()} here{recursiveView ? " or in subfolders" : ""}.
+              {recursiveView
+                ? t("No {what} here or in subfolders.", { what: inSentence(viewTitle(kind, tags)) })
+                : t("No {what} here.", { what: inSentence(viewTitle(kind, tags)) })}
             </p>
           </div>
         )}
@@ -1421,7 +1512,7 @@ export default function App() {
           compareOk={menu.targets.length === 2 && menu.targets.every((t) => t.kind !== "folder" && t.kind !== "link")}
           onSnapshot={() =>
             api.integritySave(menu.entry.id).then(
-              () => (flash("Creating integrity snapshot… (progress in Integrity Snapshots)", 3500), setDialog({ kind: "integrity" })),
+              () => (flash(t("Creating integrity snapshot… (progress in Integrity Snapshots)"), 3500), setDialog({ kind: "integrity" })),
               (e) => flash(String(e), 4000),
             )
           }
@@ -1430,7 +1521,16 @@ export default function App() {
             const e = menu.entry;
             try {
               await api.setCaptureOverride(e.id, e.capture ? "not" : "yes");
-              flash(e.capture ? `“${e.name}” is no longer listed as a ${e.capture === 2 ? "screen recording" : "screenshot"}` : `“${e.name}” is now listed as a ${e.kind === "video" ? "screen recording" : "screenshot"}`, 2500);
+              flash(
+                e.capture
+                  ? e.capture === 2
+                    ? t("“{name}” is no longer listed as a screen recording", { name: e.name })
+                    : t("“{name}” is no longer listed as a screenshot", { name: e.name })
+                  : e.kind === "video"
+                    ? t("“{name}” is now listed as a screen recording", { name: e.name })
+                    : t("“{name}” is now listed as a screenshot", { name: e.name }),
+                2500,
+              );
             } catch (err) {
               flash(String(err), 4000);
             }
@@ -1446,7 +1546,7 @@ export default function App() {
 
       {pop?.kind === "sort" && (
         <div className="menu" style={{ top: pop.y, left: Math.max(8, pop.x - 210) }} role="menu" onClick={(e) => e.stopPropagation()}>
-          <div className="menu-label">Sort by</div>
+          <div className="menu-label">{t("Sort by")}</div>
           {SORTS.map((o) => (
             <button
               key={o.key}
@@ -1457,7 +1557,7 @@ export default function App() {
                 setPop(null);
               }}
             >
-              {o.label}
+              {t(o.label)}
               {sort === o.key && <Icon name="check" size={14} className="check" />}
             </button>
           ))}
@@ -1473,7 +1573,7 @@ export default function App() {
               }}
             >
               <Icon name={d ? "down" : "up"} size={14} />
-              {d ? "Descending" : "Ascending"}
+              {d ? t("Descending") : t("Ascending")}
               {desc === d && <Icon name="check" size={14} className="check" />}
             </button>
           ))}
@@ -1488,7 +1588,7 @@ export default function App() {
               chooseRoot();
             }}
           >
-            <Icon name="folder" size={14} /> Change Folder…
+            <Icon name="folder" size={14} /> {t("Change Folder…")}
           </button>
           <button
             role="menuitemcheckbox"
@@ -1497,9 +1597,9 @@ export default function App() {
               setPop(null);
               toggleReadOnly();
             }}
-            title="When on, Mori refuses every change to your files (enforced by the backend)."
+            title={t("When on, Mori refuses every change to your files (enforced by the backend).")}
           >
-            <Icon name="shield" size={14} /> Read-only Mode
+            <Icon name="shield" size={14} /> {t("Read-only Mode")}
             {readOnly && <Icon name="check" size={14} className="check" />}
           </button>
           <button
@@ -1508,9 +1608,9 @@ export default function App() {
               setPop(null);
               clearCache();
             }}
-            title="Delete Mori's thumbnails and index (your files are not touched)"
+            title={t("Delete Mori's thumbnails and index (your files are not touched)")}
           >
-            <Icon name="refresh" size={14} /> Clear Cache
+            <Icon name="refresh" size={14} /> {t("Clear Cache")}
           </button>
           <div className="sep" />
           <button
@@ -1518,9 +1618,9 @@ export default function App() {
               setPop(null);
               startPrivate(null);
             }}
-            title="Read-only, temporary, no automatic decoding: for drives and folders you don't trust"
+            title={t("Read-only, temporary, no automatic decoding: for drives and folders you don't trust")}
           >
-            <Icon name="shield" size={14} /> Private Inspection…
+            <Icon name="shield" size={14} /> {t("Private Inspection…")}
           </button>
           <div className="sep" />
           <button
@@ -1529,7 +1629,7 @@ export default function App() {
               setDialog({ kind: "integrity" });
             }}
           >
-            <Icon name="check" size={14} /> Integrity Snapshots…
+            <Icon name="check" size={14} /> {t("Integrity Snapshots…")}
           </button>
           <button
             onClick={() => {
@@ -1537,7 +1637,7 @@ export default function App() {
               setDialog({ kind: "privacy" });
             }}
           >
-            <Icon name="lock" size={14} /> Privacy & Local Data…
+            <Icon name="lock" size={14} /> {t("Privacy & Local Data…")}
           </button>
           <button
             onClick={() => {
@@ -1545,34 +1645,53 @@ export default function App() {
               setDialog({ kind: "diagnostics" });
             }}
           >
-            <Icon name="info" size={14} /> Diagnostics…
+            <Icon name="info" size={14} /> {t("Diagnostics…")}
           </button>
+          <button
+            onClick={() => {
+              setPop(null);
+              setDialog({ kind: "language" });
+            }}
+          >
+            <Icon name="globe" size={14} /> {t("Language…")}
+          </button>
+          {canRate && (
+            <button
+              onClick={() => {
+                setPop(null);
+                rateMori();
+              }}
+              title={t("Write a review on the store page")}
+            >
+              <Icon name="star" size={14} /> {t("Rate Mori…")}
+            </button>
+          )}
           <button
             onClick={() => {
               setPop(null);
               setDialog({ kind: "history" });
             }}
-            title="Changes Mori made to your files in this session, with Undo where possible"
+            title={t("Changes Mori made to your files in this session, with Undo where possible")}
           >
-            <Icon name="clock" size={14} /> Undo History…
+            <Icon name="clock" size={14} /> {t("Undo History…")}
           </button>
           <button
             onClick={() => {
               setPop(null);
               startTemporary();
             }}
-            title="Open a folder without saving an index, thumbnails or anything else about it"
+            title={t("Open a folder without saving an index, thumbnails or anything else about it")}
           >
-            <Icon name="clock" size={14} /> Temporary Session…
+            <Icon name="clock" size={14} /> {t("Temporary Session…")}
           </button>
           <button
             onClick={() => {
               setPop(null);
               setDialog({ kind: "clearSession" });
             }}
-            title="Forget analysis results and folders picked in this session (files, caches and records are kept)"
+            title={t("Forget analysis results and folders picked in this session (files, caches and records are kept)")}
           >
-            <Icon name="close" size={14} /> Clear Session Data…
+            <Icon name="close" size={14} /> {t("Clear Session Data…")}
           </button>
           <button
             disabled={status.temporary}
@@ -1580,9 +1699,9 @@ export default function App() {
               setPop(null);
               setDialog({ kind: "forget" });
             }}
-            title="Remove everything Mori stores about this drive (nothing on the drive is changed)"
+            title={t("Remove everything Mori stores about this drive (nothing on the drive is changed)")}
           >
-            <Icon name="drive" size={14} /> Forget This Drive…
+            <Icon name="drive" size={14} /> {t("Forget This Drive…")}
           </button>
         </div>
       )}
@@ -1595,14 +1714,14 @@ export default function App() {
           <div className="dialog-icon">
             <Icon name="shield" size={20} />
           </div>
-          <h2>Remove protection from “{dialog.entry.name}”?</h2>
-          <p>Mori will again allow renaming, moving and deleting items inside this folder when you ask it to.</p>
+          <h2>{t("Remove protection from “{name}”?", { name: dialog.entry.name })}</h2>
+          <p>{t("Mori will again allow renaming, moving and deleting items inside this folder when you ask it to.")}</p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setDialog(null)} autoFocus>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn primary" onClick={() => setProtected(dialog.entry, false)}>
-              Remove Protection
+              {t("Remove Protection")}
             </button>
           </div>
         </ModalFrame>
@@ -1648,6 +1767,7 @@ export default function App() {
       {dialog?.kind === "compare" && <CompareDialog a={dialog.a} b={dialog.b} onClose={() => setDialog(null)} onNotice={(m) => flash(m, 2500)} />}
       {dialog?.kind === "integrity" && <IntegrityPanel onClose={() => setDialog(null)} onNotice={(m) => flash(m, 3000)} />}
       {dialog?.kind === "diagnostics" && <Diagnostics onClose={() => setDialog(null)} />}
+      {dialog?.kind === "language" && <LanguageDialog onClose={() => setDialog(null)} />}
       {dialog?.kind === "privacy" && (
         <PrivacyData
           onClose={() => setDialog(null)}
@@ -1670,42 +1790,44 @@ export default function App() {
           <div className="dialog-icon">
             <Icon name="drive" size={20} />
           </div>
-          <h2>Forget “{status.rootName}”?</h2>
+          <h2>{t("Forget “{name}”?", { name: status.rootName })}</h2>
           <p>
-            Mori will remove everything it stores about this drive: its index, thumbnails, and its private, protected, favorite, tag and screenshot
-            records. Then the drive is closed.
+            {t(
+              "Mori will remove everything it stores about this drive: its index, thumbnails, and its private, protected, favorite, tag and screenshot records. Then the drive is closed.",
+            )}
           </p>
           <p className="dialog-note">
-            <strong>Nothing on the drive is deleted or changed.</strong> This only affects Mori's own data on this computer. Tag names themselves are
-            kept.
+            <strong>{t("Nothing on the drive is deleted or changed.")}</strong> {t("This only affects Mori's own data on this computer. Tag names themselves are kept.")}
           </p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setDialog(null)} autoFocus>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn primary" onClick={forgetDrive}>
-              Forget Drive
+              {t("Forget Drive")}
             </button>
           </div>
         </ModalFrame>
       )}
       {dialog?.kind === "clearSession" && (
         <ModalFrame onCancel={() => setDialog(null)}>
-          <h2>Clear session data?</h2>
+          <h2>{t("Clear session data?")}</h2>
           <p>
-            Forgets what this session holds in memory: analysis results, folders picked for analysis, recent locations and search. Running analyses
-            are stopped.
+            {t(
+              "Forgets what this session holds in memory: analysis results, folders picked for analysis, recent locations and search. Running analyses are stopped.",
+            )}
           </p>
           <p className="dialog-note">
-            Not the same as Clear Cache (thumbnails and indexes), Forget This Drive (Mori's records about a drive) or deleting files — none of those
-            happen here.
+            {t(
+              "Not the same as Clear Cache (thumbnails and indexes), Forget This Drive (Mori's records about a drive) or deleting files — none of those happen here.",
+            )}
           </p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setDialog(null)} autoFocus>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn primary" onClick={clearSessionData}>
-              Clear Session Data
+              {t("Clear Session Data")}
             </button>
           </div>
         </ModalFrame>
@@ -1790,7 +1912,7 @@ function dropTarget<T extends { id: string; name: string; path: string; kind?: s
       e.stopPropagation();
       e.dataTransfer.dropEffect = v.ok ? (e.altKey ? "copy" : "move") : "none";
       mark(e.currentTarget, v.ok ? "ok" : "no");
-      e.currentTarget.title = v.ok ? `Move into “${target.name}”` : v.reason;
+      e.currentTarget.title = v.ok ? t("Move into “{name}”", { name: target.name }) : v.reason;
       onHover?.();
     },
     onDragLeave: (e: React.DragEvent<HTMLElement>) => {
@@ -1921,7 +2043,7 @@ function FolderTree({
             className={`twisty ${open && !leaf ? "open" : ""} ${leaf ? "leaf" : ""}`}
             onClick={() => toggle(f.id)}
             tabIndex={leaf ? -1 : 0}
-            aria-label={open ? `Collapse ${f.name}` : `Expand ${f.name}`}
+            aria-label={open ? t("Collapse {name}", { name: f.name }) : t("Expand {name}", { name: f.name })}
             aria-expanded={!leaf ? open : undefined}
           >
             <Icon name="chevron" size={12} />
@@ -1929,20 +2051,28 @@ function FolderTree({
           <button
             className="label"
             onClick={() => onOpen(f.id)}
-            title={f.private ? `${f.name} — ${PRIVATE_HINT}` : f.name}
-            aria-label={`${f.name}${f.private ? ", private folder" : ""}${f.protected ? ", protected folder" : ""}`}
+            title={f.private ? `${f.name} — ${t(PRIVATE_HINT)}` : f.name}
+            aria-label={
+              f.private && f.protected
+                ? t("{name}, private folder, protected folder", { name: f.name })
+                : f.private
+                  ? t("{name}, private folder", { name: f.name })
+                  : f.protected
+                    ? t("{name}, protected folder", { name: f.name })
+                    : f.name
+            }
           >
             <Icon name="folder" size={15} />
             <span className="truncate">{f.name}</span>
             {(f.private || f.protected) && (
               <span className="tree-marks">
                 {f.private && (
-                  <span className="tree-mark" role="img" aria-label="Private folder" title="Private folder: its contents are hidden from global and recursive views">
+                  <span className="tree-mark" role="img" aria-label={t("Private folder")} title={t("Private folder: its contents are hidden from global and recursive views")}>
                     <Icon name="lock" size={13} stroke={1.7} />
                   </span>
                 )}
                 {f.protected && (
-                  <span className="tree-mark" role="img" aria-label="Protected folder (Never Modify)" title="Protected folder (Never Modify)">
+                  <span className="tree-mark" role="img" aria-label={t("Protected folder (Never Modify)")} title={t("Protected folder (Never Modify)")}>
                     <Icon name="shield" size={13} stroke={1.7} />
                   </span>
                 )}
@@ -2014,15 +2144,15 @@ function ContextMenu({
   onError: (msg: string) => void;
 }) {
   const folder = entry.kind === "folder";
-  const ro = canModify ? undefined : "Read-only: Mori won't change files right now";
+  const ro = canModify ? undefined : t("Read-only: Mori won't change files right now");
   const transfer = (
     <>
       <button onClick={onMoveTo} disabled={!canModify} title={ro}>
-        <Icon name="folder" size={14} /> Move to…
+        <Icon name="folder" size={14} /> {t("Move to…")}
         <kbd className="menu-kbd">M</kbd>
       </button>
       <button onClick={onCopyTo} disabled={!canModify} title={ro}>
-        <Icon name="copy" size={14} /> Copy to…
+        <Icon name="copy" size={14} /> {t("Copy to…")}
         <kbd className="menu-kbd">⇧M</kbd>
       </button>
     </>
@@ -2030,26 +2160,26 @@ function ContextMenu({
   if (count > 1) {
     return (
       <div className="menu" role="menu" style={{ left: Math.min(x, window.innerWidth - 230), top: Math.max(8, Math.min(y, window.innerHeight - 250)) }} onContextMenu={(e) => e.preventDefault()}>
-        <div className="menu-label">{plural(count, "item")} selected</div>
+        <div className="menu-label">{tn(count, "{n} item selected", "{n} items selected")}</div>
         {count === 2 && compareOk && (
-          <button onClick={onCompare} title="Exact comparison by SHA-256 (not visual similarity)">
-            <Icon name="check" size={14} /> Compare Integrity
+          <button onClick={onCompare} title={t("Exact comparison by SHA-256 (not visual similarity)")}>
+            <Icon name="check" size={14} /> {t("Compare Integrity")}
           </button>
         )}
         <button onClick={onFavorite}>
-          <Icon name="star" size={14} /> {entry.favorite ? "Remove from Favorites" : "Add to Favorites"}
+          <Icon name="star" size={14} /> {entry.favorite ? t("Remove from Favorites") : t("Add to Favorites")}
         </button>
         <button onClick={onTags}>
-          <Icon name="tag" size={14} /> Tags…
+          <Icon name="tag" size={14} /> {t("Tags…")}
         </button>
         <div className="sep" />
         {transfer}
         <div className="sep" />
         <button className="danger" onClick={onTrash} disabled={!canModify} title={ro}>
-          <Icon name="trash" size={14} /> Move {plural(count, "item")} to Trash
+          <Icon name="trash" size={14} /> {tn(count, "Move {n} item to Trash", "Move {n} items to Trash")}
         </button>
         <button className="danger" onClick={onDelete}>
-          <Icon name="close" size={14} /> Delete Permanently…
+          <Icon name="close" size={14} /> {t("Delete Permanently…")}
         </button>
       </div>
     );
@@ -2059,84 +2189,90 @@ function ContextMenu({
     <div className="menu" role="menu" style={style} onContextMenu={(e) => e.preventDefault()}>
       {entry.kind !== "link" && (
         <button onClick={onPreview}>
-          <Icon name={folder ? "folder" : "gallery"} size={14} /> {folder ? "Open Folder" : "Preview"}
+          <Icon name={folder ? "folder" : "gallery"} size={14} /> {folder ? t("Open Folder") : t("Preview")}
         </button>
       )}
       {folder && (
-        <button onClick={onCleanup} title="Go through this folder's files one by one: Keep or Mark for Trash. Nothing moves until you confirm.">
-          <Icon name="gallery" size={14} /> Quick Cleanup…
+        <button onClick={onCleanup} title={t("Go through this folder's files one by one: Keep or Mark for Trash. Nothing moves until you confirm.")}>
+          <Icon name="gallery" size={14} /> {t("Quick Cleanup…")}
         </button>
       )}
       {!folder && entry.kind !== "link" && (
-        <button onClick={onIsolate} title="View worker-rendered copies only. The original is never opened or run.">
-          <Icon name="shield" size={14} /> Open in Isolation
+        <button onClick={onIsolate} title={t("View worker-rendered copies only. The original is never opened or run.")}>
+          <Icon name="shield" size={14} /> {t("Open in Isolation")}
         </button>
       )}
       {!folder && entry.kind !== "link" && (
         <button onClick={() => api.openFile(entry.id).catch((e) => onError(String(e)))}>
-          <Icon name="external" size={14} /> Open with Default App
+          <Icon name="external" size={14} /> {t("Open with Default App")}
         </button>
       )}
       <button onClick={() => api.revealFile(entry.id)}>
-        <Icon name="reveal" size={14} /> {isMac ? "Show in Finder" : "Show in Folder"}
+        <Icon name="reveal" size={14} /> {isMac ? t("Show in Finder") : t("Show in Folder")}
       </button>
       <button onClick={onCopy}>
-        <Icon name="copy" size={14} /> Copy Path
+        <Icon name="copy" size={14} /> {t("Copy Path")}
       </button>
       <button onClick={onInfo}>
-        <Icon name="info" size={14} /> Get Info
+        <Icon name="info" size={14} /> {t("Get Info")}
         <kbd className="menu-kbd">I</kbd>
       </button>
       {(entry.kind === "photo" || entry.kind === "video") && (
-        <button onClick={onCapture} title="Mori guesses this from the name and the system's screen-capture mark; correct it here. The file isn't changed.">
+        <button onClick={onCapture} title={t("Mori guesses this from the name and the system's screen-capture mark; correct it here. The file isn't changed.")}>
           <Icon name={entry.kind === "video" ? "recording" : "screenshot"} size={14} />
-          {entry.capture ? (entry.capture === 2 ? "Not a Screen Recording" : "Not a Screenshot") : entry.kind === "video" ? "Mark as Screen Recording" : "Mark as Screenshot"}
+          {entry.capture
+            ? entry.capture === 2
+              ? t("Not a Screen Recording")
+              : t("Not a Screenshot")
+            : entry.kind === "video"
+              ? t("Mark as Screen Recording")
+              : t("Mark as Screenshot")}
         </button>
       )}
       {entry.kind !== "link" && (
         <>
           <div className="sep" />
           <button onClick={onFavorite}>
-            <Icon name="star" size={14} /> {entry.favorite ? "Remove from Favorites" : "Add to Favorites"}
+            <Icon name="star" size={14} /> {entry.favorite ? t("Remove from Favorites") : t("Add to Favorites")}
             <kbd className="menu-kbd">F</kbd>
           </button>
           <button onClick={onTags}>
-            <Icon name="tag" size={14} /> Tags…
+            <Icon name="tag" size={14} /> {t("Tags…")}
           </button>
           {folder ? (
-            <button onClick={onSnapshot} title="Record SHA-256 of every file here (saved in Mori's local data) to verify later">
-              <Icon name="check" size={14} /> Create Integrity Snapshot
+            <button onClick={onSnapshot} title={t("Record SHA-256 of every file here (saved in Mori's local data) to verify later")}>
+              <Icon name="check" size={14} /> {t("Create Integrity Snapshot")}
             </button>
           ) : (
             <button onClick={onChecksum}>
-              <Icon name="check" size={14} /> Calculate Checksum
+              <Icon name="check" size={14} /> {t("Calculate Checksum")}
             </button>
           )}
         </>
       )}
       <div className="sep" />
       <button onClick={onRename} disabled={!canModify} title={ro}>
-        <Icon name="rename" size={14} /> Rename…
+        <Icon name="rename" size={14} /> {t("Rename…")}
         <kbd className="menu-kbd">F2</kbd>
       </button>
       {transfer}
       {folder && (
-        <button onClick={onPrivacy} title={entry.private ? undefined : PRIVATE_HINT}>
-          <Icon name="lock" size={14} /> {entry.private ? "Make Public" : "Make Private…"}
+        <button onClick={onPrivacy} title={entry.private ? undefined : t(PRIVATE_HINT)}>
+          <Icon name="lock" size={14} /> {entry.private ? t("Make Public") : t("Make Private…")}
         </button>
       )}
       {folder && (
-        <button onClick={onProtect} title={entry.protected ? undefined : "Mori will refuse to rename, move or delete anything inside this folder."}>
-          <Icon name="shield" size={14} /> {entry.protected ? "Remove Protection…" : "Never Modify"}
+        <button onClick={onProtect} title={entry.protected ? undefined : t("Mori will refuse to rename, move or delete anything inside this folder.")}>
+          <Icon name="shield" size={14} /> {entry.protected ? t("Remove Protection…") : t("Never Modify")}
         </button>
       )}
       <div className="sep" />
       <button className="danger" onClick={onTrash} disabled={!canModify} title={ro}>
-        <Icon name="trash" size={14} /> Move to Trash
-        <kbd className="menu-kbd">{isMac ? "⌘⌫" : "Del"}</kbd>
+        <Icon name="trash" size={14} /> {t("Move to Trash")}
+        <kbd className="menu-kbd">{isMac ? "⌘⌫" : t("Del")}</kbd>
       </button>
-      <button className="danger" onClick={onDelete} title="Bypasses the Trash. Shows exactly what will be deleted first.">
-        <Icon name="close" size={14} /> Delete Permanently…
+      <button className="danger" onClick={onDelete} title={t("Bypasses the Trash. Shows exactly what will be deleted first.")}>
+        <Icon name="close" size={14} /> {t("Delete Permanently…")}
       </button>
     </div>
   );
@@ -2164,28 +2300,28 @@ function SelectionBar({
   onTrash: () => void;
   onClear: () => void;
 }) {
-  const ro = canModify ? undefined : "Read-only: Mori won't change files right now";
-  const allFav = targets.length > 0 && targets.every((t) => t.favorite || t.kind === "link");
+  const ro = canModify ? undefined : t("Read-only: Mori won't change files right now");
+  const allFav = targets.length > 0 && targets.every((x) => x.favorite || x.kind === "link");
   return (
-    <div className="selection-bar" role="toolbar" aria-label={`${count} selected`}>
-      <span className="count">{count.toLocaleString()} selected</span>
-      <button className="btn small ghost" onClick={onMove} disabled={!canModify} title={ro ?? "Move to… (M)"}>
-        <Icon name="folder" size={13} /> Move to…
+    <div className="selection-bar" role="toolbar" aria-label={t("{count} selected", { count })}>
+      <span className="count">{t("{count} selected", { count })}</span>
+      <button className="btn small ghost" onClick={onMove} disabled={!canModify} title={ro ?? `${t("Move to…")} (M)`}>
+        <Icon name="folder" size={13} /> {t("Move to…")}
       </button>
-      <button className="btn small ghost" onClick={onCopy} disabled={!canModify} title={ro ?? "Copy to… (⇧M)"}>
-        <Icon name="copy" size={13} /> Copy to…
+      <button className="btn small ghost" onClick={onCopy} disabled={!canModify} title={ro ?? `${t("Copy to…")} (⇧M)`}>
+        <Icon name="copy" size={13} /> {t("Copy to…")}
       </button>
-      <button className="btn small ghost" onClick={onTags} title="Tags…">
-        <Icon name="tag" size={13} /> Tags…
+      <button className="btn small ghost" onClick={onTags} title={t("Tags…")}>
+        <Icon name="tag" size={13} /> {t("Tags…")}
       </button>
-      <button className="btn small ghost" onClick={() => onFavorite(!allFav)} title={allFav ? "Remove from Favorites (F)" : "Add to Favorites (F)"}>
-        <Icon name="star" size={13} /> {allFav ? "Unfavorite" : "Favorite"}
+      <button className="btn small ghost" onClick={() => onFavorite(!allFav)} title={`${allFav ? t("Remove from Favorites") : t("Add to Favorites")} (F)`}>
+        <Icon name="star" size={13} /> {allFav ? t("Unfavorite") : t("Favorite")}
       </button>
       <span className="sep" />
-      <button className="btn small ghost danger" onClick={onTrash} disabled={!canModify} title={ro ?? `Move to Trash (${isMac ? "⌘⌫" : "Delete"})`}>
-        <Icon name="trash" size={13} /> Move to Trash
+      <button className="btn small ghost danger" onClick={onTrash} disabled={!canModify} title={ro ?? `${t("Move to Trash")} (${isMac ? "⌘⌫" : t("Delete")})`}>
+        <Icon name="trash" size={13} /> {t("Move to Trash")}
       </button>
-      <button className="icon-btn" onClick={onClear} title="Clear selection (Esc)" aria-label="Clear selection">
+      <button className="icon-btn" onClick={onClear} title={t("Clear selection (Esc)")} aria-label={t("Clear selection")}>
         <Icon name="close" size={13} />
       </button>
     </div>
@@ -2199,18 +2335,19 @@ function PrivateDialog({ entry, onCancel, onConfirm }: { entry: Entry; onCancel:
       <div className="dialog-icon">
         <Icon name="lock" size={20} />
       </div>
-      <h2>Make “{entry.name}” private?</h2>
+      <h2>{t("Make “{name}” private?", { name: entry.name })}</h2>
       <p>
-        Its contents will no longer appear in global search, media categories, counts, recursive parent-folder views or analyses started from a parent
-        folder. You can still open the folder normally.
+        {t(
+          "Its contents will no longer appear in global search, media categories, counts, recursive parent-folder views or analyses started from a parent folder. You can still open the folder normally.",
+        )}
       </p>
-      <p className="dialog-note">This only changes what Mori shows. Nothing on disk is modified, moved or encrypted.</p>
+      <p className="dialog-note">{t("This only changes what Mori shows. Nothing on disk is modified, moved or encrypted.")}</p>
       <div className="dialog-actions">
         <button className="btn" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="btn primary" onClick={onConfirm} autoFocus>
-          Make Private
+          {t("Make Private")}
         </button>
       </div>
     </ModalFrame>
@@ -2245,7 +2382,7 @@ function RenameDialog({ entry, onCancel, onDone }: { entry: Entry; onCancel: () 
   return (
     <ModalFrame onCancel={onCancel}>
       <form onSubmit={submit}>
-        <h2>Rename</h2>
+        <h2>{t("Rename")}</h2>
         <input
           ref={input}
           className="text-input"
@@ -2258,15 +2395,15 @@ function RenameDialog({ entry, onCancel, onDone }: { entry: Entry; onCancel: () 
           autoCorrect="off"
           autoCapitalize="off"
           maxLength={255}
-          aria-label="New name"
+          aria-label={t("New name")}
         />
         {error && <p className="field-error">{error}</p>}
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onCancel}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
-            Rename
+            {t("Rename")}
           </button>
         </div>
       </form>
@@ -2280,17 +2417,18 @@ function Welcome({ info, onChoose, onPrivate }: { info: InitInfo; onChoose: () =
       <div className="welcome-card">
         <Logo size={72} />
         <h1>Mori</h1>
-        <p>Choose the drive or folder you want to browse. Mori remembers it, works fully offline, and only changes files when you ask it to.</p>
+        <p>{t("Choose the drive or folder you want to browse. Mori remembers it, works fully offline, and only changes files when you ask it to.")}</p>
         <button className="btn primary large" onClick={onChoose}>
-          Choose Folder…
+          {t("Choose Folder…")}
         </button>
-        <button className="btn large" onClick={onPrivate} title="Read-only, temporary, no automatic decoding, nothing remembered afterwards">
-          <Icon name="shield" size={14} /> Private Inspection…
+        <button className="btn large" onClick={onPrivate} title={t("Read-only, temporary, no automatic decoding, nothing remembered afterwards")}>
+          <Icon name="shield" size={14} /> {t("Private Inspection…")}
         </button>
         {info.translocated && (
           <p className="hint">
-            macOS is running Mori from a temporary quarantine location, so it can't see which drive it's on. See the README section “Portable use on
-            macOS” to fix this once.
+            {t(
+              "macOS is running Mori from a temporary quarantine location, so it can't see which drive it's on. See the README section “Portable use on macOS” to fix this once.",
+            )}
           </p>
         )}
       </div>

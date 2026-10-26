@@ -131,11 +131,11 @@ pub struct Location {
 #[serde(rename_all = "camelCase")]
 pub struct Group {
     pub category: Category,
-    pub title: &'static str,
+    pub title: String,
     /// What it contains and why Mori keeps it.
-    pub what: &'static str,
+    pub what: String,
     /// Can it reveal anything about the user's files?
-    pub sensitivity: &'static str,
+    pub sensitivity: String,
     pub bytes: u64,
     pub files: u64,
     pub locations: Vec<Location>,
@@ -163,27 +163,27 @@ pub fn paths(d: &Dirs, c: Category) -> Vec<PathBuf> {
     }
 }
 
-pub fn describe(c: Category) -> (&'static str, &'static str, &'static str) {
+pub fn describe(c: Category) -> (String, String, String) {
     match c {
         Category::Cache => (
-            "Cache & thumbnails",
-            "Thumbnails and video frames made by the sandboxed worker, similarity fingerprints (64×64 grayscale), and the index of each browsed folder (names, sizes, dates). They make browsing fast and are rebuilt when needed.",
-            "Thumbnails and fingerprints show what images look like; indexes list file and folder names.",
+            tr!("Cache & thumbnails"),
+            tr!("Thumbnails and video frames made by the sandboxed worker, similarity fingerprints (64×64 grayscale), and the index of each browsed folder (names, sizes, dates). They make browsing fast and are rebuilt when needed."),
+            tr!("Thumbnails and fingerprints show what images look like; indexes list file and folder names."),
         ),
         Category::Analysis => (
-            "Analysis data",
-            "“Not duplicates” decisions (pairs of content hashes), the list of videos that stopped the system media engine (opaque hashes), and unfinished Quick Cleanup sessions (opaque item ids with Keep / Mark for Trash decisions, never saved in temporary sessions).",
-            "No names or paths.",
+            tr!("Analysis data"),
+            tr!("“Not duplicates” decisions (pairs of content hashes), the list of videos that stopped the system media engine (opaque hashes), and unfinished Quick Cleanup sessions (opaque item ids with Keep / Mark for Trash decisions, never saved in temporary sessions)."),
+            tr!("No names or paths."),
         ),
         Category::History => (
-            "History",
-            "Drives you inspected safely (volume ID and name), the last folder opened, and a crash marker (time and source-code line only).",
-            "Drive names and the last folder's path.",
+            tr!("History"),
+            tr!("Drives you inspected safely (volume ID and name), the last folder opened, and a crash marker (time and source-code line only)."),
+            tr!("Drive names and the last folder's path."),
         ),
-        Category::Organization => ("Tags & favorites", "Your tags, favorites and screenshot corrections, by volume and path.", "Paths of tagged items and tag names."),
-        Category::Rules => ("Folder privacy & protection rules", "Which folders are private or protected (Never Modify), by volume and path.", "Paths of those folders."),
-        Category::Integrity => ("Integrity snapshots", "Snapshots you saved: relative paths, sizes and SHA-256 of the files.", "File names and checksums of the snapshotted items."),
-        Category::Settings => ("Settings", "View preferences and Read-only Mode.", "Nothing about your files besides the last folder (listed under History)."),
+        Category::Organization => (tr!("Tags & favorites"), tr!("Your tags, favorites and screenshot corrections, by volume and path."), tr!("Paths of tagged items and tag names.")),
+        Category::Rules => (tr!("Folder privacy & protection rules"), tr!("Which folders are private or protected (Never Modify), by volume and path."), tr!("Paths of those folders.")),
+        Category::Integrity => (tr!("Integrity snapshots"), tr!("Snapshots you saved: relative paths, sizes and SHA-256 of the files."), tr!("File names and checksums of the snapshotted items.")),
+        Category::Settings => (tr!("Settings"), tr!("View preferences and Read-only Mode."), tr!("Nothing about your files besides the last folder (listed under History).")),
     }
 }
 

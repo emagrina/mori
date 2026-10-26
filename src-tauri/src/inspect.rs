@@ -127,7 +127,7 @@ pub fn report(path: &Path, display: &str, meta: &Metadata, file: Option<&mut Fil
         size: meta.len(),
         head: &head,
         tail: &tail,
-        detected,
+        detected: detected.clone(),
         executable_bit: exec_bit(meta),
         quarantined: has_xattr(path, "com.apple.quarantine"),
         decode_failed: ctx.decode_failed,
@@ -137,7 +137,7 @@ pub fn report(path: &Path, display: &str, meta: &Metadata, file: Option<&mut Fil
         symlink_outside: ctx.link_outside,
     };
     let findings = if kind == "folder" { risk::name_findings(&name) } else { risk::assess(&input) };
-    let summary = risk::summary(&findings, detected, &ext);
+    let summary = risk::summary(&findings, detected.as_ref(), &ext);
     FileReport {
         name: display_safe(&name),
         path: display_safe(display),
@@ -146,7 +146,7 @@ pub fn report(path: &Path, display: &str, meta: &Metadata, file: Option<&mut Fil
         modified: millis(meta.modified()),
         created: millis(meta.created()),
         accessed: millis(meta.accessed()),
-        ext_matches: detected.and_then(|d| filetype::expected_ids(&ext).map(|e| e.contains(&d.id))),
+        ext_matches: detected.as_ref().and_then(|d| filetype::expected_ids(&ext).map(|e| e.contains(&d.id))),
         ext: display_safe(&ext),
         detected,
         findings,
@@ -226,13 +226,13 @@ fn permissions(path: &Path, meta: &Metadata) -> Option<Permissions> {
     );
     let mut special = Vec::new();
     if mode & 0o4000 != 0 {
-        special.push("setuid (runs as its owner)".into());
+        special.push(tr!("setuid (runs as its owner)"));
     }
     if mode & 0o2000 != 0 {
         special.push("setgid".into());
     }
     if mode & 0o1000 != 0 {
-        special.push("sticky".into());
+        special.push(tr!("sticky"));
     }
     Some(Permissions {
         mode: text,
@@ -250,7 +250,7 @@ fn permissions(path: &Path, meta: &Metadata) -> Option<Permissions> {
 #[cfg(not(unix))]
 fn permissions(_: &Path, meta: &Metadata) -> Option<Permissions> {
     Some(Permissions {
-        mode: if meta.permissions().readonly() { "read-only".into() } else { "writable".into() },
+        mode: if meta.permissions().readonly() { tr!("read-only") } else { tr!("writable") },
         ..Default::default()
     })
 }
@@ -286,18 +286,18 @@ fn fs_flags(meta: &Metadata) -> Vec<String> {
     use std::os::macos::fs::MetadataExt;
     let f = meta.st_flags();
     [
-        (0x0000_0002u32, "locked (user immutable)"),
-        (0x0000_0004, "append-only (user)"),
-        (0x0000_8000, "hidden"),
-        (0x0000_0020, "compressed"),
-        (0x0002_0000, "locked by the system (immutable)"),
-        (0x0004_0000, "append-only (system)"),
-        (0x0000_0040, "tracked"),
-        (0x0010_0000, "dataless (stored in the cloud)"),
+        (0x0000_0002u32, tr!("locked (user immutable)")),
+        (0x0000_0004, tr!("append-only (user)")),
+        (0x0000_8000, tr!("hidden")),
+        (0x0000_0020, tr!("compressed")),
+        (0x0002_0000, tr!("locked by the system (immutable)")),
+        (0x0004_0000, tr!("append-only (system)")),
+        (0x0000_0040, tr!("tracked")),
+        (0x0010_0000, tr!("dataless (stored in the cloud)")),
     ]
-    .iter()
+    .into_iter()
     .filter(|(bit, _)| f & bit != 0)
-    .map(|(_, s)| s.to_string())
+    .map(|(_, s)| s)
     .collect()
 }
 

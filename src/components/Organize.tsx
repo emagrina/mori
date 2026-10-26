@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, plural, type Entry, type TagInfo } from "../api";
+import { api, type Entry, type TagInfo } from "../api";
+import { fmtNum, t, tn } from "../i18n";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 
@@ -12,8 +13,8 @@ export function TagDialog({ entries, tags, onClose, onDone }: { entries: Entry[]
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ids = entries.map((e) => e.id);
-  const state = (t: TagInfo) => {
-    const n = entries.filter((e) => e.tags?.includes(t.id)).length;
+  const state = (g: TagInfo) => {
+    const n = entries.filter((e) => e.tags?.includes(g.id)).length;
     return n === 0 ? "none" : n === entries.length ? "all" : "some";
   };
   const run = async (tagName: string, on: boolean) => {
@@ -21,55 +22,61 @@ export function TagDialog({ entries, tags, onClose, onDone }: { entries: Entry[]
     setError(null);
     try {
       await api.tagItems(ids, tagName, on);
-      onDone(on ? `Tagged ${entries.length === 1 ? `“${entries[0].name}”` : plural(entries.length, "item")} “${tagName}”` : `Removed “${tagName}”`);
+      onDone(
+        on
+          ? entries.length === 1
+            ? t("Tagged “{name}” “{tag}”", { name: entries[0].name, tag: tagName })
+            : tn(entries.length, "Tagged {n} item “{tag}”", "Tagged {n} items “{tag}”", { tag: tagName })
+          : t("Removed “{tag}”", { tag: tagName }),
+      );
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
   };
-  const filtered = tags.filter((t) => !name.trim() || t.name.toLowerCase().includes(name.trim().toLowerCase()));
-  const exact = tags.some((t) => t.name.toLowerCase() === name.trim().toLowerCase());
+  const filtered = tags.filter((g) => !name.trim() || g.name.toLowerCase().includes(name.trim().toLowerCase()));
+  const exact = tags.some((g) => g.name.toLowerCase() === name.trim().toLowerCase());
   return (
     <ModalFrame onCancel={onClose}>
       <div className="dialog-icon">
         <Icon name="tag" size={20} />
       </div>
-      <h2>Tags for {entries.length === 1 ? `“${entries[0].name}”` : plural(entries.length, "item")}</h2>
+      <h2>{entries.length === 1 ? t("Tags for “{name}”", { name: entries[0].name }) : tn(entries.length, "Tags for {n} item", "Tags for {n} items")}</h2>
       <form
         onSubmit={(e) => {
           e.preventDefault();
           if (name.trim()) run(name.trim(), true);
         }}
       >
-        <input className="text-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Find or create a tag" autoFocus maxLength={60} spellCheck={false} />
+        <input className="text-input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("Find or create a tag")} autoFocus maxLength={60} spellCheck={false} />
       </form>
       <div className="tag-pick">
-        {filtered.map((t) => {
-          const st = state(t);
+        {filtered.map((g) => {
+          const st = state(g);
           return (
-            <button key={t.id} className={`tag-option ${st}`} disabled={busy} onClick={() => run(t.name, st !== "all")}>
+            <button key={g.id} className={`tag-option ${st}`} disabled={busy} onClick={() => run(g.name, st !== "all")}>
               <span className="check-box" aria-hidden>
                 {st === "all" && <Icon name="check" size={12} stroke={2.2} />}
                 {st === "some" && <span className="dash" />}
               </span>
-              <span className="truncate">{t.name}</span>
-              <span className="muted">{t.count.toLocaleString()}</span>
+              <span className="truncate">{g.name}</span>
+              <span className="muted">{fmtNum(g.count)}</span>
             </button>
           );
         })}
         {name.trim() && !exact && (
           <button className="tag-option create" disabled={busy} onClick={() => run(name.trim(), true)}>
-            <Icon name="tag" size={13} /> Create “{name.trim()}”
+            <Icon name="tag" size={13} /> {t("Create “{name}”", { name: name.trim() })}
           </button>
         )}
-        {!tags.length && !name.trim() && <p className="muted small">No tags yet. Type a name to create one.</p>}
+        {!tags.length && !name.trim() && <p className="muted small">{t("No tags yet. Type a name to create one.")}</p>}
       </div>
       {error && <p className="field-error">{error}</p>}
-      <p className="dialog-note">Tags are kept by Mori on this computer. The files aren't changed.</p>
+      <p className="dialog-note">{t("Tags are kept by Mori on this computer. The files aren't changed.")}</p>
       <div className="dialog-actions">
         <button className="btn" onClick={onClose}>
-          Done
+          {t("Done")}
         </button>
       </div>
     </ModalFrame>
@@ -82,7 +89,7 @@ export function TagManager({ tags, onClose, onChanged }: { tags: TagInfo[]; onCl
   const [editing, setEditing] = useState<{ id: number; name: string } | null>(null);
   const [confirm, setConfirm] = useState<TagInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const shown = useMemo(() => tags.filter((t) => t.name.toLowerCase().includes(query.trim().toLowerCase())), [tags, query]);
+  const shown = useMemo(() => tags.filter((g) => g.name.toLowerCase().includes(query.trim().toLowerCase())), [tags, query]);
   const act = async (f: () => Promise<void>, msg: string, deleted?: number) => {
     setError(null);
     try {
@@ -94,59 +101,59 @@ export function TagManager({ tags, onClose, onChanged }: { tags: TagInfo[]; onCl
   };
   return (
     <ModalFrame onCancel={onClose}>
-      <h2>Manage Tags</h2>
-      <input className="text-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search tags" spellCheck={false} />
+      <h2>{t("Manage Tags")}</h2>
+      <input className="text-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("Search tags")} spellCheck={false} />
       <div className="tag-pick">
-        {shown.map((t) =>
-          editing?.id === t.id ? (
+        {shown.map((g) =>
+          editing?.id === g.id ? (
             <form
-              key={t.id}
+              key={g.id}
               className="tag-option editing"
               onSubmit={(e) => {
                 e.preventDefault();
-                act(() => api.tagRename(t.id, editing.name), `Renamed to “${editing.name.trim()}”`).then(() => setEditing(null));
+                act(() => api.tagRename(g.id, editing.name), t("Renamed to “{name}”", { name: editing.name.trim() })).then(() => setEditing(null));
               }}
             >
-              <input className="text-input slim" value={editing.name} onChange={(e) => setEditing({ id: t.id, name: e.target.value })} autoFocus maxLength={60} />
+              <input className="text-input slim" value={editing.name} onChange={(e) => setEditing({ id: g.id, name: e.target.value })} autoFocus maxLength={60} />
               <button className="btn small" type="submit">
-                Save
+                {t("Save")}
               </button>
               <button className="btn small" type="button" onClick={() => setEditing(null)}>
-                Cancel
+                {t("Cancel")}
               </button>
             </form>
-          ) : confirm?.id === t.id ? (
-            <div key={t.id} className="tag-option editing">
+          ) : confirm?.id === g.id ? (
+            <div key={g.id} className="tag-option editing">
               <span className="truncate">
-                Remove “{t.name}” from {plural(t.count, "item")}? No files are deleted or changed.
+                {tn(g.count, "Remove “{tag}” from {n} item? No files are deleted or changed.", "Remove “{tag}” from {n} items? No files are deleted or changed.", { tag: g.name })}
               </span>
-              <button className="btn small danger-fill primary" onClick={() => act(() => api.tagDelete(t.id), `Deleted tag “${t.name}”. No files were changed.`, t.id).then(() => setConfirm(null))}>
-                Delete
+              <button className="btn small danger-fill primary" onClick={() => act(() => api.tagDelete(g.id), t("Deleted tag “{tag}”. No files were changed.", { tag: g.name }), g.id).then(() => setConfirm(null))}>
+                {t("Delete")}
               </button>
               <button className="btn small" onClick={() => setConfirm(null)}>
-                Cancel
+                {t("Cancel")}
               </button>
             </div>
           ) : (
-            <div key={t.id} className="tag-option">
+            <div key={g.id} className="tag-option">
               <Icon name="tag" size={13} />
-              <span className="truncate">{t.name}</span>
-              <span className="muted">{t.count.toLocaleString()}</span>
-              <button className="icon-btn" onClick={() => setEditing({ id: t.id, name: t.name })} title="Rename">
+              <span className="truncate">{g.name}</span>
+              <span className="muted">{fmtNum(g.count)}</span>
+              <button className="icon-btn" onClick={() => setEditing({ id: g.id, name: g.name })} title={t("Rename")}>
                 <Icon name="rename" size={13} />
               </button>
-              <button className="icon-btn" onClick={() => setConfirm(t)} title="Delete tag">
+              <button className="icon-btn" onClick={() => setConfirm(g)} title={t("Delete tag")}>
                 <Icon name="trash" size={13} />
               </button>
             </div>
           ),
         )}
-        {!shown.length && <p className="muted small">{tags.length ? "No tag matches." : "No tags yet. Use “Tags…” on a file or folder to add one."}</p>}
+        {!shown.length && <p className="muted small">{tags.length ? t("No tag matches.") : t("No tags yet. Use “Tags…” on a file or folder to add one.")}</p>}
       </div>
       {error && <p className="field-error">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={onClose}>
-          Done
+          {t("Done")}
         </button>
       </div>
     </ModalFrame>
@@ -164,10 +171,10 @@ export const TAG_NAME_MAX = 60;
  */
 export function tagNameProblem(raw: string, id: number, tags: TagInfo[]): string | null {
   const name = raw.trim();
-  if (!name) return "A tag needs a name.";
-  if ([...name].length > TAG_NAME_MAX) return `That name is too long (at most ${TAG_NAME_MAX} characters).`;
-  const other = tags.find((t) => t.id !== id && t.name.toLowerCase() === name.toLowerCase());
-  if (other) return `A tag named “${other.name}” already exists. Tags aren't merged: choose another name.`;
+  if (!name) return t("A tag needs a name.");
+  if ([...name].length > TAG_NAME_MAX) return t("That name is too long (at most {max} characters).", { max: TAG_NAME_MAX });
+  const other = tags.find((g) => g.id !== id && g.name.toLowerCase() === name.toLowerCase());
+  if (other) return t("A tag named “{name}” already exists. Tags aren't merged: choose another name.", { name: other.name });
   return null;
 }
 
@@ -189,9 +196,9 @@ export function TagList({
   active: number | null;
   /** False in temporary sessions: Mori keeps no records then. */
   canEdit: boolean;
-  onOpen: (t: TagInfo) => void;
-  onRename: (t: TagInfo) => void;
-  onDelete: (t: TagInfo) => void;
+  onOpen: (g: TagInfo) => void;
+  onRename: (g: TagInfo) => void;
+  onDelete: (g: TagInfo) => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; tag: TagInfo } | null>(null);
   useEffect(() => {
@@ -213,33 +220,33 @@ export function TagList({
       window.removeEventListener("keydown", onKey, true);
     };
   }, [menu]);
-  const open = (t: TagInfo, x: number, y: number) => setMenu({ x: Math.min(x, window.innerWidth - 200), y: Math.min(y, window.innerHeight - 90), tag: t });
+  const open = (g: TagInfo, x: number, y: number) => setMenu({ x: Math.min(x, window.innerWidth - 200), y: Math.min(y, window.innerHeight - 90), tag: g });
   return (
     <>
-      {tags.map((t) => (
+      {tags.map((g) => (
         <button
-          key={t.id}
-          className={`side-item ${active === t.id ? "on" : ""}`}
-          onClick={() => onOpen(t)}
+          key={g.id}
+          className={`side-item ${active === g.id ? "on" : ""}`}
+          onClick={() => onOpen(g)}
           onContextMenu={(e) => {
             // The menu only: right-clicking never opens the tag.
             e.preventDefault();
             e.stopPropagation();
-            open(t, e.clientX, e.clientY);
+            open(g, e.clientX, e.clientY);
           }}
           onKeyDown={(e) => {
             if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
               e.preventDefault();
               const r = e.currentTarget.getBoundingClientRect();
-              open(t, r.left + 24, r.bottom);
+              open(g, r.left + 24, r.bottom);
             }
           }}
           aria-haspopup="menu"
-          title={`${t.name} · right-click to rename or delete`}
+          title={t("{name} · right-click to rename or delete", { name: g.name })}
         >
           <Icon name="tag" />
-          <span className="truncate">{t.name}</span>
-          <span className="count">{t.count.toLocaleString()}</span>
+          <span className="truncate">{g.name}</span>
+          <span className="count">{fmtNum(g.count)}</span>
         </button>
       ))}
       {menu && (
@@ -267,14 +274,14 @@ function TagMenu({ x, y, tag, canEdit, onRename, onDelete }: { x: number; y: num
     const i = items.indexOf(document.activeElement as HTMLButtonElement);
     items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
   };
-  const ro = canEdit ? undefined : "Not available in a temporary session: Mori keeps no records about this folder.";
+  const ro = canEdit ? undefined : t("Not available in a temporary session: Mori keeps no records about this folder.");
   return (
-    <div ref={ref} className="menu" role="menu" aria-label={`Tag “${tag.name}”`} style={{ left: x, top: y }} onClick={(e) => e.stopPropagation()} onKeyDown={move} onContextMenu={(e) => e.preventDefault()}>
+    <div ref={ref} className="menu" role="menu" aria-label={t("Tag “{name}”", { name: tag.name })} style={{ left: x, top: y }} onClick={(e) => e.stopPropagation()} onKeyDown={move} onContextMenu={(e) => e.preventDefault()}>
       <button role="menuitem" onClick={onRename} disabled={!canEdit} title={ro}>
-        <Icon name="rename" size={14} /> Rename Tag…
+        <Icon name="rename" size={14} /> {t("Rename Tag…")}
       </button>
-      <button role="menuitem" className="danger" onClick={onDelete} disabled={!canEdit} title={ro ?? "Removes the tag only. No files are deleted or changed."}>
-        <Icon name="trash" size={14} /> Delete Tag…
+      <button role="menuitem" className="danger" onClick={onDelete} disabled={!canEdit} title={ro ?? t("Removes the tag only. No files are deleted or changed.")}>
+        <Icon name="trash" size={14} /> {t("Delete Tag…")}
       </button>
     </div>
   );
@@ -296,7 +303,7 @@ export function TagRenameDialog({ tag, tags, onCancel, onDone }: { tag: TagInfo;
     setBusy(true);
     try {
       await api.tagRename(tag.id, next);
-      onDone(`Renamed tag “${tag.name}” to “${next}”`);
+      onDone(t("Renamed tag “{old}” to “{name}”", { old: tag.name, name: next }));
     } catch (err) {
       setError(String(err));
       setBusy(false);
@@ -305,7 +312,7 @@ export function TagRenameDialog({ tag, tags, onCancel, onDone }: { tag: TagInfo;
   return (
     <ModalFrame onCancel={onCancel}>
       <form onSubmit={submit}>
-        <h2>Rename Tag</h2>
+        <h2>{t("Rename Tag")}</h2>
         <input
           ref={input}
           className="text-input"
@@ -314,19 +321,21 @@ export function TagRenameDialog({ tag, tags, onCancel, onDone }: { tag: TagInfo;
           maxLength={TAG_NAME_MAX + 20}
           spellCheck={false}
           autoCorrect="off"
-          aria-label="New tag name"
+          aria-label={t("New tag name")}
           aria-invalid={!!error}
         />
         {error && <p className="field-error">{error}</p>}
         <p className="dialog-note">
-          {tag.count > 0 ? `The ${plural(tag.count, "item")} with this tag keep it under the new name.` : "No items have this tag yet."}
+          {tag.count > 0
+            ? tn(tag.count, "The {n} item with this tag keeps it under the new name.", "The {n} items with this tag keep it under the new name.")
+            : t("No items have this tag yet.")}
         </p>
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onCancel}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
-            Rename
+            {t("Rename")}
           </button>
         </div>
       </form>
@@ -342,7 +351,7 @@ export function TagDeleteDialog({ tag, onCancel, onDone }: { tag: TagInfo; onCan
     setBusy(true);
     try {
       await api.tagDelete(tag.id);
-      onDone(`Deleted tag “${tag.name}”. No files were changed.`);
+      onDone(t("Deleted tag “{tag}”. No files were changed.", { tag: tag.name }));
     } catch (err) {
       setError(String(err));
       setBusy(false);
@@ -353,18 +362,18 @@ export function TagDeleteDialog({ tag, onCancel, onDone }: { tag: TagInfo; onCan
       <div className="dialog-icon">
         <Icon name="tag" size={20} />
       </div>
-      <h2>Delete tag “{tag.name}”?</h2>
-      <p>{tag.count > 0 ? `This removes the tag from ${plural(tag.count, "item")}.` : "No items have this tag."}</p>
+      <h2>{t("Delete tag “{tag}”?", { tag: tag.name })}</h2>
+      <p>{tag.count > 0 ? tn(tag.count, "This removes the tag from {n} item.", "This removes the tag from {n} items.") : t("No items have this tag.")}</p>
       <p className="dialog-note">
-        <strong>No files are deleted or changed.</strong> Only Mori's tag is removed.
+        <strong>{t("No files are deleted or changed.")}</strong> {t("Only Mori's tag is removed.")}
       </p>
       {error && <p className="field-error">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={onCancel} disabled={busy} autoFocus>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="btn primary danger-fill" onClick={run} disabled={busy}>
-          Delete Tag
+          {t("Delete Tag")}
         </button>
       </div>
     </ModalFrame>

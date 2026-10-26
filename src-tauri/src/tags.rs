@@ -68,10 +68,10 @@ fn clean_name(name: &str) -> Result<String, String> {
         .collect();
     let n = n.trim().to_owned();
     if n.is_empty() {
-        return Err("A tag needs a name.".into());
+        return Err(tr!("A tag needs a name."));
     }
     if n.chars().count() > MAX_NAME {
-        return Err("That tag name is too long.".into());
+        return Err(tr!("That tag name is too long."));
     }
     Ok(n)
 }
@@ -96,9 +96,9 @@ impl Store {
             let _ = fs::create_dir_all(dir);
         }
         let tmp = self.file.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(d).map_err(|_| "Could not save tags.")?)
-            .map_err(|_| "Could not save tags.")?;
-        fs::rename(tmp, &self.file).map_err(|_| "Could not save tags.".to_string())
+        fs::write(&tmp, serde_json::to_vec_pretty(d).map_err(|_| tr!("Could not save tags."))?)
+            .map_err(|_| tr!("Could not save tags."))?;
+        fs::rename(tmp, &self.file).map_err(|_| tr!("Could not save tags."))
     }
 
     pub fn list(&self) -> Vec<Tag> {
@@ -115,7 +115,7 @@ impl Store {
             return Ok(t.id);
         }
         if d.tags.len() >= MAX_TAGS {
-            return Err("Too many tags.".into());
+            return Err(tr!("Too many tags."));
         }
         let id = d.next_id;
         d.next_id += 1;
@@ -128,9 +128,9 @@ impl Store {
         let name = clean_name(name)?;
         let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
         if d.tags.iter().any(|t| t.id != id && t.name.to_lowercase() == name.to_lowercase()) {
-            return Err("A tag with that name already exists.".into());
+            return Err(tr!("A tag with that name already exists."));
         }
-        let t = d.tags.iter_mut().find(|t| t.id == id).ok_or("Unknown tag")?;
+        let t = d.tags.iter_mut().find(|t| t.id == id).ok_or_else(|| tr!("Unknown tag"))?;
         t.name = name;
         self.save(&d)
     }
@@ -153,7 +153,7 @@ impl Store {
     pub fn assign(&self, paths: &[PathBuf], id: u32, on: bool) -> Result<(), String> {
         let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
         if !d.tags.iter().any(|t| t.id == id) {
-            return Err("Unknown tag".into());
+            return Err(tr!("Unknown tag"));
         }
         for p in paths {
             let vol = volume_of(p);

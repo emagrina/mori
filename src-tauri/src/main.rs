@@ -1,6 +1,8 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
 mod archive;
 mod capture;
 mod cleanup;
@@ -27,6 +29,7 @@ mod policy;
 mod privacy;
 mod probe;
 mod protocol;
+mod review;
 mod risk;
 mod sanitize;
 mod secure;
@@ -232,7 +235,7 @@ impl AppState {
     /// Changes to Mori's own records are refused in a temporary session.
     fn persistent(&self) -> Result<(), String> {
         if self.temp.load(Ordering::SeqCst) {
-            Err("Not available in a temporary session: Mori isn't saving anything about this folder.".into())
+            Err(tr!("Not available in a temporary session: Mori isn't saving anything about this folder."))
         } else {
             Ok(())
         }
@@ -252,8 +255,8 @@ impl AppState {
     pub fn locate(&self, id: &str) -> Result<Located, String> {
         if id.starts_with('y') {
             let store = self.similar.lock().unwrap_or_else(PoisonError::into_inner);
-            let store = store.as_ref().ok_or("The analysis was cleared.")?;
-            let &i = store.ids.get(id).ok_or("Unknown file")?;
+            let store = store.as_ref().ok_or_else(|| tr!("The analysis was cleared."))?;
+            let &i = store.ids.get(id).ok_or_else(|| tr!("Unknown file"))?;
             let f = &store.files[i];
             return Ok(Located {
                 root: store.roots[f.root].clone(),
@@ -266,14 +269,17 @@ impl AppState {
         }
         if id.starts_with('m') {
             let store = self.meta_scan.lock().unwrap_or_else(PoisonError::into_inner);
-            let (root, rel, ext, name) =
-                store.as_ref().ok_or("The scan was cleared.")?.locate(id).ok_or("Unknown file")?;
+            let (root, rel, ext, name) = store
+                .as_ref()
+                .ok_or_else(|| tr!("The scan was cleared."))?
+                .locate(id)
+                .ok_or_else(|| tr!("Unknown file"))?;
             return Ok(Located { root, rel, ext, name, is_dir: false, is_link: false });
         }
         if id.starts_with('x') {
             let store = self.analysis.lock().unwrap_or_else(PoisonError::into_inner);
-            let store = store.as_ref().ok_or("The analysis was cleared.")?;
-            let &i = store.ids.get(id).ok_or("Unknown file")?;
+            let store = store.as_ref().ok_or_else(|| tr!("The analysis was cleared."))?;
+            let &i = store.ids.get(id).ok_or_else(|| tr!("Unknown file"))?;
             let f = &store.analysis.files[i];
             return Ok(Located {
                 root: store.analysis.roots[f.root].canon.clone(),
@@ -284,9 +290,9 @@ impl AppState {
                 is_link: false,
             });
         }
-        let root = self.root_canon().ok_or("No folder selected")?;
+        let root = self.root_canon().ok_or_else(|| tr!("No folder selected"))?;
         let idx = self.index();
-        let e = idx.get(id).ok_or("Unknown item")?;
+        let e = idx.get(id).ok_or_else(|| tr!("Unknown item"))?;
         Ok(Located {
             root,
             rel: e.path.clone(),
@@ -318,21 +324,21 @@ impl AppState {
         let loc = self.locate(id)?;
         if loc.is_dir || loc.is_link {
             // Links are never followed: opening one would read its target.
-            return Err("Not a file".into());
+            return Err(tr!("Not a file"));
         }
-        let (f, m, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| "File unavailable")?;
+        let (f, m, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| tr!("File unavailable"))?;
         Ok((f, m, canon, loc.ext))
     }
 
     /// Canonical path of an indexed file or folder ("" = root), confined to the root.
     fn path_by_id(&self, id: &str) -> Result<PathBuf, String> {
-        let root = self.root_canon().ok_or("No folder selected")?;
+        let root = self.root_canon().ok_or_else(|| tr!("No folder selected"))?;
         if id.is_empty() {
             return Ok(root);
         }
         let loc = self.locate(id)?;
         if Path::new(&loc.rel).components().any(|c| !matches!(c, Component::Normal(_))) {
-            return Err("Invalid path".into());
+            return Err(tr!("Invalid path"));
         }
         // A link is shown as itself: resolve its folder, never its target.
         let (dir, last) = match loc.rel.rsplit_once('/') {
@@ -340,9 +346,9 @@ impl AppState {
             None if loc.is_link => (String::new(), Some(loc.rel.clone())),
             _ => (loc.rel.clone(), None),
         };
-        let canon = fs::canonicalize(loc.root.join(&dir)).map_err(|_| "Item unavailable")?;
+        let canon = fs::canonicalize(loc.root.join(&dir)).map_err(|_| tr!("Item unavailable"))?;
         if !canon.starts_with(&loc.root) {
-            return Err("Item unavailable".into());
+            return Err(tr!("Item unavailable"));
         }
         Ok(match last {
             Some(name) => canon.join(name),
@@ -370,6 +376,12 @@ struct Settings {
     search_global: Option<bool>,
     #[serde(default)]
     read_only: Option<bool>,
+    /// Interface language; None follows the system.
+    #[serde(default)]
+    language: Option<String>,
+    /// When to ask for a store rating (only used by store builds).
+    #[serde(default)]
+    review: Option<review::State>,
 }
 
 const VIEWS: &[&str] = &["gallery", "grid", "list"];
@@ -383,6 +395,7 @@ fn read_settings(state: &AppState) -> Settings {
     Settings {
         view: s.view.filter(|v| VIEWS.contains(&v.as_str())),
         sort: s.sort.filter(|v| SORTS.contains(&v.as_str())),
+        language: s.language.filter(|v| i18n::supported(v)),
         ..s
     }
 }
@@ -391,9 +404,9 @@ fn write_settings(state: &AppState, f: impl FnOnce(&mut Settings)) -> Result<(),
     let _guard = state.settings_lock.lock().unwrap_or_else(PoisonError::into_inner);
     let mut s = read_settings(state);
     f(&mut s);
-    fs::create_dir_all(&state.data_dir).map_err(|_| "Could not save settings")?;
+    fs::create_dir_all(&state.data_dir).map_err(|_| tr!("Could not save settings"))?;
     fs::write(state.data_dir.join("settings.json"), serde_json::to_vec_pretty(&s).unwrap())
-        .map_err(|_| "Could not save settings".into())
+        .map_err(|_| tr!("Could not save settings"))
 }
 
 // ------------------------------------------------------------ drive detection
@@ -569,9 +582,9 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
 }
 
 fn open_root(app: &AppHandle, root: &Path) -> Result<(), String> {
-    let canon = fs::canonicalize(root).map_err(|_| "That folder can't be opened")?;
+    let canon = fs::canonicalize(root).map_err(|_| tr!("That folder can't be opened"))?;
     if !canon.is_dir() {
-        return Err("That isn't a folder".into());
+        return Err(tr!("That isn't a folder"));
     }
     let state = app.state::<AppState>();
     let name =
@@ -660,7 +673,7 @@ fn update_settings(
     search_global: bool,
 ) -> Result<(), String> {
     if !VIEWS.contains(&view.as_str()) || !SORTS.contains(&sort.as_str()) {
-        return Err("Invalid setting".into());
+        return Err(tr!("Invalid setting"));
     }
     write_settings(&state, |s| {
         s.view = Some(view);
@@ -671,16 +684,71 @@ fn update_settings(
     })
 }
 
+/// The interface language the user chose, if any.
+#[tauri::command]
+fn saved_language(state: State<'_, AppState>) -> Option<String> {
+    read_settings(&state).language
+}
+
+/// Sets the language of Mori's own messages; with `save`, remembers `pref`
+/// (None: follow the system).
+#[tauri::command]
+fn set_language(state: State<'_, AppState>, active: String, save: bool, pref: Option<String>) -> Result<(), String> {
+    if !i18n::supported(&active) || pref.as_deref().is_some_and(|p| !i18n::supported(p)) {
+        return Err(tr!("Invalid setting"));
+    }
+    i18n::set_active(&active);
+    if save {
+        write_settings(&state, |s| s.language = pref)?;
+    }
+    Ok(())
+}
+
+/// Whether this build is in a store, and so can ask for a rating.
+#[tauri::command]
+fn review_info() -> review::Info {
+    review::info()
+}
+
+#[tauri::command]
+fn review_state(state: State<'_, AppState>) -> review::State {
+    read_settings(&state).review.unwrap_or_default()
+}
+
+/// Temporary sessions keep nothing, not even these counters.
+#[tauri::command]
+fn save_review_state(state: State<'_, AppState>, review: review::State) -> Result<(), String> {
+    if review::store().is_none() || state.temp.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    write_settings(&state, |s| s.review = Some(review))
+}
+
+/// The system's own review prompt; false when there is none to ask for.
+#[tauri::command]
+fn request_review(app: AppHandle) -> bool {
+    let asked = review::request_native(&app);
+    debug_log!("mori: store review prompt requested (system asked: {asked})");
+    asked
+}
+
+/// Opens the store's "write a review" page (the URL is built here, never by the UI).
+#[tauri::command]
+fn open_store_review() -> Result<(), String> {
+    let store = review::store().ok_or_else(|| tr!("Mori isn't installed from a store."))?;
+    system_open(Path::new(&review::review_url(store)), false)
+}
+
 /// The folder picker runs on the Rust side, so the UI never supplies a path.
 #[tauri::command]
 async fn choose_root(app: AppHandle) -> Result<Status, String> {
     use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title("Choose a drive or folder for Mori").blocking_pick_folder();
+    let picked = app.dialog().file().set_title(tr!("Choose a drive or folder for Mori")).blocking_pick_folder();
     forget_open_panel_location();
     let Some(picked) = picked else {
         return Err("cancelled".into());
     };
-    let path = picked.into_path().map_err(|_| "That folder can't be opened")?;
+    let path = picked.into_path().map_err(|_| tr!("That folder can't be opened"))?;
     app.state::<AppState>().temp.store(false, Ordering::SeqCst);
     open_root(&app, &path)?;
     let state = app.state::<AppState>();
@@ -702,10 +770,10 @@ fn clear_cache(app: AppHandle, state: State<'_, AppState>) -> Result<(), String>
     state.volatile_thumbs.clear();
     for dir in [&state.thumb_dir, &state.index_dir(), &state.similar_dir()] {
         if dir.exists() {
-            fs::remove_dir_all(dir).map_err(|_| "Could not clear the cache")?;
+            fs::remove_dir_all(dir).map_err(|_| tr!("Could not clear the cache"))?;
         }
     }
-    fs::create_dir_all(&state.thumb_dir).map_err(|_| "Could not clear the cache")?;
+    fs::create_dir_all(&state.thumb_dir).map_err(|_| tr!("Could not clear the cache"))?;
     publish_index(&app, Index::default());
     start_scan(&app);
     Ok(())
@@ -858,9 +926,9 @@ async fn read_text(state: State<'_, AppState>, id: String) -> Result<String, Str
     use std::io::Read;
     let (mut file, _, _, ext) = state.open_by_id(&id)?;
     let mut buf = Vec::new();
-    file.by_ref().take(256 * 1024).read_to_end(&mut buf).map_err(|_| "File unavailable")?;
+    file.by_ref().take(256 * 1024).read_to_end(&mut buf).map_err(|_| tr!("File unavailable"))?;
     if secure::sniff(&buf[..buf.len().min(secure::SNIFF_LEN)], &ext) != Detected::Text {
-        return Err("This file type cannot be safely previewed.".into());
+        return Err(tr!("This file type cannot be safely previewed."));
     }
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
@@ -870,16 +938,16 @@ async fn read_text(state: State<'_, AppState>, id: String) -> Result<String, Str
 #[tauri::command]
 async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), String> {
     if state.temp.load(Ordering::SeqCst) {
-        return Err(
-            "Other apps aren't used during a temporary session: they could keep their own history of the file.".into(),
-        );
+        return Err(tr!(
+            "Other apps aren't used during a temporary session: they could keep their own history of the file."
+        ));
     }
     let (mut file, _, canon, ext) = state.open_by_id(&id)?;
     let head = secure::read_head(&mut file, secure::SNIFF_LEN);
     let detected = secure::sniff(&head, &ext);
     let mismatch = secure::expected_for_ext(&ext).is_some_and(|e| !e.contains(&detected));
     if mismatch || !secure::may_open_externally(&ext, detected) {
-        return Err("For safety, Mori won't open this kind of file.".into());
+        return Err(tr!("For safety, Mori won't open this kind of file."));
     }
     drop(file);
     system_open(&canon, false)
@@ -889,7 +957,7 @@ async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), String>
 #[tauri::command]
 fn reveal_file(state: State<'_, AppState>, id: String) -> Result<(), String> {
     if state.temp.load(Ordering::SeqCst) {
-        return Err("Finder isn't used during a temporary session.".into());
+        return Err(tr!("Finder isn't used during a temporary session."));
     }
     system_open(&state.path_by_id(&id)?, true)
 }
@@ -1018,7 +1086,7 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
                 }
             };
             if id.starts_with('x') && !meta.is_file() {
-                out.failed.push(dupes::Failure { path: shown, reason: "not a regular file".into() });
+                out.failed.push(dupes::Failure { path: shown, reason: tr!("not a regular file") });
                 continue;
             }
             let bytes = if meta.is_dir() { trash_summary(state.clone(), vec![id.clone()]).bytes } else { meta.len() };
@@ -1046,20 +1114,20 @@ async fn trash_items(app: AppHandle, ids: Vec<String>) -> Result<TrashResult, St
         out
     })
     .await
-    .map_err(|_| "The operation failed.".to_string())
+    .map_err(|_| tr!("The operation failed."))
 }
 
 fn trash_label(changes: &[history::Change]) -> String {
     match changes {
         [history::Change::Trashed { original, .. }] => {
-            format!(
-                "Moved “{}” to Trash",
-                secure::display_safe(
+            tr!(
+                "Moved “{name}” to Trash",
+                name = secure::display_safe(
                     &original.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                 )
             )
         }
-        c => format!("Moved {} items to Trash", c.len()),
+        c => trn!(c.len(), "Moved {n} item to Trash", "Moved {n} items to Trash"),
     }
 }
 
@@ -1089,12 +1157,12 @@ fn forget_removed(state: &AppState, removed: &[PathBuf]) {
 #[tauri::command]
 fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: String) -> Result<String, String> {
     if id.starts_with('x') || id.starts_with('y') {
-        return Err("Rename items from the browser.".into());
+        return Err(tr!("Rename items from the browser."));
     }
     fileops::validate_name(&name)?;
     let loc = state.locate(&id)?;
     let (path, meta) = fileops::confined_item(&loc.root, &loc.rel)?;
-    let parent = path.parent().ok_or("invalid path")?;
+    let parent = path.parent().ok_or_else(|| tr!("invalid path"))?;
     let target = parent.join(&name);
     if target == path {
         return Ok(id);
@@ -1104,10 +1172,10 @@ fn rename_item(app: AppHandle, state: State<'_, AppState>, id: String, name: Str
     }
     fileops::rename_no_replace(&state.policy(), &path, &target)?;
     state.history.record(
-        format!(
-            "Renamed “{}” to “{}”",
-            secure::display_safe(&path.file_name().unwrap_or_default().to_string_lossy()),
-            secure::display_safe(&target.file_name().unwrap_or_default().to_string_lossy())
+        tr!(
+            "Renamed “{from}” to “{to}”",
+            from = secure::display_safe(&path.file_name().unwrap_or_default().to_string_lossy()),
+            to = secure::display_safe(&target.file_name().unwrap_or_default().to_string_lossy())
         ),
         vec![history::Change::Renamed { from: path.clone(), to: target.clone() }],
     );
@@ -1146,10 +1214,10 @@ struct DestInfo {
 #[tauri::command]
 async fn transfer_choose_folder(app: AppHandle) -> Result<DestInfo, String> {
     use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title("Choose a destination folder").blocking_pick_folder();
+    let picked = app.dialog().file().set_title(tr!("Choose a destination folder")).blocking_pick_folder();
     forget_open_panel_location();
-    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| "That folder can't be opened")?;
-    let canon = fs::canonicalize(path).ok().filter(|c| c.is_dir()).ok_or("That folder can't be opened")?;
+    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| tr!("That folder can't be opened"))?;
+    let canon = fs::canonicalize(path).ok().filter(|c| c.is_dir()).ok_or_else(|| tr!("That folder can't be opened"))?;
     let state = app.state::<AppState>();
     let key = {
         let mut list = state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1168,24 +1236,25 @@ async fn transfer_choose_folder(app: AppHandle) -> Result<DestInfo, String> {
 /// picked this session ("d0"…). Always canonical and a real folder (never a
 /// link to one); browser folders stay inside the root.
 fn transfer_dest(state: &AppState, dest: &str) -> Result<(PathBuf, String), String> {
-    let gone = "The destination folder is no longer available.";
+    let gone = || tr!("The destination folder is no longer available.");
     // Browser ids are 16 hex digits (and may start with "d" themselves).
     let (path, inside_root) = if dest.is_empty() || index::parse_id(dest).is_some() {
         if !dest.is_empty() && state.index().folder_path(dest).is_none() {
-            return Err("Unknown destination.".into());
+            return Err(tr!("Unknown destination."));
         }
         (state.path_by_id(dest)?, true)
     } else {
-        let i: usize = dest.strip_prefix('d').and_then(|n| n.parse().ok()).ok_or("Unknown destination.")?;
+        let i: usize =
+            dest.strip_prefix('d').and_then(|n| n.parse().ok()).ok_or_else(|| tr!("Unknown destination."))?;
         let p = state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner).get(i).cloned();
-        (p.ok_or("Unknown destination.")?, false)
+        (p.ok_or_else(|| tr!("Unknown destination."))?, false)
     };
-    let canon = fs::canonicalize(&path).map_err(|_| gone)?;
+    let canon = fs::canonicalize(&path).map_err(|_| gone())?;
     if !fs::symlink_metadata(&canon).is_ok_and(|m| m.is_dir()) {
-        return Err(gone.into());
+        return Err(gone());
     }
     if inside_root && !state.root_canon().is_some_and(|r| canon.starts_with(r)) {
-        return Err(gone.into());
+        return Err(gone());
     }
     let name =
         canon.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| secure::plain_path(&canon));
@@ -1226,7 +1295,9 @@ struct TransferPlan {
     conflicts: usize,
 }
 
-const ALREADY_HERE: &str = "Already in this folder.";
+fn already_here() -> String {
+    tr!("Already in this folder.")
+}
 
 /// A dry run of Move/Copy: per item, what would happen and what's refused.
 /// Nothing changes. Returns the plan, each item's source path (None when
@@ -1240,10 +1311,10 @@ fn transfer_plan(
     let moving = match op {
         "move" => true,
         "copy" => false,
-        _ => return Err("Unknown operation".into()),
+        _ => return Err(tr!("Unknown operation")),
     };
     let (dest_dir, dest_name) = transfer_dest(state, dest)?;
-    let root = state.root_canon().ok_or("No folder selected")?;
+    let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
     let policy = state.policy();
     let idx = state.index();
     let dest_vol = drives::key_of(&privacy::volume_of(&dest_dir));
@@ -1295,9 +1366,13 @@ fn transfer_plan(
         let target = dest_dir.join(&file_name);
         let same_folder = path.parent() == Some(dest_dir.as_path());
         entry.blocked = if moving && same_folder {
-            Some(ALREADY_HERE.into())
+            Some(already_here())
         } else if fileops::is_within(&dest_dir, &path) {
-            Some(format!("A folder can't be {} into itself.", if moving { "moved" } else { "copied" }))
+            Some(if moving {
+                tr!("A folder can't be moved into itself.")
+            } else {
+                tr!("A folder can't be copied into itself.")
+            })
         } else {
             moving
                 .then(|| policy.check(policy::Op::Move, &path).err())
@@ -1324,9 +1399,9 @@ fn transfer_plan(
                 cross_volume = true;
             }
             entry.note = if ft.is_symlink() {
-                Some("Only the link itself is transferred; what it points to is never touched.".into())
+                Some(tr!("Only the link itself is transferred; what it points to is never touched."))
             } else if moving && other_volume {
-                Some("Another drive: copied and checked, then the original goes to the Trash.".into())
+                Some(tr!("Another drive: copied and checked, then the original goes to the Trash."))
             } else {
                 None
             };
@@ -1352,7 +1427,7 @@ fn transfer_plan(
 async fn plan_transfer(app: AppHandle, op: String, ids: Vec<String>, dest: String) -> Result<TransferPlan, String> {
     tauri::async_runtime::spawn_blocking(move || transfer_plan(&app.state::<AppState>(), &op, &ids, &dest).map(|p| p.0))
         .await
-        .map_err(|_| "The plan couldn't be made.".to_string())?
+        .map_err(|_| tr!("The plan couldn't be made."))?
 }
 
 #[derive(Serialize)]
@@ -1418,7 +1493,7 @@ async fn transfer_items(
             }
             let fail = |reason: String| dupes::Failure { path: e.path.clone(), reason };
             if let Some(b) = &e.blocked {
-                if b == ALREADY_HERE {
+                if *b == already_here() {
                     out.skipped += 1;
                 } else {
                     out.failed.push(fail(b.clone()));
@@ -1443,14 +1518,14 @@ async fn transfer_items(
                         match free {
                             Some(n) => target = dest_dir.join(n),
                             None => {
-                                out.failed.push(fail("no free name was found".into()));
+                                out.failed.push(fail(tr!("no free name was found")));
                                 continue;
                             }
                         }
                     }
                     Some("replace") if e.replaceable && !created.contains(&target) => {
                         if !fs::symlink_metadata(&target).is_ok_and(|m| m.is_file()) {
-                            out.failed.push(fail("what's there now isn't a file, so it wasn't replaced".into()));
+                            out.failed.push(fail(tr!("what's there now isn't a file, so it wasn't replaced")));
                             continue;
                         }
                         if let Ok(m) = fs::symlink_metadata(&target) {
@@ -1459,13 +1534,16 @@ async fn transfer_items(
                         match fileops::move_to_trash(&policy, &target) {
                             Ok(t) => replaced = Some((target.clone(), t)),
                             Err(r) => {
-                                out.failed.push(fail(format!("the existing item couldn't be moved to the Trash: {r}")));
+                                out.failed.push(fail(tr!(
+                                    "the existing item couldn't be moved to the Trash: {reason}",
+                                    reason = r
+                                )));
                                 continue;
                             }
                         }
                     }
                     Some("replace") => {
-                        out.failed.push(fail("Replace isn't available for this item.".into()));
+                        out.failed.push(fail(tr!("Replace isn't available for this item.")));
                         continue;
                     }
                     _ => {
@@ -1493,7 +1571,7 @@ async fn transfer_items(
                     if let Some((orig, Some(t))) = &replaced {
                         let _ = fileops::restore_from_trash(&policy, t, orig);
                     } else if replaced.is_some() {
-                        out.originals_kept.push(fail("the item it was to replace is in the Trash".into()));
+                        out.originals_kept.push(fail(tr!("the item it was to replace is in the Trash")));
                     }
                     if reason == "cancelled" {
                         out.cancelled = true;
@@ -1549,7 +1627,7 @@ async fn transfer_items(
                 (fileops::Moved::CopiedOriginalKept { bytes, reason }, _) => {
                     out.bytes += bytes;
                     changes.push(history::Change::Created { path: target.clone() });
-                    out.originals_kept.push(fail(format!("copied, but the original stayed: {reason}")));
+                    out.originals_kept.push(fail(tr!("copied, but the original stayed: {reason}", reason = reason)));
                 }
             }
             let copied_in = !matches!(outcome, fileops::Moved::Renamed);
@@ -1582,18 +1660,19 @@ async fn transfer_items(
             start_scan(&app);
         }
         let n = out.done.len();
-        let what = match plan.entries.iter().find(|e| out.done.first().is_some_and(|d| d.id == e.id)) {
-            Some(e) if n == 1 => format!("“{}”", e.name),
-            _ => format!("{n} items"),
+        let dest = &plan.dest_name;
+        let label = match (plan.entries.iter().find(|e| out.done.first().is_some_and(|d| d.id == e.id)), moving) {
+            (Some(e), true) if n == 1 => tr!("Moved “{name}” to “{dest}”", name = e.name, dest = dest),
+            (Some(e), false) if n == 1 => tr!("Copied “{name}” to “{dest}”", name = e.name, dest = dest),
+            (_, true) => trn!(n, "Moved {n} item to “{dest}”", "Moved {n} items to “{dest}”", dest = dest),
+            (_, false) => trn!(n, "Copied {n} item to “{dest}”", "Copied {n} items to “{dest}”", dest = dest),
         };
-        state
-            .history
-            .record(format!("{} {what} to “{}”", if moving { "Moved" } else { "Copied" }, plan.dest_name), changes);
+        state.history.record(label, changes);
         let _ = app.emit("transfer-progress", TransferProgress { done: total, total });
         Ok(out)
     })
     .await
-    .map_err(|_| "The operation stopped unexpectedly.".to_string())?
+    .map_err(|_| tr!("The operation stopped unexpectedly."))?
 }
 
 /// Stop a running Move/Copy after the current item (a partly copied item
@@ -1608,7 +1687,7 @@ fn transfer_cancel(state: State<'_, AppState>) {
 /// The hashes a saved cleanup session is filed under (the root and its volume).
 fn cleanup_keys(state: &AppState) -> Result<(String, String), String> {
     state.persistent()?;
-    let root = state.root_canon().ok_or("No folder selected")?;
+    let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
     let vol = drives::key_of(&privacy::volume_of(&root));
     Ok((
         format!("{:016x}", thumbs::fnv(root.to_string_lossy().as_bytes())),
@@ -1650,7 +1729,7 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
         let state = app.state::<AppState>();
         let loc = state.locate(&id)?;
         let abs = state.path_by_id(&id)?;
-        let meta = inspect::lstat(&abs).map_err(|_| "Item unavailable")?;
+        let meta = inspect::lstat(&abs).map_err(|_| tr!("Item unavailable"))?;
         let mut ctx = inspect::Context::default();
         if loc.is_link {
             let idx = state.index();
@@ -1685,7 +1764,7 @@ async fn file_report(app: AppHandle, id: String) -> Result<inspect::FileReport, 
         Ok(inspect::report(&abs, &rel_display, &meta, file.as_mut(), ctx))
     })
     .await
-    .map_err(|_| "The report failed.".to_string())?
+    .map_err(|_| tr!("The report failed."))?
 }
 
 // ----------------------------------------------------------- diagnostics
@@ -1809,12 +1888,12 @@ async fn clear_mori_data(app: AppHandle, categories: Vec<String>) -> Result<u64,
             .filter(|c| *c != localdata::Category::Settings)
             .collect();
         if cats.is_empty() {
-            return Err("Nothing selected.".to_string());
+            return Err(tr!("Nothing selected."));
         }
         Ok(clear_categories(&app, &app.state::<AppState>(), &cats))
     })
     .await
-    .map_err(|_| "Clearing failed.".to_string())?
+    .map_err(|_| tr!("Clearing failed."))?
 }
 
 /// Reset Mori: remove all of Mori's own local data and close the folder.
@@ -1842,7 +1921,7 @@ async fn reset_mori(app: AppHandle) -> Result<u64, String> {
         Ok(freed)
     })
     .await
-    .map_err(|_| "Reset failed.".to_string())?
+    .map_err(|_| tr!("Reset failed."))?
 }
 
 /// Remove Mori's macOS preferences domain (window and folder-picker state).
@@ -1879,9 +1958,9 @@ struct Checksum {
 fn checksum_of(state: &AppState, id: &str) -> Result<Checksum, String> {
     let loc = state.locate(id)?;
     if loc.is_dir || loc.is_link {
-        return Err("Checksums are calculated for files.".into());
+        return Err(tr!("Checksums are calculated for files."));
     }
-    let (mut file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| "File unavailable")?;
+    let (mut file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| tr!("File unavailable"))?;
     let head = secure::read_head(&mut file, filetype::HEAD_LEN);
     let detected = Some(filetype::detect(&head, meta.len()).label.to_string());
     let _ = std::io::Seek::rewind(&mut file);
@@ -1916,7 +1995,7 @@ async fn checksum_file(app: AppHandle, id: String) -> Result<Checksum, String> {
         checksum_of(&state, &id)
     })
     .await
-    .map_err(|_| "The checksum couldn't be calculated.".to_string())?
+    .map_err(|_| tr!("The checksum couldn't be calculated."))?
 }
 
 #[tauri::command]
@@ -1944,7 +2023,7 @@ async fn compare_files(app: AppHandle, a: String, b: String) -> Result<Compariso
         Ok(Comparison { same: ca.sha256 == cb.sha256 && ca.size == cb.size, a: ca, b: cb })
     })
     .await
-    .map_err(|_| "The comparison couldn't be made.".to_string())?
+    .map_err(|_| tr!("The comparison couldn't be made."))?
 }
 
 #[derive(Serialize, Clone)]
@@ -2016,7 +2095,7 @@ fn integrity_job(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     if state.integrity_running.swap(true, Ordering::SeqCst) {
-        return Err("An integrity check is already running.".into());
+        return Err(tr!("An integrity check is already running."));
     }
     state.integrity_job.reset();
     let job = state.integrity_job.clone();
@@ -2044,7 +2123,7 @@ fn integrity_job(
             Err(_) => IntegrityDone {
                 status: "failed",
                 kind,
-                message: Some("The check stopped unexpectedly.".into()),
+                message: Some(tr!("The check stopped unexpectedly.")),
                 snapshot: None,
                 result: None,
             },
@@ -2085,17 +2164,17 @@ fn integrity_save(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
     state.persistent()?;
     let loc = state.locate(&id)?;
     if loc.is_link {
-        return Err("Links aren't followed, so they can't be snapshotted.".into());
+        return Err(tr!("Links aren't followed, so they can't be snapshotted."));
     }
     let (canon, _) = fileops::confined_item(&loc.root, &loc.rel).or_else(|_| {
         // The browsed root itself.
         if loc.rel.is_empty() {
-            Ok((loc.root.clone(), fs::symlink_metadata(&loc.root).map_err(|_| "unavailable")?))
+            Ok((loc.root.clone(), fs::symlink_metadata(&loc.root).map_err(|_| tr!("unavailable"))?))
         } else {
-            Err("That item is no longer available.".to_string())
+            Err(tr!("That item is no longer available."))
         }
     })?;
-    let (vol, root_rel) = integrity::volume_parts(&canon).ok_or("This location can't be identified.")?;
+    let (vol, root_rel) = integrity::volume_parts(&canon).ok_or_else(|| tr!("This location can't be identified."))?;
     let single = !loc.is_dir;
     let private = if single { HashSet::new() } else { state.privacy.boundaries(&canon) };
     let label = secure::display_safe(&loc.name);
@@ -2130,8 +2209,9 @@ fn integrity_save(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
 /// Hash the snapshot's file or folder again and report what changed.
 #[tauri::command]
 fn integrity_verify(app: AppHandle, state: State<'_, AppState>, snapshot: String) -> Result<(), String> {
-    let snap = state.integrity.load(&snapshot).ok_or("That snapshot no longer exists.")?;
-    let root = integrity::locate(&snap).ok_or("The snapshot's drive or folder isn't available right now.")?;
+    let snap = state.integrity.load(&snapshot).ok_or_else(|| tr!("That snapshot no longer exists."))?;
+    let root =
+        integrity::locate(&snap).ok_or_else(|| tr!("The snapshot's drive or folder isn't available right now."))?;
     let single = snap.kind == "file";
     let private = if single { HashSet::new() } else { state.privacy.boundaries(&root) };
     integrity_job(app, "verify", move |_state, job, bytes, emit| {
@@ -2218,7 +2298,7 @@ fn plan(state: &AppState, op: &str, ids: &[String]) -> Result<(OperationPlan, Ve
     let pop = match op {
         "trash" => policy::Op::Trash,
         "delete" | "overwrite" => policy::Op::Delete,
-        _ => return Err("Unknown operation".into()),
+        _ => return Err(tr!("Unknown operation")),
     };
     let policy = state.policy();
     let idx = state.index();
@@ -2261,8 +2341,8 @@ fn plan(state: &AppState, op: &str, ids: &[String]) -> Result<(OperationPlan, Ve
         if blocked.is_none() && op == "overwrite" {
             blocked = policy.check(policy::Op::Overwrite, &path).err();
         }
-        let note = (kind == "link")
-            .then(|| "Only the link itself is removed; what it points to is never touched.".to_string());
+        let note =
+            (kind == "link").then(|| tr!("Only the link itself is removed; what it points to is never touched."));
         let vol = drives::key_of(&privacy::volume_of(&path));
         vols.entry(vol).or_insert_with(|| overwrite::eligibility(&path).err());
         entries.push(PlanEntry { id: id.clone(), name, path: shown, kind, bytes, files, blocked, note });
@@ -2278,7 +2358,7 @@ fn plan(state: &AppState, op: &str, ids: &[String]) -> Result<(OperationPlan, Ve
             || total_bytes > TYPED_CONFIRM_BYTES
             || ok().any(|e| e.kind == "folder"));
     let overwrite_unavailable =
-        if vols.is_empty() { Some("Nothing to overwrite.".to_string()) } else { vols.into_values().flatten().next() };
+        if vols.is_empty() { Some(tr!("Nothing to overwrite.")) } else { vols.into_values().flatten().next() };
     Ok((
         OperationPlan {
             op: op.to_owned(),
@@ -2299,7 +2379,7 @@ fn plan(state: &AppState, op: &str, ids: &[String]) -> Result<(OperationPlan, Ve
 async fn plan_operation(app: AppHandle, op: String, ids: Vec<String>) -> Result<OperationPlan, String> {
     tauri::async_runtime::spawn_blocking(move || plan(&app.state::<AppState>(), &op, &ids).map(|p| p.0))
         .await
-        .map_err(|_| "The plan couldn't be made.".to_string())?
+        .map_err(|_| tr!("The plan couldn't be made."))?
 }
 
 #[derive(Serialize)]
@@ -2324,11 +2404,11 @@ async fn delete_items(
         let state = app.state::<AppState>();
         let (plan, paths) = plan(&state, if overwrite { "overwrite" } else { "delete" }, &ids)?;
         if plan.needs_typed_confirm && confirm != "DELETE" {
-            return Err("Type DELETE to confirm this permanent deletion.".into());
+            return Err(tr!("Type DELETE to confirm this permanent deletion."));
         }
         if overwrite {
             if let Some(why) = &plan.overwrite_unavailable {
-                return Err(format!("Secure Overwrite isn't available here: {why}"));
+                return Err(tr!("Secure Overwrite isn't available here: {why}", why = why));
             }
         }
         let policy = state.policy();
@@ -2370,29 +2450,29 @@ async fn delete_items(
         forget_removed(&state, &gone);
         let n = changes.len();
         state.history.record(
-            format!(
-                "{} {n} item{} permanently",
-                if overwrite { "Overwrote and deleted" } else { "Deleted" },
-                if n == 1 { "" } else { "s" }
-            ),
+            if overwrite {
+                trn!(n, "Overwrote and deleted {n} item permanently", "Overwrote and deleted {n} items permanently")
+            } else {
+                trn!(n, "Deleted {n} item permanently", "Deleted {n} items permanently")
+            },
             changes,
         );
         Ok(out)
     })
     .await
-    .map_err(|_| "The deletion stopped unexpectedly.".to_string())?
+    .map_err(|_| tr!("The deletion stopped unexpectedly."))?
 }
 
 /// Overwrite every regular file under `path` (never through a link), then
 /// remove what remains (folders, links).
 fn overwrite_tree(policy: &policy::Policy, path: &Path) -> Result<u64, String> {
-    let meta = fs::symlink_metadata(path).map_err(|_| "file no longer exists".to_string())?;
+    let meta = fs::symlink_metadata(path).map_err(|_| tr!("file no longer exists"))?;
     if meta.is_file() {
         return overwrite::overwrite_and_delete(policy, path);
     }
     let mut bytes = 0;
     for e in walkdir::WalkDir::new(path).follow_links(false).into_iter() {
-        let e = e.map_err(|_| "a folder couldn't be read".to_string())?;
+        let e = e.map_err(|_| tr!("a folder couldn't be read"))?;
         if e.file_type().is_file() {
             bytes += overwrite::overwrite_and_delete(policy, e.path())?;
         }
@@ -2411,7 +2491,7 @@ fn history_list(state: State<'_, AppState>) -> Vec<history::RecordView> {
 async fn history_undo(app: AppHandle, id: Option<u64>) -> Result<history::UndoOutcome, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let id = id.or_else(|| state.history.last_undoable()).ok_or("Nothing to undo.")?;
+        let id = id.or_else(|| state.history.last_undoable()).ok_or_else(|| tr!("Nothing to undo."))?;
         let out = state.history.undo(id, &state.policy())?;
         // Renamed or moved back: Mori's own records follow the item again.
         for (now, back) in &out.moved_back {
@@ -2427,23 +2507,23 @@ async fn history_undo(app: AppHandle, id: Option<u64>) -> Result<history::UndoOu
         Ok(out)
     })
     .await
-    .map_err(|_| "Undo failed.".to_string())?
+    .map_err(|_| tr!("Undo failed."))?
 }
 
 // ------------------------------------------------------- favorites, tags
 
 /// Canonical paths of browser items (files and folders, never through a link).
 fn browser_paths(state: &AppState, ids: &[String]) -> Result<Vec<PathBuf>, String> {
-    let root = state.root_canon().ok_or("No folder selected")?;
+    let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
     let idx = state.index();
     ids.iter()
         .take(10_000)
         .map(|id| {
-            let e = idx.get(id).ok_or("Unknown item")?;
+            let e = idx.get(id).ok_or_else(|| tr!("Unknown item"))?;
             if e.kind == index::Kind::Link
                 || Path::new(&e.path).components().any(|c| !matches!(c, Component::Normal(_)))
             {
-                return Err("Links can't be tagged".to_string());
+                return Err(tr!("Links can't be tagged"));
             }
             Ok(root.join(&e.path))
         })
@@ -2533,10 +2613,10 @@ fn tag_delete(app: AppHandle, state: State<'_, AppState>, id: u32) -> Result<(),
 #[tauri::command]
 async fn open_temporary(app: AppHandle) -> Result<Status, String> {
     use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title("Temporary Session").blocking_pick_folder();
+    let picked = app.dialog().file().set_title(tr!("Temporary Session")).blocking_pick_folder();
     // The system folder picker remembers the last folder in Mori's preferences.
     forget_open_panel_location();
-    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| "That folder can't be opened")?;
+    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| tr!("That folder can't be opened"))?;
     let state = app.state::<AppState>();
     begin_session(&state, false);
     open_root(&app, &path)?;
@@ -2565,11 +2645,11 @@ async fn start_private_inspection(app: AppHandle, key: Option<String>) -> Result
             .unwrap_or_else(PoisonError::into_inner)
             .get(&k)
             .map(|(p, _)| p.clone())
-            .ok_or("That drive is no longer connected.")?,
+            .ok_or_else(|| tr!("That drive is no longer connected."))?,
         None => {
-            let picked = app.dialog().file().set_title("Private Inspection").blocking_pick_folder();
+            let picked = app.dialog().file().set_title(tr!("Private Inspection")).blocking_pick_folder();
             forget_open_panel_location();
-            picked.ok_or("cancelled")?.into_path().map_err(|_| "That folder can't be opened")?
+            picked.ok_or("cancelled")?.into_path().map_err(|_| tr!("That folder can't be opened"))?
         }
     };
     begin_session(&state, true);
@@ -2655,7 +2735,7 @@ struct Forgotten {
 /// drive itself is read for this or changed.
 #[tauri::command]
 fn forget_drive(app: AppHandle, state: State<'_, AppState>) -> Result<Forgotten, String> {
-    let root = state.root_canon().ok_or("No folder selected")?;
+    let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
     let forgotten = forget_data(&state, &root);
     clear_session(&state);
     *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
@@ -2840,7 +2920,7 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
         eprintln!(
             "mori: DEBUG transfer refusals: into-itself={} already-here={}",
             p.entries[0].blocked.as_deref().is_some_and(|b| b.contains("into itself")),
-            q.entries[0].blocked.as_deref() == Some(ALREADY_HERE)
+            q.entries[0].blocked == Some(already_here())
         );
 
         // 2. Move without resolving the conflict: the conflicting item is skipped, never overwritten.
@@ -2912,7 +2992,7 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
         let pr = run("copy", &["Album/b.jpg"], &id("Guarded"), &[]).unwrap();
         eprintln!(
             "mori: DEBUG transfer policy: read-only={} protected={} created={}",
-            ro.failed.first().is_some_and(|f| f.reason == policy::READ_ONLY),
+            ro.failed.first().is_some_and(|f| f.reason == policy::read_only()),
             pr.failed.first().is_some_and(|f| f.reason.contains("protected")),
             dir.join("Guarded/b.jpg").exists() || dir.join("Other/b.jpg").exists()
         );
@@ -3012,7 +3092,7 @@ fn debug_transfer_steps(app: &AppHandle, dir: &Path, out_dir: Option<&Path>) {
         let r = run("move", &["Other/d1.jpg"], &id("Album"), &[]).unwrap();
         eprintln!(
             "mori: DEBUG transfer private-inspection: refused={} stayed={}",
-            r.failed.first().is_some_and(|f| f.reason == policy::READ_ONLY),
+            r.failed.first().is_some_and(|f| f.reason == policy::read_only()),
             read("Other/d1.jpg") == "d1" && !dir.join("Album/d1.jpg").exists()
         );
         let _ = end_temporary(app.clone(), app.state::<AppState>());
@@ -3253,7 +3333,7 @@ fn clear_session_data(state: State<'_, AppState>) {
 #[tauri::command]
 fn storage_report(state: State<'_, AppState>, folder: String) -> Result<storage::Report, String> {
     let idx = state.index();
-    let rel = idx.folder_path(&folder).ok_or("Unknown folder")?.to_owned();
+    let rel = idx.folder_path(&folder).ok_or_else(|| tr!("Unknown folder"))?.to_owned();
     Ok(storage::report(&idx, &rel))
 }
 
@@ -3262,11 +3342,11 @@ fn storage_report(state: State<'_, AppState>, folder: String) -> Result<storage:
 async fn empty_folders(app: AppHandle) -> Result<Vec<storage::EmptyFolder>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let root = state.root_canon().ok_or("No folder selected")?;
+        let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
         Ok(storage::empty_folders(&state.index(), &root))
     })
     .await
-    .map_err(|_| "The check failed.".to_string())?
+    .map_err(|_| tr!("The check failed."))?
 }
 
 /// Move the chosen empty folders to the Trash, re-verifying each on disk
@@ -3283,13 +3363,13 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
             let Ok(loc) = state.locate(id) else { continue };
             let shown = secure::display_safe(&loc.rel);
             if !loc.is_dir {
-                out.failed.push(dupes::Failure { path: shown, reason: "not a folder".into() });
+                out.failed.push(dupes::Failure { path: shown, reason: tr!("not a folder") });
                 continue;
             }
             let path = match fileops::confined_item(&loc.root, &loc.rel) {
                 Ok((p, m)) if m.is_dir() => p,
                 Ok(_) => {
-                    out.failed.push(dupes::Failure { path: shown, reason: "not a folder".into() });
+                    out.failed.push(dupes::Failure { path: shown, reason: tr!("not a folder") });
                     continue;
                 }
                 Err(e) => {
@@ -3298,7 +3378,7 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
                 }
             };
             if let Err(e) = storage::verify_empty(&path) {
-                out.failed.push(dupes::Failure { path: shown, reason: format!("no longer empty: {e}") });
+                out.failed.push(dupes::Failure { path: shown, reason: tr!("no longer empty: {reason}", reason = e) });
                 continue;
             }
             match fileops::move_to_trash(&state.policy(), &path) {
@@ -3314,13 +3394,13 @@ async fn trash_empty_folders(app: AppHandle, ids: Vec<String>) -> Result<TrashRe
             apply_index_change(&app, |idx| idx.remove_paths(&removed));
         }
         state.history.record(
-            format!("Moved {} empty folder{} to Trash", changes.len(), if changes.len() == 1 { "" } else { "s" }),
+            trn!(changes.len(), "Moved {n} empty folder to Trash", "Moved {n} empty folders to Trash"),
             changes,
         );
         Ok(out)
     })
     .await
-    .map_err(|_| "The operation failed.".to_string())?
+    .map_err(|_| tr!("The operation failed."))?
 }
 
 // ------------------------------------------- screenshots and recordings
@@ -3332,14 +3412,14 @@ fn set_capture_override(app: AppHandle, state: State<'_, AppState>, id: String, 
     state.persistent()?;
     let loc = state.locate(&id)?;
     if loc.is_dir || loc.is_link || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Only files in the browsed folder can be corrected.".into());
+        return Err(tr!("Only files in the browsed folder can be corrected."));
     }
     let path = loc.root.join(&loc.rel);
     let (not, yes) = match mode.as_str() {
         "auto" => (false, false),
         "not" => (true, false),
         "yes" => (false, true),
-        _ => return Err("Unknown choice".into()),
+        _ => return Err(tr!("Unknown choice")),
     };
     state.capture_not.set(&path, 0, not)?;
     state.capture_yes.set(&path, 0, yes)?;
@@ -3378,17 +3458,17 @@ async fn pdf_info(app: AppHandle, id: String, explicit: bool) -> Result<PdfInfo,
             && state.safe_mode.load(Ordering::SeqCst)
             && state.root_canon().is_some_and(|r| canon.starts_with(r))
         {
-            return Err("Previews are off for this drive (Safe Inspection Mode).".to_string());
+            return Err(tr!("Previews are off for this drive (Safe Inspection Mode)."));
         }
         let head = secure::read_head(&mut file, secure::SNIFF_LEN);
         if secure::sniff(&head, &ext) != Detected::Pdf {
-            return Err("Not a PDF".into());
+            return Err(tr!("Not a PDF"));
         }
         let _ = std::io::Seek::rewind(&mut file);
-        let bytes =
-            secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| "This PDF is too large to inspect.")?;
+        let bytes = secure::read_limited(file, &meta, worker::MAX_INPUT)
+            .map_err(|_| tr!("This PDF is too large to inspect."))?;
         let out = worker::run(worker::Op::PdfInfo, 64, bytes, Duration::from_secs(15))
-            .map_err(|_| "This PDF could not be read safely.")?;
+            .map_err(|_| tr!("This PDF could not be read safely."))?;
         let text = String::from_utf8_lossy(&out.bytes);
         let mut info = PdfInfo::default();
         for line in text.lines() {
@@ -3413,7 +3493,7 @@ async fn pdf_info(app: AppHandle, id: String, explicit: bool) -> Result<PdfInfo,
         Ok(info)
     })
     .await
-    .map_err(|_| "The PDF could not be read.".to_string())?
+    .map_err(|_| tr!("The PDF could not be read."))?
 }
 
 /// List an archive's contents without extracting anything (archive.rs).
@@ -3425,10 +3505,10 @@ async fn archive_listing(app: AppHandle, id: String) -> Result<archive::Listing,
         let head = secure::read_head(&mut file, filetype::HEAD_LEN);
         let kind = filetype::detect(&head, meta.len()).id;
         catch_unwind(AssertUnwindSafe(|| archive::inspect(&mut file, meta.len(), kind)))
-            .unwrap_or_else(|_| Err("The archive could not be read safely.".into()))
+            .unwrap_or_else(|_| Err(tr!("The archive could not be read safely.")))
     })
     .await
-    .map_err(|_| "The archive could not be read.".to_string())?
+    .map_err(|_| tr!("The archive could not be read."))?
 }
 
 // ------------------------------------------------- safe inspection mode
@@ -3479,7 +3559,7 @@ fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) ->
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
         .cloned()
-        .ok_or("That drive is no longer connected.")?;
+        .ok_or_else(|| tr!("That drive is no longer connected."))?;
     state.temp.store(false, Ordering::SeqCst);
     state.drives.set(&key, &label, false);
     open_root(&app, &path)?;
@@ -3498,7 +3578,7 @@ fn set_drive_previews(app: AppHandle, state: State<'_, AppState>, on: bool) -> R
         let _ = app.emit("index-changed", ());
         return Ok(());
     }
-    let root = state.root_canon().ok_or("No folder selected")?;
+    let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
     let vol = privacy::volume_of(&root);
     let label = vol.mount.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     state.drives.set(&drives::key_of(&vol), &label, on);
@@ -3528,22 +3608,22 @@ async fn set_folder_protected(app: AppHandle, id: String, protected: bool) -> Re
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         if id.starts_with('x') || id.starts_with('y') {
-            return Err("Choose the folder in the browser.".to_string());
+            return Err(tr!("Choose the folder in the browser."));
         }
         let loc = state.locate(&id)?;
         if !loc.is_dir {
-            return Err("Only folders can be protected.".into());
+            return Err(tr!("Only folders can be protected."));
         }
         let (path, meta) = fileops::confined_item(&loc.root, &loc.rel)?;
         if !meta.is_dir() {
-            return Err("Only folders can be protected.".into());
+            return Err(tr!("Only folders can be protected."));
         }
         state.protected.set(&path, privacy::ino_of(&meta), protected)?;
         apply_index_change(&app, |_| {});
         Ok(())
     })
     .await
-    .map_err(|_| "The operation failed.".to_string())?
+    .map_err(|_| tr!("The operation failed."))?
 }
 
 // ---------------------------------------------------------- private folders
@@ -3555,21 +3635,21 @@ async fn set_folder_private(app: AppHandle, id: String, private: bool) -> Result
     app.state::<AppState>().persistent()?;
     tauri::async_runtime::spawn_blocking(move || set_private(&app, &id, private))
         .await
-        .map_err(|_| "The operation failed.".to_string())?
+        .map_err(|_| tr!("The operation failed."))?
 }
 
 fn set_private(app: &AppHandle, id: &str, private: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     if id.starts_with('x') || id.starts_with('y') {
-        return Err("Choose the folder in the browser.".to_string());
+        return Err(tr!("Choose the folder in the browser."));
     }
     let loc = state.locate(id)?;
     if !loc.is_dir {
-        return Err("Only folders can be made private.".into());
+        return Err(tr!("Only folders can be made private."));
     }
     let (path, meta) = fileops::confined_item(&loc.root, &loc.rel)?;
     if !meta.is_dir() {
-        return Err("Only folders can be made private.".into());
+        return Err(tr!("Only folders can be made private."));
     }
     state.privacy.set(&path, privacy::ino_of(&meta), private)?;
     if private {
@@ -3661,12 +3741,12 @@ struct LocationInfo {
 fn drive_of(p: &Path) -> String {
     let s = secure::plain_path(p);
     if let Some(rest) = s.strip_prefix("/Volumes/") {
-        return rest.split('/').next().unwrap_or("External drive").to_owned();
+        return rest.split('/').next().map_or_else(|| tr!("External drive"), str::to_owned);
     }
     if cfg!(windows) {
         return s.chars().take(2).collect();
     }
-    "This computer".into()
+    tr!("This computer")
 }
 
 fn pretty_path(app: &AppHandle, p: &Path) -> String {
@@ -3687,11 +3767,11 @@ fn location_path(app: &AppHandle, state: &AppState, key: &str) -> Option<(PathBu
         "library" => {
             (state.root_canon()?, state.root.read().unwrap_or_else(PoisonError::into_inner).as_ref()?.name.clone())
         }
-        "home" => (p.home_dir().ok()?, "Home".into()),
-        "pictures" => (p.picture_dir().ok()?, "Pictures".into()),
-        "videos" => (p.video_dir().ok()?, if cfg!(target_os = "macos") { "Movies".into() } else { "Videos".into() }),
-        "downloads" => (p.download_dir().ok()?, "Downloads".into()),
-        "documents" => (p.document_dir().ok()?, "Documents".into()),
+        "home" => (p.home_dir().ok()?, tr!("Home")),
+        "pictures" => (p.picture_dir().ok()?, tr!("Pictures")),
+        "videos" => (p.video_dir().ok()?, if cfg!(target_os = "macos") { tr!("Movies") } else { tr!("Videos") }),
+        "downloads" => (p.download_dir().ok()?, tr!("Downloads")),
+        "documents" => (p.document_dir().ok()?, tr!("Documents")),
         k => {
             let n: usize = k.strip_prefix("custom-")?.parse().ok()?;
             let path = state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner).get(n)?.clone();
@@ -3723,11 +3803,11 @@ fn analysis_locations(app: AppHandle, state: State<'_, AppState>) -> Vec<Locatio
 #[tauri::command]
 async fn analysis_choose_folder(app: AppHandle) -> Result<LocationInfo, String> {
     use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title("Choose a folder to analyze").blocking_pick_folder();
+    let picked = app.dialog().file().set_title(tr!("Choose a folder to analyze")).blocking_pick_folder();
     forget_open_panel_location();
     let picked = picked.ok_or("cancelled")?;
-    let path = picked.into_path().map_err(|_| "That folder can't be opened")?;
-    let canon = fs::canonicalize(path).map_err(|_| "That folder can't be opened")?;
+    let path = picked.into_path().map_err(|_| tr!("That folder can't be opened"))?;
+    let canon = fs::canonicalize(path).map_err(|_| tr!("That folder can't be opened"))?;
     let state = app.state::<AppState>();
     let key = {
         let mut list = state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3737,7 +3817,7 @@ async fn analysis_choose_folder(app: AppHandle) -> Result<LocationInfo, String> 
         });
         format!("custom-{n}")
     };
-    let (path, label) = location_path(&app, &state, &key).ok_or("That folder can't be opened")?;
+    let (path, label) = location_path(&app, &state, &key).ok_or_else(|| tr!("That folder can't be opened"))?;
     Ok(LocationInfo { drive: drive_of(&path), path: pretty_path(&app, &path), label, key })
 }
 
@@ -3771,12 +3851,12 @@ fn analysis_start(
     recursive: bool,
 ) -> Result<(), String> {
     if state.analysis_running.swap(true, Ordering::SeqCst) {
-        return Err("An analysis is already running.".into());
+        return Err(tr!("An analysis is already running."));
     }
     let roots = analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.analysis_running.store(false, Ordering::SeqCst);
-        return Err("Choose at least one available location.".into());
+        return Err(tr!("Choose at least one available location."));
     }
     let mut ks = Vec::new();
     for k in &kinds {
@@ -3815,7 +3895,7 @@ fn analysis_start(
                 AnalysisEvent { status: "done", message: None }
             }
             Ok(Err(dupes::Cancelled)) => AnalysisEvent { status: "cancelled", message: None },
-            Err(_) => AnalysisEvent { status: "failed", message: Some("The analysis stopped unexpectedly.".into()) },
+            Err(_) => AnalysisEvent { status: "failed", message: Some(tr!("The analysis stopped unexpectedly.")) },
         };
         state.analysis_running.store(false, Ordering::SeqCst);
         let _ = app2.emit("analysis-done", event);
@@ -3950,7 +4030,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
         let mut cleaned: Vec<history::Change> = Vec::new();
         let (outcome, removed_abs) = {
             let mut guard = state.analysis.lock().unwrap_or_else(PoisonError::into_inner);
-            let store = guard.as_mut().ok_or("The analysis was cleared.")?;
+            let store = guard.as_mut().ok_or_else(|| tr!("The analysis was cleared."))?;
             let app2 = app.clone();
             let thumb_state = app.state::<AppState>();
             let outcome = dupes::execute(
@@ -3959,7 +4039,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
                 &mut |root, rel| {
                     let (path, meta) = fileops::confined_item(root, rel)?;
                     if !meta.is_file() {
-                        return Err("not a regular file".into());
+                        return Err(tr!("not a regular file"));
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
                     let trashed = fileops::move_to_trash(&thumb_state.policy(), &path)?;
@@ -3985,7 +4065,7 @@ async fn analysis_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<
         Ok(outcome)
     })
     .await
-    .map_err(|_| "The cleanup stopped unexpectedly.".to_string())?
+    .map_err(|_| tr!("The cleanup stopped unexpectedly."))?
 }
 
 #[tauri::command]
@@ -4041,15 +4121,15 @@ fn similar_start(
     sensitivity: similar::Sensitivity,
 ) -> Result<(), String> {
     if !photos && !videos {
-        return Err("Choose photos, videos or both.".into());
+        return Err(tr!("Choose photos, videos or both."));
     }
     if state.similar_running.swap(true, Ordering::SeqCst) {
-        return Err("An analysis is already running.".into());
+        return Err(tr!("An analysis is already running."));
     }
     let roots = analysis_roots(&app, &state, &locations);
     if roots.is_empty() {
         state.similar_running.store(false, Ordering::SeqCst);
-        return Err("Choose at least one available location.".into());
+        return Err(tr!("Choose at least one available location."));
     }
     launch_similar(app, &state, roots, photos, videos, recursive, sensitivity);
     Ok(())
@@ -4155,7 +4235,7 @@ fn launch_similar(
             }
             Err(_) => {
                 *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
-                AnalysisEvent { status: "failed", message: Some("The analysis stopped unexpectedly.".into()) }
+                AnalysisEvent { status: "failed", message: Some(tr!("The analysis stopped unexpectedly.")) }
             }
         };
         *state.similar_capture.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -4375,7 +4455,7 @@ fn similar_results(app: AppHandle, state: State<'_, AppState>) -> Option<SimView
 fn similar_dismiss(state: State<'_, AppState>, group: usize, member: Option<usize>) -> Result<(), String> {
     let pairs = {
         let mut guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
-        let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or("The analysis was cleared.")?;
+        let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or_else(|| tr!("The analysis was cleared."))?;
         similar::dismiss(r, group, member)
     };
     if pairs.is_empty() || state.temp.load(Ordering::SeqCst) {
@@ -4385,7 +4465,7 @@ fn similar_dismiss(state: State<'_, AppState>, group: usize, member: Option<usiz
     let path = state.dismissed_file();
     let mut set = similar::load_dismissed(&path);
     set.extend(pairs);
-    similar::save_dismissed(&path, &set).map_err(|_| "Could not save the decision.".to_string())
+    similar::save_dismissed(&path, &set).map_err(|_| tr!("Could not save the decision."))
 }
 
 #[tauri::command]
@@ -4417,7 +4497,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
         let mut cleaned: Vec<history::Change> = Vec::new();
         let (outcome, removed_abs) = {
             let mut guard = state.similar.lock().unwrap_or_else(PoisonError::into_inner);
-            let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or("The analysis was cleared.")?;
+            let r = guard.as_mut().and_then(|s| s.result.as_mut()).ok_or_else(|| tr!("The analysis was cleared."))?;
             let app2 = app.clone();
             let thumb_state = app.state::<AppState>();
             let outcome = dupes::execute(
@@ -4426,7 +4506,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
                 &mut |root, rel| {
                     let (path, meta) = fileops::confined_item(root, rel)?;
                     if !meta.is_file() {
-                        return Err("not a regular file".into());
+                        return Err(tr!("not a regular file"));
                     }
                     invalidate_thumbs(&thumb_state, &path, &meta);
                     let trashed = fileops::move_to_trash(&thumb_state.policy(), &path)?;
@@ -4452,7 +4532,7 @@ async fn similar_cleanup(app: AppHandle, plan: Vec<dupes::PlanItem>) -> Result<d
         Ok(outcome)
     })
     .await
-    .map_err(|_| "The cleanup stopped unexpectedly.".to_string())?
+    .map_err(|_| tr!("The cleanup stopped unexpectedly."))?
 }
 
 /// Spawn the OS opener directly (absolute binary, argument array, no shell).
@@ -4486,7 +4566,7 @@ fn system_open(path: &Path, reveal: bool) -> Result<(), String> {
         c.arg(if reveal { path.parent().unwrap_or(path) } else { path });
         c
     };
-    cmd.spawn().map(|_| ()).map_err(|_| "Could not open".into())
+    cmd.spawn().map(|_| ()).map_err(|_| tr!("Could not open"))
 }
 
 /// If the UI stops answering heartbeats while a video session is active (and
@@ -4798,6 +4878,13 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            saved_language,
+            set_language,
+            review_info,
+            review_state,
+            save_review_state,
+            request_review,
+            open_store_review,
             plan_transfer,
             transfer_items,
             transfer_cancel,

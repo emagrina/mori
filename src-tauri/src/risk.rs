@@ -64,8 +64,8 @@ pub fn name_findings(name: &str) -> Vec<Finding> {
         out.push(f(
             Level::High,
             "bidi-control",
-            "Name contains a text-direction control character",
-            "Characters like U+202E can make “photo\u{2026}exe.jpg” display as an image name. Mori shows them as visible symbols.",
+            tr!("Name contains a text-direction control character"),
+            tr!("Characters like U+202E can make “photo\u{2026}exe.jpg” display as an image name. Mori shows them as visible symbols."),
         ));
     }
     let lower = name.to_lowercase();
@@ -78,8 +78,12 @@ pub fn name_findings(name: &str) -> Vec<Finding> {
             out.push(f(
                 Level::High,
                 "double-extension",
-                format!("Double extension: “.{prev}.{last}”"),
-                format!("The name looks like a .{prev} file but the real extension is .{last}, which runs code or installs software when opened."),
+                tr!("Double extension: “.{prev}.{last}”", prev = prev, last = last),
+                tr!(
+                    "The name looks like a .{prev} file but the real extension is .{last}, which runs code or installs software when opened.",
+                    prev = prev,
+                    last = last
+                ),
             ));
         }
     }
@@ -87,8 +91,8 @@ pub fn name_findings(name: &str) -> Vec<Finding> {
         out.push(f(
             Level::Attention,
             "padded-name",
-            "Name contains a long run of spaces",
-            "Padding like “invoice.pdf          .exe” can push the real extension out of view.",
+            tr!("Name contains a long run of spaces"),
+            tr!("Padding like “invoice.pdf          .exe” can push the real extension out of view."),
         ));
     }
     out
@@ -154,21 +158,24 @@ pub fn assess(x: &Input) -> Vec<Finding> {
         out.push(f(
             Level::Info,
             "symlink",
-            "Symbolic link",
-            format!("Points to “{target}”. Mori never follows links when browsing, scanning or analysing."),
+            tr!("Symbolic link"),
+            tr!(
+                "Points to “{target}”. Mori never follows links when browsing, scanning or analysing.",
+                target = target
+            ),
         ));
         if x.symlink_outside {
             out.push(f(
                 Level::Attention,
                 "symlink-outside",
-                "Link points outside this folder",
-                "Its target is outside the folder Mori was given.",
+                tr!("Link points outside this folder"),
+                tr!("Its target is outside the folder Mori was given."),
             ));
         }
         out.sort_by_key(|f| std::cmp::Reverse(f.level));
         return out;
     }
-    let Some(dt) = x.detected else { return out };
+    let Some(dt) = &x.detected else { return out };
     let claimed = filetype::claimed_family(x.ext);
     let expected = filetype::expected_ids(x.ext);
     let code_content = matches!(dt.family, Family::Executable | Family::Script);
@@ -179,27 +186,25 @@ pub fn assess(x: &Input) -> Vec<Finding> {
                 out.push(f(
                     Level::High,
                     "disguised-executable",
-                    format!("{} disguised as .{}", dt.label, x.ext),
-                    format!(
-                        "The extension .{} says this is {}, but the content is {}.",
-                        x.ext,
-                        family_word(claimed),
-                        dt.label
-                    ),
+                    tr!("{kind} disguised as .{ext}", kind = dt.label, ext = x.ext),
+                    disguised_detail(claimed, x.ext, &dt.label),
                 ));
             } else if dt.id == "unknown" {
                 out.push(f(
                     Level::Attention,
                     "unknown-signature",
-                    "Unknown file signature",
-                    format!("The content doesn't start like any .{} file Mori knows. It may be damaged, encrypted or something else.", x.ext),
+                    tr!("Unknown file signature"),
+                    tr!(
+                        "The content doesn't start like any .{ext} file Mori knows. It may be damaged, encrypted or something else.",
+                        ext = x.ext
+                    ),
                 ));
             } else {
                 out.push(f(
                     Level::Attention,
                     "extension-mismatch",
-                    format!("Extension mismatch: .{} contains {}", x.ext, dt.label),
-                    "The file's content does not match its extension.".to_string(),
+                    tr!("Extension mismatch: .{ext} contains {kind}", ext = x.ext, kind = dt.label),
+                    tr!("The file's content does not match its extension."),
                 ));
             }
         }
@@ -207,16 +212,16 @@ pub fn assess(x: &Input) -> Vec<Finding> {
         out.push(f(
             Level::Attention,
             "unexpected-executable",
-            format!("Contains {}", dt.label),
-            "The name gives no hint that this file is a program or script.".to_string(),
+            tr!("Contains {kind}", kind = dt.label),
+            tr!("The name gives no hint that this file is a program or script."),
         ));
     }
     if filetype::EXECUTABLE_EXT.contains(&x.ext) || code_content {
         out.push(f(
             Level::Info,
             "runs-code",
-            "Program, script or installer",
-            "Files like this run code when opened by the system. Mori never opens them.",
+            tr!("Program, script or installer"),
+            tr!("Files like this run code when opened by the system. Mori never opens them."),
         ));
     }
     if x.executable_bit
@@ -226,23 +231,28 @@ pub fn assess(x: &Input) -> Vec<Finding> {
         out.push(f(
             Level::Attention,
             "executable-bit",
-            "Executable permission on a non-program file",
-            "Media and documents don't normally carry the executable permission.",
+            tr!("Executable permission on a non-program file"),
+            tr!("Media and documents don't normally carry the executable permission."),
         ));
     }
     if x.quarantined {
         out.push(f(
             Level::Info,
             "quarantine",
-            "Downloaded from the internet",
-            "macOS marked this file with a quarantine attribute when it was downloaded.",
+            tr!("Downloaded from the internet"),
+            tr!("macOS marked this file with a quarantine attribute when it was downloaded."),
         ));
     }
     if dt.family == Family::Archive || dt.id == "jar" || dt.id == "xar" {
-        out.push(f(Level::Info, "archive", "Archive", "Contents are not extracted. Archives can hide other files."));
+        out.push(f(
+            Level::Info,
+            "archive",
+            tr!("Archive"),
+            tr!("Contents are not extracted. Archives can hide other files."),
+        ));
     }
     if dt.id == "svg" || dt.id == "html" {
-        out.push(f(Level::Info, "active-content", "Can contain scripts", "Mori never renders HTML or SVG."));
+        out.push(f(Level::Info, "active-content", tr!("Can contain scripts"), tr!("Mori never renders HTML or SVG.")));
     }
     // Declared image dimensions (header only).
     if let Some((w, h)) = header_dimensions(x.head, dt.id) {
@@ -250,15 +260,15 @@ pub fn assess(x: &Input) -> Vec<Finding> {
             out.push(f(
                 Level::Attention,
                 "invalid-dimensions",
-                "Invalid image dimensions",
-                format!("The header declares {w} × {h} pixels."),
+                tr!("Invalid image dimensions"),
+                tr!("The header declares {w} × {h} pixels.", w = w, h = h),
             ));
         } else if w * h > MAX_SANE_PIXELS || w > MAX_SANE_EDGE || h > MAX_SANE_EDGE {
             out.push(f(
                 Level::Attention,
                 "extreme-dimensions",
-                "Suspiciously extreme image dimensions",
-                format!("The header declares {w} × {h} pixels. Mori refuses to decode images this large."),
+                tr!("Suspiciously extreme image dimensions"),
+                tr!("The header declares {w} × {h} pixels. Mori refuses to decode images this large.", w = w, h = h),
             ));
         }
         let decoded = w.saturating_mul(h).saturating_mul(3);
@@ -266,11 +276,11 @@ pub fn assess(x: &Input) -> Vec<Finding> {
             out.push(f(
                 Level::Attention,
                 "compression-ratio",
-                "Extreme compression ratio",
-                format!(
-                    "{} bytes would expand to about {} MB of pixels (a pattern used by decompression bombs).",
-                    x.size,
-                    decoded / 1_000_000
+                tr!("Extreme compression ratio"),
+                tr!(
+                    "{bytes} bytes would expand to about {mb} MB of pixels (a pattern used by decompression bombs).",
+                    bytes = x.size,
+                    mb = decoded / 1_000_000
                 ),
             ));
         }
@@ -288,8 +298,8 @@ pub fn assess(x: &Input) -> Vec<Finding> {
             out.push(f(
                 Level::Attention,
                 "truncated",
-                "File appears truncated",
-                format!("A complete {} ends with a marker that is missing here.", dt.label),
+                tr!("File appears truncated"),
+                tr!("A complete {kind} ends with a marker that is missing here.", kind = dt.label),
             ));
         }
     }
@@ -297,53 +307,63 @@ pub fn assess(x: &Input) -> Vec<Finding> {
         out.push(f(
             Level::Attention,
             "broken-container",
-            "Broken media container",
-            "Mori could not read the container structure.",
+            tr!("Broken media container"),
+            tr!("Mori could not read the container structure."),
         ));
     }
     if x.decode_failed {
         out.push(f(
             Level::Attention,
             "decode-failed",
-            "Previous preview attempt failed",
-            "Mori's isolated decoder could not read this exact version of the file.",
+            tr!("Previous preview attempt failed"),
+            tr!("Mori's isolated decoder could not read this exact version of the file."),
         ));
     }
     if x.media_blocked {
         out.push(f(
             Level::High,
             "media-engine-failure",
-            "Crashed or hung the media engine before",
-            "This video stopped the system media engine in an earlier session, so Mori no longer loads it.",
+            tr!("Crashed or hung the media engine before"),
+            tr!("This video stopped the system media engine in an earlier session, so Mori no longer loads it."),
         ));
     }
     if x.size == 0 {
-        out.push(f(Level::Info, "empty", "Empty file", "The file has no content."));
+        out.push(f(Level::Info, "empty", tr!("Empty file"), tr!("The file has no content.")));
     }
     out.sort_by_key(|f| std::cmp::Reverse(f.level));
     out
 }
 
-fn family_word(f: Option<Family>) -> &'static str {
+/// "The extension .jpg says this is an image, but the content is …" — one
+/// sentence per family, so translators get whole sentences.
+fn disguised_detail(f: Option<Family>, ext: &str, kind: &str) -> String {
     match f {
-        Some(Family::Image) => "an image",
-        Some(Family::Video) => "a video",
-        Some(Family::Audio) => "an audio file",
-        Some(Family::Document) => "a document",
-        _ => "a file",
+        Some(Family::Image) => {
+            tr!("The extension .{ext} says this is an image, but the content is {kind}.", ext = ext, kind = kind)
+        }
+        Some(Family::Video) => {
+            tr!("The extension .{ext} says this is a video, but the content is {kind}.", ext = ext, kind = kind)
+        }
+        Some(Family::Audio) => {
+            tr!("The extension .{ext} says this is an audio file, but the content is {kind}.", ext = ext, kind = kind)
+        }
+        Some(Family::Document) => {
+            tr!("The extension .{ext} says this is a document, but the content is {kind}.", ext = ext, kind = kind)
+        }
+        _ => tr!("The extension .{ext} says this is a file, but the content is {kind}.", ext = ext, kind = kind),
     }
 }
 
 /// Short factual summary when nothing was flagged (never "safe").
-pub fn summary(findings: &[Finding], detected: Option<FileType>, ext: &str) -> String {
+pub fn summary(findings: &[Finding], detected: Option<&FileType>, ext: &str) -> String {
     if findings.iter().any(|f| f.level > Level::Info) {
-        return "Anomalies found — see below".into();
+        return tr!("Anomalies found — see below");
     }
     match (detected, filetype::expected_ids(ext)) {
         (Some(dt), Some(exp)) if exp.contains(&dt.id) => {
-            "No anomaly detected · extension matches detected format".into()
+            tr!("No anomaly detected · extension matches detected format")
         }
-        _ => "No anomaly detected by Mori's checks".into(),
+        _ => tr!("No anomaly detected by Mori's checks"),
     }
 }
 
@@ -384,7 +404,7 @@ mod tests {
         let codes = run("photo.jpg", b"\xFF\xD8\xFF\xE0\0\x10JFIF", b"\0\0\xFF\xD9");
         assert!(codes.is_empty(), "{codes:?}");
         let x = Input { ext: "jpg", detected: Some(filetype::detect(b"\xFF\xD8\xFF", 3)), ..Default::default() };
-        assert!(summary(&assess(&x), x.detected, "jpg").contains("extension matches"));
+        assert!(summary(&assess(&x), x.detected.as_ref(), "jpg").contains("extension matches"));
     }
 
     #[test]

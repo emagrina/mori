@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, formatSize, plural, type EmptyFolder, type Entry, type StorageReport, type StorageTile } from "../api";
+import { api, formatSize, type EmptyFolder, type Entry, type StorageReport, type StorageTile } from "../api";
 import { ProgressBar } from "./Analyzer";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
+import { fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 
 type Tab = "overview" | "largest" | "empty";
 
@@ -52,22 +54,22 @@ export function StorageView({
       </header>
       <div className="page-head">
         <div className="crumbs">
-          <span className="crumb">Analyze</span>
+          <span className="crumb">{t("Analyze")}</span>
         </div>
         <div className="title-row">
           <h1 className="page-title">
-            Storage<span className="scope-note">in {rootName}</span>
+            {t("Storage")}<span className="scope-note">{t("in {name}", { name: rootName })}</span>
           </h1>
           <div className="segmented small" role="tablist">
             {(
               [
-                ["overview", "Overview"],
-                ["largest", "Largest"],
-                ["empty", "Empty Folders"],
+                ["overview", msg("Overview")],
+                ["largest", msg("Largest")],
+                ["empty", msg("Empty Folders")],
               ] as const
-            ).map(([t, label]) => (
-              <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t}>
-                {label}
+            ).map(([key, label]) => (
+              <button key={key} className={tab === key ? "on" : ""} onClick={() => setTab(key)} role="tab" aria-selected={tab === key}>
+                {t(label)}
               </button>
             ))}
           </div>
@@ -80,7 +82,7 @@ export function StorageView({
           <Overview
             report={report}
             trail={folder}
-            onDrill={(t) => t.kind === "folder" && setFolder((f) => [...f, { id: t.id, name: t.name }])}
+            onDrill={(tile) => tile.kind === "folder" && setFolder((f) => [...f, { id: tile.id, name: tile.name }])}
             onCrumb={(n) => setFolder((f) => f.slice(0, n))}
             onOpenFolder={onOpenFolder}
             rootName={rootName}
@@ -94,7 +96,15 @@ export function StorageView({
 }
 
 const KIND_ORDER = ["photo", "video", "gif", "audio", "document", "other"] as const;
-const KIND_NAMES: Record<string, string> = { photo: "Photos", video: "Videos", gif: "GIFs", audio: "Audio", document: "Documents", other: "Other" };
+const KIND_NAMES: Record<string, string> = {
+  photo: msg("Photos"),
+  video: msg("Videos"),
+  gif: msg("GIFs"),
+  audio: msg("Audio"),
+  document: msg("Documents"),
+  other: msg("Other"),
+};
+const kindName = (k: string) => (KIND_NAMES[k] ? t(KIND_NAMES[k]) : k);
 
 function Overview({
   report: r,
@@ -116,20 +126,20 @@ function Overview({
   return (
     <div className="storage-overview">
       <div className="storage-summary">
-        <strong>{formatSize(r.totalBytes)}</strong> in {plural(r.totalFiles, "file")}
-        {r.privateFolders > 0 && <span className="muted"> · {plural(r.privateFolders, "private folder")} not measured</span>}
+        {tx("{size} in {files}", { size: <strong>{formatSize(r.totalBytes)}</strong>, files: tn(r.totalFiles, "{n} file", "{n} files") })}
+        {r.privateFolders > 0 && <span className="muted"> · {tn(r.privateFolders, "{n} private folder not measured", "{n} private folders not measured")}</span>}
       </div>
-      <div className="kind-bar" aria-label="By type">
+      <div className="kind-bar" aria-label={t("By type")}>
         {kinds.map((k) => (
-          <div key={k.key} className={`kind-seg k-${k.key}`} style={{ flexGrow: k.bytes }} title={`${KIND_NAMES[k.key] ?? k.key}: ${formatSize(k.bytes)}`} />
+          <div key={k.key} className={`kind-seg k-${k.key}`} style={{ flexGrow: k.bytes }} title={t("{kind}: {size}", { kind: kindName(k.key), size: formatSize(k.bytes) })} />
         ))}
       </div>
       <div className="kind-legend">
         {kinds.map((k) => (
           <span key={k.key}>
-            <i className={`k-${k.key}`} /> {KIND_NAMES[k.key] ?? k.key}{" "}
+            <i className={`k-${k.key}`} /> {kindName(k.key)}{" "}
             <span className="muted">
-              {formatSize(k.bytes)} · {k.count.toLocaleString()}
+              {formatSize(k.bytes)} · {fmtNum(k.count)}
             </span>
           </span>
         ))}
@@ -153,7 +163,7 @@ function Overview({
           <span className="muted">{formatSize(r.folderBytes)}</span>
           {trail.length > 0 && (
             <button className="btn small" onClick={() => onOpenFolder(trail[trail.length - 1].id)}>
-              Open Folder
+              {t("Open Folder")}
             </button>
           )}
         </div>
@@ -161,7 +171,7 @@ function Overview({
       </section>
 
       <section>
-        <h3>By year</h3>
+        <h3>{t("By year")}</h3>
         <div className="year-bars">
           {r.byYear.slice(0, 30).map((y) => (
             <div key={y.key} className="year-row">
@@ -170,12 +180,12 @@ function Overview({
                 <div style={{ width: `${(y.bytes / maxYear) * 100}%` }} />
               </div>
               <span className="muted">
-                {formatSize(y.bytes)} · {y.count.toLocaleString()}
+                {formatSize(y.bytes)} · {fmtNum(y.count)}
               </span>
             </div>
           ))}
         </div>
-        <p className="fineprint">Year of creation (or modification when the drive doesn't record creation).</p>
+        <p className="fineprint">{t("Year of creation (or modification when the drive doesn't record creation).")}</p>
       </section>
     </div>
   );
@@ -192,35 +202,35 @@ function Treemap({ tiles, onPick }: { tiles: StorageTile[]; onPick: (t: StorageT
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const rects = useMemo(() => squarify(tiles.filter((t) => t.bytes > 0), size.w, size.h), [tiles, size]);
-  const privates = tiles.filter((t) => t.kind === "private");
+  const rects = useMemo(() => squarify(tiles.filter((x) => x.bytes > 0), size.w, size.h), [tiles, size]);
+  const privates = tiles.filter((x) => x.kind === "private");
   return (
     <>
       <div className="treemap" ref={box}>
-        {rects.map(({ t, x, y, w, h }) => (
+        {rects.map(({ t: tile, x, y, w, h }) => (
           <button
-            key={t.kind + t.id + t.name}
-            className={`tm-tile ${t.kind}`}
+            key={tile.kind + tile.id + tile.name}
+            className={`tm-tile ${tile.kind}`}
             style={{ left: x, top: y, width: w, height: h }}
-            onClick={() => onPick(t)}
-            title={`${t.name} — ${formatSize(t.bytes)}${t.kind === "folder" ? ` · ${plural(t.files, "file")}` : ""}`}
-            disabled={t.kind !== "folder"}
+            onClick={() => onPick(tile)}
+            title={`${tile.name} — ${formatSize(tile.bytes)}${tile.kind === "folder" ? ` · ${tn(tile.files, "{n} file", "{n} files")}` : ""}`}
+            disabled={tile.kind !== "folder"}
           >
             {w > 60 && h > 30 && (
               <>
                 <span className="tm-name truncate">
-                  {t.kind === "folder" && <Icon name="folder" size={11} />} {t.name}
+                  {tile.kind === "folder" && <Icon name="folder" size={11} />} {tile.name}
                 </span>
-                <span className="tm-size">{formatSize(t.bytes)}</span>
+                <span className="tm-size">{formatSize(tile.bytes)}</span>
               </>
             )}
           </button>
         ))}
-        {!rects.length && <div className="empty small-empty">Nothing measurable here.</div>}
+        {!rects.length && <div className="empty small-empty">{t("Nothing measurable here.")}</div>}
       </div>
       {privates.length > 0 && (
         <p className="fineprint">
-          <Icon name="lock" size={11} /> Private, not measured: {privates.map((p) => p.name).join(", ")}
+          <Icon name="lock" size={11} /> {t("Private, not measured: {names}", { names: privates.map((p) => p.name).join(", ") })}
         </p>
       )}
     </>
@@ -290,14 +300,14 @@ function Largest({ report: r, onOpenFile, onOpenFolder }: { report: StorageRepor
       <div className="chips">
         {(
           [
-            ["files", "Files"],
-            ["videos", "Videos"],
-            ["images", "Images"],
-            ["folders", "Folders"],
+            ["files", msg("Files")],
+            ["videos", msg("Videos")],
+            ["images", msg("Images")],
+            ["folders", msg("Folders")],
           ] as const
         ).map(([k, label]) => (
           <button key={k} className={`chip ${list === k ? "on" : ""}`} onClick={() => setList(k)}>
-            {label}
+            {t(label)}
           </button>
         ))}
       </div>
@@ -307,7 +317,7 @@ function Largest({ report: r, onOpenFile, onOpenFolder }: { report: StorageRepor
               <button key={f.id} className="size-row" onClick={() => onOpenFolder(f.id)}>
                 <Icon name="folder" size={14} />
                 <span className="truncate size-name">{f.path}</span>
-                <span className="muted">{plural(f.files, "file")}</span>
+                <span className="muted">{tn(f.files, "{n} file", "{n} files")}</span>
                 <span className="size-bytes">{formatSize(f.bytes)}</span>
               </button>
             ))
@@ -320,7 +330,7 @@ function Largest({ report: r, onOpenFile, onOpenFolder }: { report: StorageRepor
                 <span className="size-bytes">{formatSize(e.size)}</span>
               </button>
             ))}
-        {list !== "folders" && !items.length && <p className="muted">Nothing here.</p>}
+        {list !== "folders" && !items.length && <p className="muted">{t("Nothing here.")}</p>}
       </div>
     </div>
   );
@@ -345,21 +355,28 @@ function EmptyFolders({ version, onToast }: { version: number; onToast: (msg: st
     setConfirm(false);
     setChosen(new Set());
     onToast(
-      r.failed.length ? `Moved ${plural(r.trashed.length, "folder")} to Trash · ${plural(r.failed.length, "folder")} skipped (${r.failed[0].reason})` : `Moved ${plural(r.trashed.length, "folder")} to Trash`,
+      r.failed.length
+        ? tn(r.trashed.length, "Moved {n} folder to Trash", "Moved {n} folders to Trash") +
+            " · " +
+            tn(r.failed.length, "{n} folder skipped ({reason})", "{n} folders skipped ({reason})", { reason: r.failed[0].reason })
+        : tn(r.trashed.length, "Moved {n} folder to Trash", "Moved {n} folders to Trash"),
       5000,
     );
+    if (r.failed.length) review.problem();
+    else if (r.trashed.length) review.success("empty-folders");
     load();
   };
   return (
     <div className="empty-folders">
       <p className="lead">
-        Folders with no files. Each one is checked on disk, including hidden items, and nothing is removed until you review and confirm. They go to the
-        Trash, so they can be restored.
+        {t(
+          "Folders with no files. Each one is checked on disk, including hidden items, and nothing is removed until you review and confirm. They go to the Trash, so they can be restored.",
+        )}
       </p>
       {list.length === 0 ? (
         <div className="empty">
           <Icon name="check" size={34} stroke={1.3} />
-          <p>No empty folders.</p>
+          <p>{t("No empty folders.")}</p>
         </div>
       ) : (
         <div className="size-list">
@@ -383,7 +400,13 @@ function EmptyFolders({ version, onToast }: { version: number; onToast: (msg: st
                 <Icon name="folder" size={14} />
                 <span className="truncate size-name">{f.path}</span>
                 <span className="muted">
-                  {f.protected ? "Never Modify" : f.note ? `Not empty: ${f.note}` : f.nested ? `+ ${plural(f.nested, "empty subfolder")}` : "Empty"}
+                  {f.protected
+                    ? t("Never Modify")
+                    : f.note
+                      ? t("Not empty: {reason}", { reason: f.note })
+                      : f.nested
+                        ? tn(f.nested, "+ {n} empty subfolder", "+ {n} empty subfolders")
+                        : t("Empty")}
                 </span>
               </label>
             );
@@ -392,13 +415,19 @@ function EmptyFolders({ version, onToast }: { version: number; onToast: (msg: st
       )}
       {list.length > 0 && (
         <div className="selection-bar">
-          <span>{chosen.size ? <strong>{plural(chosen.size, "folder")} selected</strong> : <span className="muted">{plural(eligible.length, "folder")} can be removed</span>}</span>
+          <span>
+            {chosen.size ? (
+              <strong>{tn(chosen.size, "{n} folder selected", "{n} folders selected")}</strong>
+            ) : (
+              <span className="muted">{tn(eligible.length, "{n} folder can be removed", "{n} folders can be removed")}</span>
+            )}
+          </span>
           <div className="spacer" />
           <button className="btn" onClick={() => setChosen(chosen.size ? new Set() : new Set(eligible.map((f) => f.id)))}>
-            {chosen.size ? "Clear Selection" : "Select All"}
+            {chosen.size ? t("Clear Selection") : t("Select All")}
           </button>
           <button className="btn primary danger-fill" disabled={!chosen.size} onClick={() => setConfirm(true)}>
-            Move to Trash…
+            {t("Move to Trash…")}
           </button>
         </div>
       )}
@@ -407,14 +436,14 @@ function EmptyFolders({ version, onToast }: { version: number; onToast: (msg: st
           <div className="dialog-icon danger">
             <Icon name="trash" size={20} />
           </div>
-          <h2>Move {plural(chosen.size, "empty folder")} to Trash?</h2>
-          <p>Each folder is checked again right before it moves. Anything that is no longer empty is skipped.</p>
+          <h2>{tn(chosen.size, "Move {n} empty folder to Trash?", "Move {n} empty folders to Trash?")}</h2>
+          <p>{t("Each folder is checked again right before it moves. Anything that is no longer empty is skipped.")}</p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setConfirm(false)} disabled={busy}>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn primary danger-fill" onClick={run} disabled={busy} autoFocus>
-              {busy ? "Moving…" : "Move to Trash"}
+              {busy ? t("Moving…") : t("Move to Trash")}
             </button>
           </div>
         </ModalFrame>

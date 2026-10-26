@@ -12,7 +12,10 @@
 use crate::privacy;
 use std::path::Path;
 
-pub const READ_ONLY: &str = "Read-only Mode is enabled.";
+/// The refusal while Read-only Mode is on, in the interface language.
+pub fn read_only() -> String {
+    tr!("Read-only Mode is enabled.")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -43,20 +46,20 @@ impl Policy<'_> {
     /// created). Canonical paths only.
     pub fn check(&self, op: Op, path: &Path) -> Result<(), String> {
         if self.read_only {
-            return Err(READ_ONLY.into());
+            return Err(read_only());
         }
         let target = match op {
             Op::Create | Op::Restore => path.parent().unwrap_or(path),
             _ => path,
         };
         if let Some(folder) = self.protected.covering(target) {
-            return Err(format!(
-                "“{}” is protected (Never Modify), so Mori won't change anything inside it.",
-                name(&folder)
+            return Err(tr!(
+                "“{name}” is protected (Never Modify), so Mori won't change anything inside it.",
+                name = name(&folder)
             ));
         }
         if matches!(op, Op::Trash | Op::Rename | Op::Delete | Op::Move) && self.protected.any_below(path) {
-            return Err("This folder contains a protected folder (Never Modify), so Mori won't change it.".into());
+            return Err(tr!("This folder contains a protected folder (Never Modify), so Mori won't change it."));
         }
         Ok(())
     }
@@ -90,7 +93,7 @@ mod tests {
         assert!(p.check(Op::Move, &base.join("Photos")).unwrap_err().contains("contains a protected"));
         assert!(p.check(Op::Move, &base.join("Photos/Loose")).is_ok());
         let ro = Policy { read_only: true, protected: &store };
-        assert_eq!(ro.check(Op::Trash, &base.join("Photos/Loose")).unwrap_err(), READ_ONLY);
+        assert_eq!(ro.check(Op::Trash, &base.join("Photos/Loose")).unwrap_err(), read_only());
         fs::remove_dir_all(base).unwrap();
     }
 }

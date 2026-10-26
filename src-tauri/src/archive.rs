@@ -129,7 +129,7 @@ pub fn inspect<R: Read + Seek>(r: &mut R, size: u64, kind: &str) -> Result<Listi
         "zip" | "jar" | "ooxml" | "odf" | "epub" => zip(r, size, 0, &mut budget)?,
         "tar" => tar(r, "tar", 0, &mut budget),
         "gzip" => gzip(r, size, 0, &mut budget)?,
-        _ => return Err("Mori can't list this archive format.".into()),
+        _ => return Err(tr!("Mori can't list this archive format.")),
     };
     summarise(&mut l);
     Ok(l)
@@ -146,24 +146,24 @@ fn summarise(l: &mut Listing) {
         l.findings.push(finding(
             Level::High,
             "archive-traversal",
-            format!("{trav} path{} with “../”", if trav == 1 { "" } else { "s" }),
-            "Extracting this archive naively could write files outside the destination folder.".into(),
+            trn!(trav, "{n} path with “../”", "{n} paths with “../”"),
+            tr!("Extracting this archive naively could write files outside the destination folder."),
         ));
     }
     if abs > 0 {
         l.findings.push(finding(
             Level::High,
             "archive-absolute",
-            format!("{abs} absolute path{}", if abs == 1 { "" } else { "s" }),
-            "Entries name absolute locations (or drive letters) instead of paths inside the archive.".into(),
+            trn!(abs, "{n} absolute path", "{n} absolute paths"),
+            tr!("Entries name absolute locations (or drive letters) instead of paths inside the archive."),
         ));
     }
     if links > 0 {
         l.findings.push(finding(
             Level::Attention,
             "archive-symlinks",
-            format!("{links} symbolic link{}", if links == 1 { "" } else { "s" }),
-            "Links inside archives can redirect later files to other places when extracted.".into(),
+            trn!(links, "{n} symbolic link", "{n} symbolic links"),
+            tr!("Links inside archives can redirect later files to other places when extracted."),
         ));
     }
     let ratio = if l.total_compressed > 0 { l.total_size as f64 / l.total_compressed as f64 } else { 0.0 };
@@ -171,58 +171,62 @@ fn summarise(l: &mut Listing) {
         l.findings.push(finding(
             Level::High,
             "archive-bomb",
-            "Potential archive bomb".into(),
-            format!(
-                "Declares {} of content from {} compressed (ratio {ratio:.0}:1). Mori never extracts it.",
-                human(l.total_size),
-                human(l.total_compressed)
+            tr!("Potential archive bomb"),
+            tr!(
+                "Declares {size} of content from {compressed} compressed (ratio {ratio}:1). Mori never extracts it.",
+                size = human(l.total_size),
+                compressed = human(l.total_compressed),
+                ratio = format!("{ratio:.0}")
             ),
         ));
     } else if ratio > RATIO_ATTENTION && l.total_size > 100 << 20 {
         l.findings.push(finding(
             Level::Attention,
             "archive-ratio",
-            "Extreme compression ratio".into(),
-            format!("Content would expand about {ratio:.0} times."),
+            tr!("Extreme compression ratio"),
+            tr!("Content would expand about {ratio} times.", ratio = format!("{ratio:.0}")),
         ));
     }
     if l.total_entries > 50_000 {
         l.findings.push(finding(
             Level::Attention,
             "archive-entries",
-            "Huge number of entries".into(),
-            format!("{} entries.", l.total_entries),
+            tr!("Huge number of entries"),
+            trn!(l.total_entries, "{n} entry.", "{n} entries."),
         ));
     }
     if l.nested_depth >= 2 {
         l.findings.push(finding(
             Level::Attention,
             "archive-nesting",
-            format!("Nested archive depth: {}", l.nested_depth),
-            format!("Archives inside archives. Mori looks at most {MAX_DEPTH} levels deep and never extracts them."),
+            tr!("Nested archive depth: {depth}", depth = l.nested_depth),
+            tr!(
+                "Archives inside archives. Mori looks at most {max} levels deep and never extracts them.",
+                max = MAX_DEPTH
+            ),
         ));
     } else if l.nested_depth == 1 {
         l.findings.push(finding(
             Level::Info,
             "archive-nested",
-            "Contains archives".into(),
-            "Some entries are archives themselves.".into(),
+            tr!("Contains archives"),
+            tr!("Some entries are archives themselves."),
         ));
     }
     if l.entries.iter().any(|e| e.encrypted) {
         l.findings.push(finding(
             Level::Info,
             "archive-encrypted",
-            "Encrypted entries".into(),
-            "Their contents can't be inspected.".into(),
+            tr!("Encrypted entries"),
+            tr!("Their contents can't be inspected."),
         ));
     }
     if l.truncated {
         l.findings.push(finding(
             Level::Info,
             "archive-partial",
-            "Listing stopped early".into(),
-            "Mori's limits (entries, bytes or time) were reached; totals are partial.".into(),
+            tr!("Listing stopped early"),
+            tr!("Mori's limits (entries, bytes or time) were reached; totals are partial."),
         ));
     }
 }
@@ -240,9 +244,9 @@ fn u64le(b: &[u8], i: usize) -> Option<u64> {
 }
 
 fn read_at<R: Read + Seek>(r: &mut R, at: u64, len: u64) -> Result<Vec<u8>, String> {
-    r.seek(SeekFrom::Start(at)).map_err(|_| "Read error")?;
+    r.seek(SeekFrom::Start(at)).map_err(|_| tr!("Read error"))?;
     let mut v = Vec::new();
-    r.take(len).read_to_end(&mut v).map_err(|_| "Read error")?;
+    r.take(len).read_to_end(&mut v).map_err(|_| tr!("Read error"))?;
     Ok(v)
 }
 
@@ -253,25 +257,25 @@ fn zip<R: Read + Seek>(r: &mut R, size: u64, depth: u8, budget: &mut Budget) -> 
     let eocd = (0..tail.len().saturating_sub(21))
         .rev()
         .find(|&i| tail[i..].starts_with(b"PK\x05\x06"))
-        .ok_or("Not a readable ZIP archive")?;
-    let mut entries_total = u16le(&tail, eocd + 10).ok_or("Bad ZIP")?;
-    let mut cd_size = u32le(&tail, eocd + 12).ok_or("Bad ZIP")?;
-    let mut cd_off = u32le(&tail, eocd + 16).ok_or("Bad ZIP")?;
+        .ok_or_else(|| tr!("Not a readable ZIP archive"))?;
+    let mut entries_total = u16le(&tail, eocd + 10).ok_or_else(|| tr!("Bad ZIP"))?;
+    let mut cd_size = u32le(&tail, eocd + 12).ok_or_else(|| tr!("Bad ZIP"))?;
+    let mut cd_off = u32le(&tail, eocd + 16).ok_or_else(|| tr!("Bad ZIP"))?;
     // ZIP64: locator 20 bytes before the EOCD.
     if (entries_total == 0xFFFF || cd_size == 0xFFFF_FFFF || cd_off == 0xFFFF_FFFF)
         && eocd >= 20
         && tail[eocd - 20..].starts_with(b"PK\x06\x07")
     {
-        let z64_off = u64le(&tail, eocd - 20 + 8).ok_or("Bad ZIP64")?;
+        let z64_off = u64le(&tail, eocd - 20 + 8).ok_or_else(|| tr!("Bad ZIP64"))?;
         let z = read_at(r, z64_off, 56)?;
         if z.starts_with(b"PK\x06\x06") {
-            entries_total = u64le(&z, 32).ok_or("Bad ZIP64")?;
-            cd_size = u64le(&z, 40).ok_or("Bad ZIP64")?;
-            cd_off = u64le(&z, 48).ok_or("Bad ZIP64")?;
+            entries_total = u64le(&z, 32).ok_or_else(|| tr!("Bad ZIP64"))?;
+            cd_size = u64le(&z, 40).ok_or_else(|| tr!("Bad ZIP64"))?;
+            cd_off = u64le(&z, 48).ok_or_else(|| tr!("Bad ZIP64"))?;
         }
     }
     if cd_size > MAX_CENTRAL_DIR || cd_off.saturating_add(cd_size) > size {
-        return Err("The archive's directory is damaged or implausibly large.".into());
+        return Err(tr!("The archive's directory is damaged or implausibly large."));
     }
     let cd = read_at(r, cd_off, cd_size)?;
     let mut l = Listing { format: "zip", ..Default::default() };
@@ -552,7 +556,7 @@ fn gzip<R: Read + Seek>(r: &mut R, size: u64, depth: u8, budget: &mut Budget) ->
     // Original file name (FNAME flag), when no FEXTRA field precedes it.
     let flags = head.get(3).copied().unwrap_or(0);
     let name = if flags & 0x08 != 0 && flags & 0x04 == 0 { cstr(head.get(10..).unwrap_or(&[])) } else { String::new() };
-    r.seek(SeekFrom::Start(0)).map_err(|_| "Read error")?;
+    r.seek(SeekFrom::Start(0)).map_err(|_| tr!("Read error"))?;
     let left = MAX_INFLATE_TOTAL.saturating_sub(budget.inflated);
     let mut dec = GzDecoder::new(r).take(left);
     let mut first = vec![0u8; 512];
@@ -564,7 +568,7 @@ fn gzip<R: Read + Seek>(r: &mut R, size: u64, depth: u8, budget: &mut Budget) ->
         return Ok(l);
     }
     let entry = Entry {
-        path: if name.is_empty() { "(compressed data)".into() } else { display_safe(&name) },
+        path: if name.is_empty() { tr!("(compressed data)") } else { display_safe(&name) },
         size: isize,
         compressed: size,
         flags: path_flags(&name),

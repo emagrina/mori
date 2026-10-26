@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LAND_PATH } from "../assets/world";
-import { plural, type Places } from "../api";
+import { type Places } from "../api";
+import { fmtNum, t, tn } from "../i18n";
 import { Icon } from "./Icon";
 
 /** Screen pixels per cluster cell. */
@@ -123,7 +124,7 @@ export function PlacesMap({ places, onOpen }: { places: Places; onOpen: (index: 
           zoomAt(2, e.clientX - r.left, e.clientY - r.top);
         }}
       >
-        <svg width={size.w} height={size.h} aria-label="Map of photo and video positions">
+        <svg width={size.w} height={size.h} aria-label={t("Map of photo and video positions")}>
           <g transform={`scale(${v.scale}) translate(${-v.ox} ${-v.oy})`}>
             {[-360, 0, 360].map((dx) => (
               <path key={dx} d={LAND_PATH} transform={`translate(${dx} 0)`} className="land" vectorEffect="non-scaling-stroke" />
@@ -154,7 +155,7 @@ export function PlacesMap({ places, onOpen }: { places: Places; onOpen: (index: 
                 <circle r={r} />
                 {c.members.length > 1 && (
                   <text dy="0.35em" textAnchor="middle">
-                    {c.members.length > 999 ? `${Math.round(c.members.length / 1000)}k` : c.members.length}
+                    {c.members.length > 999 ? t("{count}k", { count: Math.round(c.members.length / 1000) }) : fmtNum(c.members.length)}
                   </text>
                 )}
               </g>
@@ -162,23 +163,23 @@ export function PlacesMap({ places, onOpen }: { places: Places; onOpen: (index: 
           })}
         </svg>
         <div className="places-tools">
-          <button className="icon-btn" onClick={() => zoomAt(1.6, size.w / 2, size.h / 2)} title="Zoom in">
+          <button className="icon-btn" onClick={() => zoomAt(1.6, size.w / 2, size.h / 2)} title={t("Zoom in")}>
             <Icon name="zoomIn" size={15} />
           </button>
-          <button className="icon-btn" onClick={() => zoomAt(1 / 1.6, size.w / 2, size.h / 2)} title="Zoom out">
+          <button className="icon-btn" onClick={() => zoomAt(1 / 1.6, size.w / 2, size.h / 2)} title={t("Zoom out")}>
             <Icon name="zoomOut" size={15} />
           </button>
-          <button className="icon-btn" onClick={fit} title="Fit all places">
+          <button className="icon-btn" onClick={fit} title={t("Fit all places")}>
             <Icon name="all" size={15} />
           </button>
         </div>
-        <div className="places-note">Offline map · Natural Earth outlines · no map service is contacted</div>
+        <div className="places-note">{t("Offline map · Natural Earth outlines · no map service is contacted")}</div>
       </div>
       {picked && (
         <aside className="places-list">
           <header>
-            <strong>{plural(picked.members.length, "file")}</strong>
-            <button className="icon-btn" onClick={() => setPicked(null)} aria-label="Close">
+            <strong>{tn(picked.members.length, "{n} file", "{n} files")}</strong>
+            <button className="icon-btn" onClick={() => setPicked(null)} aria-label={t("Close")}>
               <Icon name="close" size={12} />
             </button>
           </header>
@@ -194,7 +195,7 @@ export function PlacesMap({ places, onOpen }: { places: Places; onOpen: (index: 
               </li>
             ))}
           </ul>
-          {picked.members.length > 300 && <div className="muted small">Zoom in to see the other {picked.members.length - 300}.</div>}
+          {picked.members.length > 300 && <div className="muted small">{t("Zoom in to see the other {count}.", { count: picked.members.length - 300 })}</div>}
         </aside>
       )}
     </div>

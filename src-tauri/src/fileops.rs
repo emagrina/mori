@@ -35,13 +35,13 @@ fn macos_trash(path: &Path) -> Result<PathBuf, String> {
     use std::ffi::{CStr, CString};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     if fs::symlink_metadata(path).is_err() {
-        return Err("file no longer exists".into());
+        return Err(tr!("file no longer exists"));
     }
-    let c = CString::new(path.as_os_str().as_bytes()).map_err(|_| "invalid path")?;
+    let c = CString::new(path.as_os_str().as_bytes()).map_err(|_| tr!("invalid path"))?;
     objc2::rc::autoreleasepool(|_| unsafe {
         let s: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
         if s.is_null() {
-            return Err("invalid path".to_string());
+            return Err(tr!("invalid path"));
         }
         let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: s];
         let fm: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
@@ -52,9 +52,9 @@ fn macos_trash(path: &Path) -> Result<PathBuf, String> {
             let code: isize = if err.is_null() { 0 } else { msg_send![err, code] };
             // NSFileWriteNoPermissionError = 513, NSFileNoSuchFileError = 4.
             return Err(match code {
-                513 | 257 => "permission denied".into(),
-                4 => "file no longer exists".into(),
-                _ => "the system Trash refused the item".into(),
+                513 | 257 => tr!("permission denied"),
+                4 => tr!("file no longer exists"),
+                _ => tr!("the system Trash refused the item"),
             });
         }
         if out.is_null() {
@@ -75,19 +75,19 @@ fn macos_trash(path: &Path) -> Result<PathBuf, String> {
 /// the Trash.
 pub fn restore_from_trash(policy: &Policy, trashed: &Path, original: &Path) -> Result<(), String> {
     policy.check(Op::Restore, original)?;
-    fs::symlink_metadata(trashed).map_err(|_| "it is no longer in the Trash".to_string())?;
+    fs::symlink_metadata(trashed).map_err(|_| tr!("it is no longer in the Trash"))?;
     if fs::symlink_metadata(original).is_ok() {
-        return Err("something with the same name is already there".into());
+        return Err(tr!("something with the same name is already there"));
     }
-    let parent = original.parent().ok_or("invalid path")?;
+    let parent = original.parent().ok_or_else(|| tr!("invalid path"))?;
     if !fs::symlink_metadata(parent).is_ok_and(|m| m.is_dir()) {
-        return Err("its folder no longer exists".into());
+        return Err(tr!("its folder no longer exists"));
     }
     platform_rename_excl(trashed, original).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
-            "something with the same name is already there".to_string()
+            tr!("something with the same name is already there")
         } else {
-            "the item couldn't be moved back".to_string()
+            tr!("the item couldn't be moved back")
         }
     })
 }
@@ -98,14 +98,14 @@ pub fn restore_from_trash(policy: &Policy, trashed: &Path, original: &Path) -> R
 /// any link inside. Returns the bytes freed (link and folder entries count 0).
 pub fn delete_permanently(policy: &Policy, path: &Path) -> Result<u64, String> {
     policy.check(Op::Delete, path)?;
-    let meta = fs::symlink_metadata(path).map_err(|_| "file no longer exists".to_string())?;
+    let meta = fs::symlink_metadata(path).map_err(|_| tr!("file no longer exists"))?;
     let ft = meta.file_type();
     if ft.is_symlink() || ft.is_file() {
         fs::remove_file(path).map_err(|e| io_reason(&e))?;
         return Ok(if ft.is_file() { meta.len() } else { 0 });
     }
     if !ft.is_dir() {
-        return Err("not a regular file or folder".into());
+        return Err(tr!("not a regular file or folder"));
     }
     let mut bytes = 0;
     for e in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
@@ -121,9 +121,9 @@ pub fn delete_permanently(policy: &Policy, path: &Path) -> Result<u64, String> {
 
 fn io_reason(e: &std::io::Error) -> String {
     match e.kind() {
-        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
-        std::io::ErrorKind::NotFound => "file no longer exists".into(),
-        _ => "the item couldn't be deleted".into(),
+        std::io::ErrorKind::PermissionDenied => tr!("permission denied"),
+        std::io::ErrorKind::NotFound => tr!("file no longer exists"),
+        _ => tr!("the item couldn't be deleted"),
     }
 }
 
@@ -131,11 +131,11 @@ fn io_reason(e: &std::io::Error) -> String {
 fn describe_trash_error(e: &trash::Error) -> String {
     let s = e.to_string();
     if s.contains("ermission") {
-        "permission denied".into()
+        tr!("permission denied")
     } else if s.contains("not found") || s.contains("No such file") {
-        "file no longer exists".into()
+        tr!("file no longer exists")
     } else {
-        "the system Trash refused the item".into()
+        tr!("the system Trash refused the item")
     }
 }
 
@@ -153,13 +153,13 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
         use std::io::Write;
         use std::os::fd::FromRawFd;
         use std::os::unix::ffi::OsStrExt;
-        let cdir = CString::new(dir.as_os_str().as_bytes()).map_err(|_| "invalid folder")?;
-        let cname = CString::new(name.as_bytes()).map_err(|_| "invalid name")?;
+        let cdir = CString::new(dir.as_os_str().as_bytes()).map_err(|_| tr!("invalid folder"))?;
+        let cname = CString::new(name.as_bytes()).map_err(|_| tr!("invalid name"))?;
         let dfd = unsafe {
             libc::open(cdir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         };
         if dfd < 0 {
-            return Err("the folder can't be opened".into());
+            return Err(tr!("the folder can't be opened"));
         }
         let fd = unsafe {
             libc::openat(
@@ -174,8 +174,8 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
         if fd < 0 {
             return match err.kind() {
                 std::io::ErrorKind::AlreadyExists => Ok(false),
-                std::io::ErrorKind::PermissionDenied => Err("permission denied".into()),
-                _ => Err("the file couldn't be created".into()),
+                std::io::ErrorKind::PermissionDenied => Err(tr!("permission denied")),
+                _ => Err(tr!("the file couldn't be created")),
             };
         }
         let mut f = unsafe { fs::File::from_raw_fd(fd) };
@@ -183,26 +183,26 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
             drop(f);
             // Our own partial file: remove it rather than leave a broken copy.
             let _ = fs::remove_file(&target);
-            return Err("writing the file failed (disk full?)".into());
+            return Err(tr!("writing the file failed (disk full?)"));
         }
         Ok(true)
     }
     #[cfg(not(unix))]
     {
         use std::io::Write;
-        let meta = fs::symlink_metadata(dir).map_err(|_| "the folder can't be opened")?;
+        let meta = fs::symlink_metadata(dir).map_err(|_| tr!("the folder can't be opened"))?;
         if !meta.is_dir() {
-            return Err("the folder can't be opened".into());
+            return Err(tr!("the folder can't be opened"));
         }
         let mut f = match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-            Err(_) => return Err("the file couldn't be created".into()),
+            Err(_) => return Err(tr!("the file couldn't be created")),
         };
         if f.write_all(bytes).and_then(|_| f.sync_all()).is_err() {
             drop(f);
             let _ = fs::remove_file(&target);
-            return Err("writing the file failed (disk full?)".into());
+            return Err(tr!("writing the file failed (disk full?)"));
         }
         Ok(true)
     }
@@ -215,24 +215,24 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
 pub fn confined_item(root: &Path, rel: &str) -> Result<(PathBuf, fs::Metadata), String> {
     let rel_path = Path::new(rel);
     if rel.is_empty() || rel_path.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Err("invalid path".into());
+        return Err(tr!("invalid path"));
     }
     let parent = rel_path.parent().unwrap_or(Path::new(""));
-    let name = rel_path.file_name().ok_or("invalid path")?;
+    let name = rel_path.file_name().ok_or_else(|| tr!("invalid path"))?;
     // Canonicalise the *parent* (resolving any symlinked directories) and make
     // sure it is still inside the root; then look at the entry itself.
-    let parent_canon = fs::canonicalize(root.join(parent)).map_err(|_| "item unavailable")?;
+    let parent_canon = fs::canonicalize(root.join(parent)).map_err(|_| tr!("item unavailable"))?;
     if !parent_canon.starts_with(root) {
-        return Err("item is outside the allowed folder".into());
+        return Err(tr!("item is outside the allowed folder"));
     }
     let path = parent_canon.join(name);
-    let meta = fs::symlink_metadata(&path).map_err(|_| "item no longer exists")?;
+    let meta = fs::symlink_metadata(&path).map_err(|_| tr!("item no longer exists"))?;
     let ft = meta.file_type();
     if !(ft.is_file() || ft.is_dir() || ft.is_symlink()) {
-        return Err("not a regular file or folder".into());
+        return Err(tr!("not a regular file or folder"));
     }
     if path == root {
-        return Err("refusing to act on the root folder".into());
+        return Err(tr!("refusing to act on the root folder"));
     }
     Ok((path, meta))
 }
@@ -241,16 +241,16 @@ pub fn confined_item(root: &Path, rel: &str) -> Result<(PathBuf, fs::Metadata), 
 /// directory, hide the real extension, or be invalid on common filesystems.
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.trim().is_empty() {
-        return Err("The name can't be empty.".into());
+        return Err(tr!("The name can't be empty."));
     }
     if name == "." || name == ".." {
-        return Err("That name isn't allowed.".into());
+        return Err(tr!("That name isn't allowed."));
     }
     if name.len() > 255 {
-        return Err("The name is too long.".into());
+        return Err(tr!("The name is too long."));
     }
     if name.starts_with('.') {
-        return Err("Names starting with a dot would hide the item.".into());
+        return Err(tr!("Names starting with a dot would hide the item."));
     }
     let bad = |c: char| {
         matches!(c, '/' | '\\' | ':' | '\0' | '<' | '>' | '"' | '|' | '?' | '*')
@@ -258,12 +258,12 @@ pub fn validate_name(name: &str) -> Result<(), String> {
             || matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
     };
     if name.chars().any(bad) {
-        return Err(
-            "The name contains characters that aren't allowed (/ \\ : < > \" | ? * or control characters).".into()
-        );
+        return Err(tr!(
+            "The name contains characters that aren't allowed (/ \\ : < > \" | ? * or control characters)."
+        ));
     }
     if name.ends_with(' ') || name.ends_with('.') {
-        return Err("The name can't end with a space or a dot.".into());
+        return Err(tr!("The name can't end with a space or a dot."));
     }
     let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
     let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
@@ -271,7 +271,7 @@ pub fn validate_name(name: &str) -> Result<(), String> {
             && stem.len() == 4
             && stem.as_bytes()[3].is_ascii_digit());
     if reserved {
-        return Err("That name is reserved on Windows.".into());
+        return Err(tr!("That name is reserved on Windows."));
     }
     Ok(())
 }
@@ -283,8 +283,8 @@ pub fn rename_no_replace(policy: &Policy, from: &Path, to: &Path) -> Result<(), 
     let r = platform_rename_excl(from, to);
     match r {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err("An item with that name already exists.".into()),
-        Err(_) => Err("The item couldn't be renamed.".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(tr!("An item with that name already exists.")),
+        Err(_) => Err(tr!("The item couldn't be renamed.")),
     }
 }
 
@@ -395,12 +395,12 @@ pub fn move_item(policy: &Policy, src: &Path, dest: &Path, cancel: &dyn Fn() -> 
     policy.check(Op::Move, src)?;
     policy.check(Op::Create, dest)?;
     if is_within(dest, src) {
-        return Err("A folder can't be moved into itself.".into());
+        return Err(tr!("A folder can't be moved into itself."));
     }
-    fs::symlink_metadata(src).map_err(|_| "item no longer exists".to_string())?;
+    fs::symlink_metadata(src).map_err(|_| tr!("item no longer exists"))?;
     match platform_rename_excl(src, dest) {
         Ok(()) => Ok(Moved::Renamed),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TAKEN.into()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(taken()),
         Err(e) if cross_device(&e) => {
             let bytes = copy_checked(src, dest, cancel)?;
             match move_to_trash(policy, src) {
@@ -419,12 +419,14 @@ pub fn move_item(policy: &Policy, src: &Path, dest: &Path, cancel: &dyn Fn() -> 
 pub fn copy_item(policy: &Policy, src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<u64, String> {
     policy.check(Op::Create, dest)?;
     if is_within(dest, src) {
-        return Err("A folder can't be copied into itself.".into());
+        return Err(tr!("A folder can't be copied into itself."));
     }
     copy_checked(src, dest, cancel)
 }
 
-const TAKEN: &str = "An item with that name is already there.";
+fn taken() -> String {
+    tr!("An item with that name is already there.")
+}
 
 fn cross_device(e: &std::io::Error) -> bool {
     #[cfg(unix)]
@@ -445,12 +447,12 @@ fn cross_device(e: &std::io::Error) -> bool {
 
 fn transfer_reason(e: &std::io::Error) -> String {
     match e.kind() {
-        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
-        std::io::ErrorKind::NotFound => "the item or the destination is no longer available".into(),
-        std::io::ErrorKind::AlreadyExists => TAKEN.into(),
-        std::io::ErrorKind::StorageFull => "the destination is full".into(),
-        std::io::ErrorKind::ReadOnlyFilesystem => "the destination is read-only".into(),
-        _ => "the item couldn't be transferred".into(),
+        std::io::ErrorKind::PermissionDenied => tr!("permission denied"),
+        std::io::ErrorKind::NotFound => tr!("the item or the destination is no longer available"),
+        std::io::ErrorKind::AlreadyExists => taken(),
+        std::io::ErrorKind::StorageFull => tr!("the destination is full"),
+        std::io::ErrorKind::ReadOnlyFilesystem => tr!("the destination is read-only"),
+        _ => tr!("the item couldn't be transferred"),
     }
 }
 
@@ -487,9 +489,9 @@ fn copy_tree(
         return Err("cancelled".into());
     }
     if depth > MAX_COPY_DEPTH {
-        return Err("the folder is nested too deeply to copy".into());
+        return Err(tr!("the folder is nested too deeply to copy"));
     }
-    let meta = fs::symlink_metadata(src).map_err(|_| "item no longer exists".to_string())?;
+    let meta = fs::symlink_metadata(src).map_err(|_| tr!("item no longer exists"))?;
     let ft = meta.file_type();
     if ft.is_symlink() {
         copy_link(src, dest, &meta)?;
@@ -501,13 +503,13 @@ fn copy_tree(
         return Ok(bytes);
     }
     if !ft.is_dir() {
-        return Err("it contains an item that isn't a file, folder or link".into());
+        return Err(tr!("it contains an item that isn't a file, folder or link"));
     }
     fs::create_dir(dest).map_err(|e| transfer_reason(&e))?;
     created.push(dest.to_path_buf());
     let mut names: Vec<_> = fs::read_dir(src)
-        .map_err(|_| "a folder couldn't be read".to_string())?
-        .map(|e| e.map(|e| e.file_name()).map_err(|_| "a folder couldn't be read".to_string()))
+        .map_err(|_| tr!("a folder couldn't be read"))?
+        .map(|e| e.map(|e| e.file_name()).map_err(|_| tr!("a folder couldn't be read")))
         .collect::<Result<_, _>>()?;
     names.sort();
     let mut bytes = 0;
@@ -536,7 +538,7 @@ fn copy_file(src: &Path, dest: &Path, meta: &fs::Metadata, created: &mut Vec<Pat
     let n = std::io::copy(&mut from, &mut to).map_err(|e| transfer_reason(&e))?;
     to.sync_all().map_err(|e| transfer_reason(&e))?;
     if n != meta.len() || to.metadata().map(|m| m.len()).ok() != Some(meta.len()) {
-        return Err("the copy is incomplete (the file changed or the destination failed)".into());
+        return Err(tr!("the copy is incomplete (the file changed or the destination failed)"));
     }
     let _ = to.set_permissions(meta.permissions());
     if let Ok(t) = meta.modified() {
@@ -547,7 +549,7 @@ fn copy_file(src: &Path, dest: &Path, meta: &fs::Metadata, created: &mut Vec<Pat
 
 /// Recreate a link with the same link text; its target is never touched.
 fn copy_link(src: &Path, dest: &Path, meta: &fs::Metadata) -> Result<(), String> {
-    let target = fs::read_link(src).map_err(|_| "a link couldn't be read".to_string())?;
+    let target = fs::read_link(src).map_err(|_| tr!("a link couldn't be read"))?;
     #[cfg(unix)]
     {
         let _ = meta;
@@ -561,12 +563,12 @@ fn copy_link(src: &Path, dest: &Path, meta: &fs::Metadata) -> Result<(), String>
         } else {
             std::os::windows::fs::symlink_file(&target, dest)
         };
-        r.map_err(|_| "links can't be created here (Windows needs Developer Mode for that)".to_string())
+        r.map_err(|_| tr!("links can't be created here (Windows needs Developer Mode for that)"))
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (target, dest, meta);
-        Err("links can't be copied on this platform".into())
+        Err(tr!("links can't be copied on this platform"))
     }
 }
 
@@ -625,7 +627,7 @@ mod tests {
         let ro = Policy { read_only: true, protected: &store };
         assert_eq!(
             copy_item(&ro, &d.join("src/Album/a.jpg"), &d.join("dst/x.jpg"), NEVER).unwrap_err(),
-            crate::policy::READ_ONLY
+            crate::policy::read_only()
         );
         store.set(&d.join("dst"), 0, true).unwrap();
         assert!(copy_item(&p, &d.join("src/Album/a.jpg"), &d.join("dst/y.jpg"), NEVER)
@@ -693,7 +695,7 @@ mod tests {
         let ro = Policy { read_only: true, protected: &store };
         assert_eq!(
             move_item(&ro, &d.join("A/x.jpg"), &d.join("B/y.jpg"), NEVER).unwrap_err(),
-            crate::policy::READ_ONLY
+            crate::policy::read_only()
         );
         // Protected source, protected destination, a folder containing a protected one.
         store.set(&d.join("A/Inner"), 0, true).unwrap();
@@ -765,7 +767,7 @@ mod tests {
         assert!(rename_no_replace(&p, &d.join("a.txt"), &d.join("b.txt")).is_err());
         assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"b", "target untouched");
         let ro = Policy { read_only: true, protected: &store };
-        assert_eq!(rename_no_replace(&ro, &d.join("a.txt"), &d.join("c.txt")).unwrap_err(), crate::policy::READ_ONLY);
+        assert_eq!(rename_no_replace(&ro, &d.join("a.txt"), &d.join("c.txt")).unwrap_err(), crate::policy::read_only());
         rename_no_replace(&p, &d.join("a.txt"), &d.join("c.txt")).unwrap();
         assert!(d.join("c.txt").exists() && !d.join("a.txt").exists());
         fs::remove_dir_all(&d).unwrap();
@@ -822,7 +824,7 @@ mod tests {
         assert_eq!(create_new(&p, &d, "fresh.jpg", b"new"), Ok(true));
         assert_eq!(fs::read(d.join("fresh.jpg")).unwrap(), b"new");
         let ro = Policy { read_only: true, protected: &store };
-        assert_eq!(create_new(&ro, &d, "other.jpg", b"x").unwrap_err(), crate::policy::READ_ONLY);
+        assert_eq!(create_new(&ro, &d, "other.jpg", b"x").unwrap_err(), crate::policy::read_only());
         assert!(!d.join("other.jpg").exists());
         fs::remove_dir_all(&d).unwrap();
     }

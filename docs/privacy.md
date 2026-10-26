@@ -25,7 +25,7 @@ Cache: `~/Library/Caches/app.mori.viewer/` (Windows `%LOCALAPPDATA%\app.mori.vie
 | Thumbnails, video frames | cache `thumbs/<volume>/` | Fast browsing | Clear Cache, Forget This Drive, Clear Mori Data, Reset | What images and videos look like |
 | Similarity fingerprints | cache `similar/` | Faster Similar Media | Clear Cache, Clear Mori Data, Reset | 64×64 grayscale miniatures (no names) |
 | Folder indexes | data `index-v2/` | Instant browsing and search | Clear Cache, Forget Drive, Clear Mori Data, Reset | File and folder names, sizes, dates |
-| Settings | data `settings.json` | View preferences, Read-only Mode, last folder | Reset (last folder: Clear History) | Last folder's path |
+| Settings | data `settings.json` | View preferences, Read-only Mode, last folder, interface language; in store builds only, rating-prompt counters (sessions, minutes of use, completed tasks, when the prompt was last requested) | Reset (last folder: Clear History) | Last folder's path |
 | Known drives | data `drives.json` | Safe Inspection Mode per drive | Clear History, Forget Drive, Reset | Volume IDs and names |
 | Private / protected folder rules | data `private-folders.json`, `protected-folders.json` | Visibility boundaries, Never Modify | Clear Mori Data (rules), Forget Drive, Reset | Paths of those folders |
 | Tags, favorites, screenshot corrections | data `tags.json`, `favorites.json`, `capture-*.json` | Organization | Clear Mori Data (tags & favorites), Forget Drive, Reset | Paths of tagged items, tag names |

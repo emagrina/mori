@@ -7,7 +7,6 @@ import {
   formatSize,
   isMac,
   parentOf,
-  plural,
   setPreviewOpen,
   type AnalysisDone,
   type AnalysisKind,
@@ -21,6 +20,8 @@ import {
   type LocationInfo,
   type PlanItem,
 } from "../api";
+import { fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 import { Icon, type IconName } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
@@ -36,19 +37,19 @@ import { Thumb } from "./Thumb";
 type Phase = "setup" | "running" | "results" | "review" | "cleaning" | "summary";
 
 const KINDS: { kind: AnalysisKind; label: string; icon: IconName }[] = [
-  { kind: "images", label: "Images", icon: "photo" },
-  { kind: "videos", label: "Videos", icon: "video" },
-  { kind: "documents", label: "Documents", icon: "document" },
-  { kind: "audio", label: "Audio", icon: "audio" },
-  { kind: "other", label: "Other", icon: "other" },
+  { kind: "images", label: msg("Images"), icon: "photo" },
+  { kind: "videos", label: msg("Videos"), icon: "video" },
+  { kind: "documents", label: msg("Documents"), icon: "document" },
+  { kind: "audio", label: msg("Audio"), icon: "audio" },
+  { kind: "other", label: msg("Other"), icon: "other" },
 ];
 
 const STAGES: Record<AnalysisProgress["stage"], string> = {
-  collecting: "Finding files",
-  comparingSizes: "Comparing sizes",
-  fingerprinting: "Comparing fingerprints",
-  verifying: "Verifying full content",
-  done: "Finishing",
+  collecting: msg("Finding files"),
+  comparingSizes: msg("Comparing sizes"),
+  fingerprinting: msg("Comparing fingerprints"),
+  verifying: msg("Verifying full content"),
+  done: msg("Finishing"),
 };
 
 const LOCATION_ICON: Record<string, IconName> = {
@@ -116,8 +117,8 @@ export function Analyzer({
           refreshResults().then((v) => setPhase(v ? "results" : "setup"));
         } else {
           setPhase("setup");
-          if (e.payload.status === "cancelled") onToast("Analysis cancelled — nothing was changed");
-          else setError(e.payload.message ?? "The analysis failed.");
+          if (e.payload.status === "cancelled") onToast(t("Analysis cancelled — nothing was changed"));
+          else setError(e.payload.message ?? t("The analysis failed."));
         }
       }),
       listen<{ done: number; total: number }>("cleanup-progress", (e) => setCleanup(e.payload)),
@@ -172,9 +173,9 @@ export function Analyzer({
   const keepCopy = (g: DupGroup, i: number) => update((n) => n.delete(keyOf(g.members[i])));
   const selectForTrash = (g: DupGroup, i: number) => {
     const m = g.members[i];
-    if (m.locked) return onToast("This file is half of a Live Photo whose other half isn't duplicated, so it's kept.", 4000);
+    if (m.locked) return onToast(t("This file is half of a Live Photo whose other half isn't duplicated, so it's kept."), 4000);
     if (marks.has(keyOf(m))) return;
-    if (marked(g) + 1 >= g.members.length) return onToast("At least one copy must be kept.", 3000);
+    if (marked(g) + 1 >= g.members.length) return onToast(t("At least one copy must be kept."), 3000);
     update((n) => n.add(keyOf(m)));
   };
   const toggle = (g: DupGroup, i: number) => (marks.has(keyOf(g.members[i])) ? keepCopy(g, i) : selectForTrash(g, i));
@@ -233,7 +234,7 @@ export function Analyzer({
     setMarks(new Set());
     setOutcome(null);
     setPhase("setup");
-    onToast("Analysis cleared");
+    onToast(t("Analysis cleared"));
   };
 
   const runCleanup = async () => {
@@ -242,7 +243,10 @@ export function Analyzer({
     setCancelling(false);
     setPhase("cleaning");
     try {
-      setOutcome(await api.analysisCleanup(plan.items));
+      const o = await api.analysisCleanup(plan.items);
+      setOutcome(o);
+      if (o.failures.length) review.problem();
+      else if (o.trashedFiles && !o.cancelled) review.success("duplicates");
     } catch (e) {
       // Rejected before anything was touched (e.g. a group without a copy to keep).
       setOutcome({ trashedFiles: 0, trashedBytes: 0, keptFiles: 0, groupsCleaned: 0, groupsSkipped: 0, failures: [{ path: "", reason: String(e) }], cancelled: false });
@@ -254,9 +258,9 @@ export function Analyzer({
 
   const copyPath = async (id: string) => {
     const text = await api.copyPath(id).catch(() => null);
-    if (!text) return onToast("Path unavailable");
+    if (!text) return onToast(t("Path unavailable"));
     await navigator.clipboard.writeText(text).catch(() => {});
-    onToast("Path copied");
+    onToast(t("Path copied"));
   };
 
   const openPreview = (g: DupGroup, file: DupFile) => {
@@ -279,26 +283,26 @@ export function Analyzer({
       </header>
       <div className="page-head">
         <div className="crumbs">
-          <span className="crumb">Analyze</span>
+          <span className="crumb">{t("Analyze")}</span>
         </div>
         <div className="title-row">
           <h1 className="page-title">
-            Exact Duplicates
-            {phase !== "setup" && phase !== "running" && scopeNote && <span className="scope-note">in {scopeNote}</span>}
+            {t("Exact Duplicates")}
+            {phase !== "setup" && phase !== "running" && scopeNote && <span className="scope-note">{t("in {places}", { places: scopeNote })}</span>}
           </h1>
           {(phase === "results" || phase === "summary") && view && (
             <>
-              <button className="btn" onClick={clear} title="Forget these results (they are only kept in memory)">
-                Clear Analysis
+              <button className="btn" onClick={clear} title={t("Forget these results (they are only kept in memory)")}>
+                {t("Clear Analysis")}
               </button>
               <button className="btn" onClick={() => setPhase("setup")}>
-                New Analysis
+                {t("New Analysis")}
               </button>
             </>
           )}
           {phase === "results" && groups.length > 0 && (
-            <button className="btn primary" onClick={autoSelect} title="Keep the suggested copy in every group and select the rest for review">
-              Auto-select Duplicates
+            <button className="btn primary" onClick={autoSelect} title={t("Keep the suggested copy in every group and select the rest for review")}>
+              {t("Auto-select Duplicates")}
             </button>
           )}
         </div>
@@ -335,23 +339,24 @@ export function Analyzer({
             <div className="dup-summary">
               {groups.length ? (
                 <>
-                  <strong>{plural(groups.length, "duplicate group")}</strong>
-                  <span>{plural(duplicateFiles, "extra copy", "extra copies")}</span>
-                  <span>{formatSize(recoverable)} recoverable</span>
+                  <strong>{tn(groups.length, "{n} duplicate group", "{n} duplicate groups")}</strong>
+                  <span>{tn(duplicateFiles, "{n} extra copy", "{n} extra copies")}</span>
+                  <span>{t("{size} recoverable", { size: formatSize(recoverable) })}</span>
                 </>
               ) : (
-                <strong>No exact duplicates found</strong>
+                <strong>{t("No exact duplicates found")}</strong>
               )}
               <span className="muted">
-                {plural(view.stats.scanned, "file")} compared byte for byte
-                {view.stats.livePairs > 0 && ` · ${plural(view.stats.livePairs, "Live Photo")} kept as pairs`}
-                {view.stats.unreadable + view.stats.changed > 0 && ` · ${plural(view.stats.unreadable + view.stats.changed, "file")} skipped (unreadable or changed)`}
+                {tn(view.stats.scanned, "{n} file compared byte for byte", "{n} files compared byte for byte")}
+                {view.stats.livePairs > 0 && ` · ${tn(view.stats.livePairs, "{n} Live Photo kept as pairs", "{n} Live Photos kept as pairs")}`}
+                {view.stats.unreadable + view.stats.changed > 0 &&
+                  ` · ${tn(view.stats.unreadable + view.stats.changed, "{n} file skipped (unreadable or changed)", "{n} files skipped (unreadable or changed)")}`}
               </span>
             </div>
             {groups.length === 0 ? (
               <div className="empty">
                 <Icon name="check" size={34} stroke={1.3} />
-                <p>Every file in these locations is unique. Similar-looking files are never treated as duplicates.</p>
+                <p>{t("Every file in these locations is unique. Similar-looking files are never treated as duplicates.")}</p>
               </div>
             ) : (
               <div className="dup-list">
@@ -373,7 +378,7 @@ export function Analyzer({
                 ))}
                 {shown < groups.length && (
                   <button className="btn more" onClick={() => setShown((n) => n + PAGE)}>
-                    Show more ({(groups.length - shown).toLocaleString()} groups left)
+                    {tn(groups.length - shown, "Show more ({n} group left)", "Show more ({n} groups left)")}
                   </button>
                 )}
               </div>
@@ -381,14 +386,17 @@ export function Analyzer({
             {plan.items.length > 0 && (
               <div className="selection-bar">
                 <span>
-                  <strong>{plural(plan.trash.length, "file")}</strong> selected for Trash · {formatSize(plan.bytes)}
+                  {tx(tn(plan.trash.length, "{files} selected for Trash · {size}", "{files} selected for Trash · {size}"), {
+                    files: <strong>{tn(plan.trash.length, "{n} file", "{n} files")}</strong>,
+                    size: formatSize(plan.bytes),
+                  })}
                 </span>
                 <div className="spacer" />
                 <button className="btn" onClick={() => setMarks(new Set())}>
-                  Keep All
+                  {t("Keep All")}
                 </button>
                 <button className="btn primary" onClick={() => setPhase("review")}>
-                  Review…
+                  {t("Review…")}
                 </button>
               </div>
             )}
@@ -398,10 +406,10 @@ export function Analyzer({
         {phase === "cleaning" && cleanup && (
           <div className="analyzer-center">
             <div className="progress-card">
-              <h2>Moving duplicates to Trash…</h2>
+              <h2>{t("Moving duplicates to Trash…")}</h2>
               <ProgressBar value={cleanup.total ? cleanup.done / cleanup.total : 0} />
               <p className="muted">
-                {cleanup.done.toLocaleString()} of {plural(cleanup.total, "file")} · each kept copy is re-checked first
+                {tn(cleanup.total, "{done} of {n} file · each kept copy is re-checked first", "{done} of {n} files · each kept copy is re-checked first", { done: cleanup.done })}
               </p>
               <div className="dialog-actions">
                 <button
@@ -412,7 +420,7 @@ export function Analyzer({
                     api.analysisCleanupCancel();
                   }}
                 >
-                  {cancelling ? "Stopping…" : "Stop"}
+                  {cancelling ? t("Stopping…") : t("Stop")}
                 </button>
               </div>
             </div>
@@ -443,20 +451,20 @@ export function Analyzer({
           onContextMenu={(e) => e.preventDefault()}
         >
           <button onClick={() => openPreview(menu.group, menu.file)}>
-            <Icon name="gallery" size={14} /> Preview
+            <Icon name="gallery" size={14} /> {t("Preview")}
           </button>
-          <button onClick={() => api.revealFile(menu.file.id).catch(() => onToast("File unavailable"))}>
-            <Icon name="reveal" size={14} /> {isMac ? "Show in Finder" : "Show in Folder"}
+          <button onClick={() => api.revealFile(menu.file.id).catch(() => onToast(t("File unavailable")))}>
+            <Icon name="reveal" size={14} /> {isMac ? t("Show in Finder") : t("Show in Folder")}
           </button>
           <button onClick={() => copyPath(menu.file.id)}>
-            <Icon name="copy" size={14} /> Copy Path
+            <Icon name="copy" size={14} /> {t("Copy Path")}
           </button>
           <div className="sep" />
           <button onClick={() => keepCopy(menu.group, menu.member)}>
-            <Icon name="keep" size={14} /> Keep This Copy
+            <Icon name="keep" size={14} /> {t("Keep This Copy")}
           </button>
           <button className="danger" disabled={menu.group.members[menu.member].locked} onClick={() => selectForTrash(menu.group, menu.member)}>
-            <Icon name="trash" size={14} /> Select for Trash
+            <Icon name="trash" size={14} /> {t("Select for Trash")}
           </button>
         </div>
       )}
@@ -503,30 +511,30 @@ function Setup(p: {
     <div className="setup">
       <ToolSwitch current="exact" onSwitch={p.onSwitch} />
       <p className="lead">
-        Finds files whose content is byte-for-byte identical, whatever their names or dates. Nothing is changed until you review the results and confirm.
+        {t("Finds files whose content is byte-for-byte identical, whatever their names or dates. Nothing is changed until you review the results and confirm.")}
       </p>
 
       <section>
-        <h3>Where to look</h3>
+        <h3>{t("Where to look")}</h3>
         <LocationList locations={p.locations} chosen={p.chosen} setChosen={p.setChosen} onAddFolder={p.onAddFolder} />
       </section>
 
       <section>
-        <h3>File types</h3>
+        <h3>{t("File types")}</h3>
         <div className="chips">
           <button className={`chip ${p.kinds.size === 0 ? "on" : ""}`} onClick={() => p.setKinds(new Set())}>
-            <Icon name="all" size={14} /> All Files
+            <Icon name="all" size={14} /> {t("All Files")}
           </button>
           {KINDS.map((k) => (
             <button key={k.kind} className={`chip ${p.kinds.has(k.kind) ? "on" : ""}`} onClick={() => toggleKind(k.kind)}>
-              <Icon name={k.icon} size={14} /> {k.label}
+              <Icon name={k.icon} size={14} /> {t(k.label)}
             </button>
           ))}
         </div>
         <label className="toggle">
           <input type="checkbox" checked={p.recursive} onChange={(e) => p.setRecursive(e.target.checked)} />
           <span className="switch" aria-hidden />
-          Include subfolders
+          {t("Include subfolders")}
         </label>
       </section>
 
@@ -535,17 +543,17 @@ function Setup(p: {
       <div className="setup-actions">
         {p.hasResults && (
           <button className="btn" onClick={p.onBackToResults}>
-            Back to Results
+            {t("Back to Results")}
           </button>
         )}
         <button className="btn primary large" disabled={!ready} onClick={p.onStart}>
-          Analyze
+          {t("Analyze")}
         </button>
       </div>
       <p className="fineprint">
-        Files are read locally and compared by size, then a partial fingerprint, then a full BLAKE3 hash. Media is never decoded, nothing is uploaded,
-        and results are kept only in memory until you clear them or quit Mori. Private folders inside the chosen locations are skipped; choose a
-        private folder directly to analyze it.
+        {t(
+          "Files are read locally and compared by size, then a partial fingerprint, then a full BLAKE3 hash. Media is never decoded, nothing is uploaded, and results are kept only in memory until you clear them or quit Mori. Private folders inside the chosen locations are skipped; choose a private folder directly to analyze it.",
+        )}
       </p>
     </div>
   );
@@ -554,30 +562,30 @@ function Setup(p: {
 /** The two Analyze tools, side by side: deterministic vs estimated. */
 export function ToolSwitch({ current, onSwitch }: { current: "exact" | "similar"; onSwitch: () => void }) {
   const tools = [
-    { key: "exact", icon: "duplicate" as IconName, title: "Exact Duplicates", text: "Find byte-identical files.", note: "Verified by content hash" },
+    { key: "exact", icon: "duplicate" as IconName, title: t("Exact Duplicates"), text: t("Find byte-identical files."), note: t("Verified by content hash") },
     {
       key: "similar",
       icon: "gallery" as IconName,
-      title: "Similar Photos & Videos",
-      text: "Find media that appears to contain the same visual content.",
-      note: "Estimated — always review",
+      title: t("Similar Photos & Videos"),
+      text: t("Find media that appears to contain the same visual content."),
+      note: t("Estimated — always review"),
     },
   ];
   return (
-    <div className="tool-switch" role="tablist" aria-label="Analyze">
-      {tools.map((t) => (
+    <div className="tool-switch" role="tablist" aria-label={t("Analyze")}>
+      {tools.map((tool) => (
         <button
-          key={t.key}
+          key={tool.key}
           role="tab"
-          aria-selected={current === t.key}
-          className={`tool-card ${current === t.key ? "on" : ""}`}
-          onClick={() => current !== t.key && onSwitch()}
+          aria-selected={current === tool.key}
+          className={`tool-card ${current === tool.key ? "on" : ""}`}
+          onClick={() => current !== tool.key && onSwitch()}
         >
-          <Icon name={t.icon} size={18} />
+          <Icon name={tool.icon} size={18} />
           <span className="tool-text">
-            <span className="tool-title">{t.title}</span>
-            <span className="muted">{t.text}</span>
-            <span className="tool-note">{t.note}</span>
+            <span className="tool-title">{tool.title}</span>
+            <span className="muted">{tool.text}</span>
+            <span className="tool-note">{tool.note}</span>
           </span>
         </button>
       ))}
@@ -599,7 +607,7 @@ export function LocationList(p: { locations: LocationInfo[]; chosen: Set<string>
           <input type="checkbox" checked={p.chosen.has(l.key)} onChange={() => toggle(l.key)} />
           <Icon name={LOCATION_ICON[l.key] ?? "folder"} size={16} />
           <span className="loc-text">
-            <span className="truncate">{l.key === "library" ? `${l.label} (current drive)` : l.label}</span>
+            <span className="truncate">{l.key === "library" ? t("{name} (current drive)", { name: l.label }) : l.label}</span>
             <span className="truncate muted">
               {l.path} · {l.drive}
             </span>
@@ -612,8 +620,8 @@ export function LocationList(p: { locations: LocationInfo[]; chosen: Set<string>
       <button className="loc add" onClick={p.onAddFolder}>
         <Icon name="folder" size={16} />
         <span className="loc-text">
-          <span>Choose a Folder…</span>
-          <span className="muted">Only folders you pick are read</span>
+          <span>{t("Choose a Folder…")}</span>
+          <span className="muted">{t("Only folders you pick are read")}</span>
         </span>
       </button>
     </div>
@@ -626,29 +634,29 @@ function Running({ progress: p, cancelling, onCancel }: { progress: AnalysisProg
   return (
     <div className="analyzer-center">
       <div className="progress-card">
-        <h2>{p ? STAGES[p.stage] : "Starting"}…</h2>
+        <h2>{p ? t(STAGES[p.stage]) : t("Starting")}…</h2>
         <ProgressBar value={fraction} indeterminate={!p || p.stage === "collecting"} />
         <dl className="facts">
           <div>
-            <dt>Files</dt>
-            <dd>{p ? (p.stage === "collecting" ? p.filesTotal.toLocaleString() : `${p.filesDone.toLocaleString()} of ${p.filesTotal.toLocaleString()}`) : "—"}</dd>
+            <dt>{t("Files")}</dt>
+            <dd>{p ? (p.stage === "collecting" ? fmtNum(p.filesTotal) : t("{done} of {total}", { done: p.filesDone, total: p.filesTotal })) : "—"}</dd>
           </div>
           <div>
-            <dt>Data read</dt>
-            <dd>{p && hashing ? `${formatSize(p.bytesDone)} of ${formatSize(p.bytesTotal)}` : "—"}</dd>
+            <dt>{t("Data read")}</dt>
+            <dd>{p && hashing ? t("{done} of {total}", { done: formatSize(p.bytesDone), total: formatSize(p.bytesTotal) }) : "—"}</dd>
           </div>
           <div>
-            <dt>Duplicate groups</dt>
-            <dd>{p ? p.groups.toLocaleString() : "—"}</dd>
+            <dt>{t("Duplicate groups")}</dt>
+            <dd>{p ? fmtNum(p.groups) : "—"}</dd>
           </div>
           <div>
-            <dt>Recoverable</dt>
+            <dt>{t("Recoverable")}</dt>
             <dd>{p ? formatSize(p.recoverable) : "—"}</dd>
           </div>
         </dl>
         <div className="dialog-actions">
           <button className="btn" onClick={onCancel} disabled={cancelling}>
-            {cancelling ? "Cancelling…" : "Cancel"}
+            {cancelling ? t("Cancelling…") : t("Cancel")}
           </button>
         </div>
       </div>
@@ -688,23 +696,23 @@ function GroupCard({
   return (
     <section className="dup-group">
       <header>
-        <button className="dup-thumb" onClick={() => onPreview(lead)} title="Preview">
+        <button className="dup-thumb" onClick={() => onPreview(lead)} title={t("Preview")}>
           <Thumb entry={dupEntry(lead)} fit="cover" iconSize={22} />
         </button>
         <div className="dup-title">
           <div className="truncate">{lead.name}</div>
           <div className="muted">
-            <span className="tag">Exact duplicate</span>
-            {g.live && <span className="tag">Live Photo</span>}
-            {plural(g.members.length, "copy", "copies")} · {formatSize(g.unitSize)} each
+            <span className="tag">{t("Exact duplicate")}</span>
+            {g.live && <span className="tag">{t("Live Photo")}</span>}
+            {tn(g.members.length, "{n} copy · {size} each", "{n} copies · {size} each", { size: formatSize(g.unitSize) })}
           </div>
         </div>
         <div className="dup-saving">
           <span>{formatSize(trashCount ? g.unitSize * trashCount : g.recoverable)}</span>
-          <span className="muted">{trashCount ? "selected" : "potential saving"}</span>
+          <span className="muted">{trashCount ? t("selected") : t("potential saving")}</span>
         </div>
         <button className="btn small" onClick={onKeepAll} disabled={!trashCount}>
-          Keep All
+          {t("Keep All")}
         </button>
       </header>
       <Reasons reasons={g.reasons} />
@@ -714,16 +722,16 @@ function GroupCard({
           const f = m.files[0];
           return (
             <div key={keyOf(m)} className={`dup-row ${trash ? "trash" : ""}`} onContextMenu={(ev) => onMenu(ev, i, f)}>
-              <button className="mini-thumb" onClick={() => onPreview(f)} title="Preview">
+              <button className="mini-thumb" onClick={() => onPreview(f)} title={t("Preview")}>
                 <Thumb entry={dupEntry(f)} fit="cover" iconSize={16} />
               </button>
               <div className="dup-info">
                 <div className="truncate name">
                   {m.files.map((x) => x.name).join(" + ")}
-                  {i === g.suggested && <span className="tag suggested">Suggested</span>}
+                  {i === g.suggested && <span className="tag suggested">{t("Suggested")}</span>}
                   {m.locked && (
-                    <span className="tag" title="Half of a Live Photo whose other half isn't duplicated: kept so the pair isn't broken">
-                      <Icon name="lock" size={10} /> Live Photo part
+                    <span className="tag" title={t("Half of a Live Photo whose other half isn't duplicated: kept so the pair isn't broken")}>
+                      <Icon name="lock" size={10} /> {t("Live Photo part")}
                     </span>
                   )}
                 </div>
@@ -731,23 +739,23 @@ function GroupCard({
                   {[f.location, ...parentOf(f.path).split("/").filter(Boolean)].join(" / ")}
                 </div>
               </div>
-              <div className="dup-drive muted" title="Storage location">
+              <div className="dup-drive muted" title={t("Storage location")}>
                 <Icon name="drive" size={13} /> <span className="truncate">{f.drive}</span>
               </div>
-              <div className="dup-date muted" title="Created">
+              <div className="dup-date muted" title={t("Created")}>
                 {formatShortDate(f.created ?? f.modified)}
               </div>
               <button
                 className={`state-pill ${trash ? "trash" : "keep"}`}
                 onClick={() => onToggle(i)}
                 disabled={m.locked}
-                title={trash ? "Selected for Trash — click to keep" : "Kept — click to select for Trash"}
+                title={trash ? t("Selected for Trash — click to keep") : t("Kept — click to select for Trash")}
               >
                 <Icon name={trash ? "trash" : "keep"} size={12} />
-                {trash ? "Trash" : "Keep"}
+                {trash ? t("Trash") : t("Keep")}
               </button>
-              <button className="btn small" onClick={() => onKeepOnly(i)} title="Keep this copy and select the others for Trash">
-                Keep This One
+              <button className="btn small" onClick={() => onKeepOnly(i)} title={t("Keep this copy and select the others for Trash")}>
+                {t("Keep This One")}
               </button>
             </div>
           );
@@ -782,38 +790,43 @@ export function FinalReview({
   const drives = [...new Set(plan.trash.map((f) => f.drive))];
   return (
     <ModalFrame onCancel={onReview} wide>
-      <h2>{title ?? "Ready to clean"}</h2>
+      <h2>{title ?? t("Ready to clean")}</h2>
       <dl className="facts review">
         <div>
-          <dt>{reviewed !== undefined ? "Reviewed groups" : "Duplicate groups"}</dt>
-          <dd>{(reviewed ?? plan.items.length).toLocaleString()}</dd>
+          <dt>{reviewed !== undefined ? t("Reviewed groups") : t("Duplicate groups")}</dt>
+          <dd>{fmtNum(reviewed ?? plan.items.length)}</dd>
         </div>
         <div>
-          <dt>Keep</dt>
-          <dd>{plural(plan.keep, "file")}</dd>
+          <dt>{t("Keep")}</dt>
+          <dd>{tn(plan.keep, "{n} file", "{n} files")}</dd>
         </div>
         <div>
-          <dt>Move to Trash</dt>
-          <dd>{plural(plan.trash.length, "file")}</dd>
+          <dt>{t("Move to Trash")}</dt>
+          <dd>{tn(plan.trash.length, "{n} file", "{n} files")}</dd>
         </div>
         {ignored !== undefined && (
           <div>
-            <dt>Ignored</dt>
-            <dd>{plural(ignored, "group")}</dd>
+            <dt>{t("Ignored")}</dt>
+            <dd>{tn(ignored, "{n} group", "{n} groups")}</dd>
           </div>
         )}
         <div>
-          <dt>Space recovered</dt>
+          <dt>{t("Space recovered")}</dt>
           <dd>{formatSize(plan.bytes)}</dd>
         </div>
       </dl>
       {plan.invalid ? (
-        <p className="field-error">At least one copy must be kept.</p>
+        <p className="field-error">{t("At least one copy must be kept.")}</p>
       ) : (
         <p>
-          The selected files go to the {isMac ? "Trash" : "Recycle Bin"}, where you can restore them. Every kept copy is checked again just before
-          cleaning; if one has changed or its drive is gone, that group is left untouched.
-          {drives.length > 1 && ` Files on ${drives.join(", ")}.`}
+          {isMac
+            ? t(
+                "The selected files go to the Trash, where you can restore them. Every kept copy is checked again just before cleaning; if one has changed or its drive is gone, that group is left untouched.",
+              )
+            : t(
+                "The selected files go to the Recycle Bin, where you can restore them. Every kept copy is checked again just before cleaning; if one has changed or its drive is gone, that group is left untouched.",
+              )}
+          {drives.length > 1 && ` ${t("Files on {drives}.", { drives: drives.join(", ") })}`}
         </p>
       )}
       <ul className="review-list">
@@ -822,17 +835,17 @@ export function FinalReview({
             <Icon name="trash" size={12} /> {f.location} / {f.path}
           </li>
         ))}
-        {plan.trash.length > 300 && <li className="muted">…and {plural(plan.trash.length - 300, "more file")}</li>}
+        {plan.trash.length > 300 && <li className="muted">{tn(plan.trash.length - 300, "…and {n} more file", "…and {n} more files")}</li>}
       </ul>
       <div className="dialog-actions">
         <button className="btn" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="btn" onClick={onReview}>
-          Review Selection
+          {t("Review Selection")}
         </button>
         <button className="btn primary danger-fill" onClick={onConfirm} disabled={plan.invalid || !plan.items.length}>
-          {confirmLabel ?? "Move Selected Duplicates to Trash"}
+          {confirmLabel ?? t("Move Selected Duplicates to Trash")}
         </button>
       </div>
     </ModalFrame>
@@ -843,29 +856,29 @@ export function Summary({ outcome: o, remaining, onDone }: { outcome: CleanupOut
   return (
     <div className="analyzer-center">
       <div className="progress-card summary">
-        <h2>{o.cancelled ? "Cleanup stopped" : o.trashedFiles || !o.failures.length ? "Cleanup complete" : "Nothing was moved"}</h2>
+        <h2>{o.cancelled ? t("Cleanup stopped") : o.trashedFiles || !o.failures.length ? t("Cleanup complete") : t("Nothing was moved")}</h2>
         <dl className="facts">
           <div>
-            <dt>Moved to Trash</dt>
-            <dd>{plural(o.trashedFiles, "file")}</dd>
+            <dt>{t("Moved to Trash")}</dt>
+            <dd>{tn(o.trashedFiles, "{n} file", "{n} files")}</dd>
           </div>
           <div>
-            <dt>Recovered</dt>
+            <dt>{t("Recovered")}</dt>
             <dd>{formatSize(o.trashedBytes)}</dd>
           </div>
           <div>
-            <dt>Originals preserved</dt>
-            <dd>{o.keptFiles.toLocaleString()}</dd>
+            <dt>{t("Originals preserved")}</dt>
+            <dd>{fmtNum(o.keptFiles)}</dd>
           </div>
         </dl>
         {o.groupsSkipped > 0 && (
           <p className="muted">
-            {plural(o.groupsSkipped, "group")} left untouched because a kept copy changed or became unavailable.
+            {tn(o.groupsSkipped, "{n} group left untouched because a kept copy changed or became unavailable.", "{n} groups left untouched because a kept copy changed or became unavailable.")}
           </p>
         )}
         {o.failures.length > 0 && (
           <>
-            <h3>{plural(o.failures.length, "file")} couldn't be moved</h3>
+            <h3>{tn(o.failures.length, "{n} file couldn't be moved", "{n} files couldn't be moved")}</h3>
             <ul className="review-list">
               {o.failures.slice(0, 200).map((f, i) => (
                 <li key={i}>
@@ -878,7 +891,7 @@ export function Summary({ outcome: o, remaining, onDone }: { outcome: CleanupOut
         )}
         <div className="dialog-actions">
           <button className="btn primary" onClick={onDone}>
-            {remaining ? "Back to Results" : "Done"}
+            {remaining ? t("Back to Results") : t("Done")}
           </button>
         </div>
       </div>
@@ -891,7 +904,7 @@ export function Reasons({ reasons }: { reasons: string[] }) {
   if (!reasons.length) return null;
   return (
     <div className="keep-reasons">
-      <span className="muted">★ Suggested because:</span> {reasons.join(" · ")}
+      <span className="muted">{t("★ Suggested because:")}</span> {reasons.join(" · ")}
     </div>
   );
 }

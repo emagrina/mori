@@ -14,6 +14,7 @@ import {
   type VideoInfo,
 } from "../api";
 import { aspectOf } from "../filmstrip";
+import { msg, t } from "../i18n";
 import { Icon } from "./Icon";
 import { ArchiveView, AudioView, FactsPanel, Filmstrip, FrameView, PdfView } from "./Viewers";
 
@@ -196,13 +197,13 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
     <div
       className={`preview ${idle || slideshow ? "idle" : ""} ${quick ? "quick" : ""}`}
       role="dialog"
-      aria-label={`${quick ? "Quick Look" : "Preview"} of ${entry.name}`}
+      aria-label={quick ? t("Quick Look of {name}", { name: entry.name }) : t("Preview of {name}", { name: entry.name })}
       onPointerMove={wake}
       onMouseDown={(e) => quick && e.target === e.currentTarget && onClose()}
     >
       <div className="preview-panel">
       <header className="preview-bar" data-tauri-drag-region {...chromeHandlers}>
-        <button className="icon-btn" onClick={onClose} title="Close (Esc)">
+        <button className="icon-btn" onClick={onClose} title={t("Close (Esc)")}>
           <Icon name="close" size={16} />
         </button>
         <div className="preview-title" data-tauri-drag-region>
@@ -210,36 +211,36 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
             {entry.name}
           </div>
           <div className="sub" data-tauri-drag-region>
-            {index + 1} of {items.length}
+            {t("{index} of {total}", { index: index + 1, total: items.length })}
           </div>
         </div>
         <div className="preview-actions">
           {isImage && (
             <>
-              <button className="icon-btn" onClick={() => zoomBy(0.8)} disabled={zoom <= 1} title="Zoom out (⌘−)">
+              <button className="icon-btn" onClick={() => zoomBy(0.8)} disabled={zoom <= 1} title={t("Zoom out (⌘−)")}>
                 <Icon name="zoomOut" />
               </button>
               <span className="zoom-label">{Math.round(zoom * 100)}%</span>
-              <button className="icon-btn" onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM} title="Zoom in (⌘+)">
+              <button className="icon-btn" onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM} title={t("Zoom in (⌘+)")}>
                 <Icon name="zoomIn" />
               </button>
               <span className="divider" />
             </>
           )}
           {stills.length > 1 && !quick && (
-            <button className="icon-btn" onClick={() => setSlideshow(true)} title="Slideshow (photos)">
+            <button className="icon-btn" onClick={() => setSlideshow(true)} title={t("Slideshow (photos)")}>
               <Icon name="play" />
             </button>
           )}
-          <button className="icon-btn" onClick={() => onCopyPath(entry)} title="Copy path">
+          <button className="icon-btn" onClick={() => onCopyPath(entry)} title={t("Copy path")}>
             <Icon name="copy" />
           </button>
-          <button className="icon-btn" onClick={() => api.revealFile(entry.id)} title={isMac ? "Show in Finder" : "Show in folder"}>
+          <button className="icon-btn" onClick={() => api.revealFile(entry.id)} title={isMac ? t("Show in Finder") : t("Show in folder")}>
             <Icon name="reveal" />
           </button>
           {info?.canOpen && !iso && (
             <button className="btn" onClick={openFile}>
-              <Icon name="external" size={14} /> Open
+              <Icon name="external" size={14} /> {t("Open")}
             </button>
           )}
           {actions && (
@@ -250,8 +251,8 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
                   ev.stopPropagation();
                   setMenu((m) => !m);
                 }}
-                title="More actions"
-                aria-label="More actions"
+                title={t("More actions")}
+                aria-label={t("More actions")}
                 aria-haspopup="menu"
                 aria-expanded={menu}
               >
@@ -267,8 +268,8 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
         <div className="iso-banner" {...chromeHandlers}>
           <Icon name="shield" size={12} />
           <span>
-            <strong>Isolated view</strong> · {info.previewsOff && !isolated ? "Safe Inspection Mode · " : ""}the original is never opened or run — only copies
-            rendered by Mori's sandboxed worker are shown.
+            <strong>{t("Isolated view")}</strong> · {info.previewsOff && !isolated ? `${t("Safe Inspection Mode")} · ` : ""}
+            {t("the original is never opened or run — only copies rendered by Mori's sandboxed worker are shown.")}
           </span>
         </div>
       )}
@@ -296,12 +297,12 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
           />
         )}
         {hasPrev && (
-          <button className="nav prev" onClick={() => onIndex(index - 1)} title="Previous (←)">
+          <button className="nav prev" onClick={() => onIndex(index - 1)} title={t("Previous (←)")}>
             <Icon name="left" size={22} />
           </button>
         )}
         {hasNext && (
-          <button className="nav next" onClick={() => onIndex(index + 1)} title="Next (→)">
+          <button className="nav next" onClick={() => onIndex(index + 1)} title={t("Next (→)")}>
             <Icon name="right" size={22} />
           </button>
         )}
@@ -311,7 +312,7 @@ export function Preview({ items, index, onIndex, onClose, onCopyPath, onError, i
         <span>{typeLabel(entry)}</span>
         {dims && <span>{dims}</span>}
         <span>{formatSize(entry.size)}</span>
-        <span>Modified {formatDate(entry.modified)}</span>
+        <span>{t("Modified {date}", { date: formatDate(entry.modified) })}</span>
         <span className="truncate">{parentOf(entry.path) || "/"}</span>
       </footer>
       </div>
@@ -327,7 +328,7 @@ function PreviewMenu({ entry, actions, close }: { entry: Entry; actions: Preview
       role="menuitem"
       className={opts.danger ? "danger" : ""}
       disabled={opts.modify && !actions.canModify}
-      title={opts.modify && !actions.canModify ? "Read-only: Mori won't change files right now" : undefined}
+      title={opts.modify && !actions.canModify ? t("Read-only: Mori won't change files right now") : undefined}
       onClick={() => {
         close();
         run(entry);
@@ -339,15 +340,15 @@ function PreviewMenu({ entry, actions, close }: { entry: Entry; actions: Preview
   );
   return (
     <div className="menu preview-menu" role="menu" onClick={(e) => e.stopPropagation()}>
-      {item("Get Info", "info", actions.onInfo, { keys: "I" })}
-      {item(entry.favorite ? "Remove from Favorites" : "Add to Favorites", "star", actions.onFavorite)}
-      {item("Calculate Checksum", "check", actions.onChecksum)}
+      {item(t("Get Info"), "info", actions.onInfo, { keys: "I" })}
+      {item(entry.favorite ? t("Remove from Favorites") : t("Add to Favorites"), "star", actions.onFavorite)}
+      {item(t("Calculate Checksum"), "check", actions.onChecksum)}
       <div className="sep" />
-      {item("Rename…", "rename", actions.onRename, { keys: "F2", modify: true })}
-      {item("Move to…", "folder", actions.onMove, { keys: "M", modify: true })}
-      {item("Copy to…", "copy", actions.onCopy, { keys: "⇧M", modify: true })}
+      {item(t("Rename…"), "rename", actions.onRename, { keys: "F2", modify: true })}
+      {item(t("Move to…"), "folder", actions.onMove, { keys: "M", modify: true })}
+      {item(t("Copy to…"), "copy", actions.onCopy, { keys: "⇧M", modify: true })}
       <div className="sep" />
-      {item("Move to Trash", "trash", actions.onTrash, { keys: isMac ? "⌘⌫" : "Delete", danger: true, modify: true })}
+      {item(t("Move to Trash"), "trash", actions.onTrash, { keys: isMac ? "⌘⌫" : t("Delete"), danger: true, modify: true })}
     </div>
   );
 }
@@ -394,14 +395,14 @@ export function PreviewBody({ entry, info, zoom, pan, setPan, zoomBy, resetZoom,
     return <VideoUnavailable entry={entry} info={info} reason={failed} onOpen={onOpen} />;
   }
   if (failed) {
-    return <Unavailable entry={entry} info={info} title="Preview unavailable — file could not be safely processed." onOpen={onOpen} />;
+    return <Unavailable entry={entry} info={info} title={t("Preview unavailable — file could not be safely processed.")} onOpen={onOpen} />;
   }
   const fail = (f: Failure) => () => alive.current && setFailed(f);
   if (info.preview === "pdf") return <PdfView entry={entry} iso={iso} onFail={fail("pdf")} />;
   if (info.preview === "audio") {
     // The isolated view only shows worker-made copies; audio would be the original bytes.
     return iso ? (
-      <Unavailable entry={entry} info={info} title="Audio isn't played in the isolated view." />
+      <Unavailable entry={entry} info={info} title={t("Audio isn't played in the isolated view.")} />
     ) : (
       <AudioView entry={entry} iso={false} onFail={fail("audio")} />
     );
@@ -479,7 +480,7 @@ export function PreviewBody({ entry, info, zoom, pan, setPan, zoomBy, resetZoom,
     <Unavailable
       entry={entry}
       info={info}
-      title={info.mismatch ? "This file type cannot be safely previewed." : "Preview not supported"}
+      title={info.mismatch ? t("This file type cannot be safely previewed.") : t("Preview not supported")}
       onOpen={onOpen}
     />
   );
@@ -606,23 +607,23 @@ function formatDuration(ms: number) {
 function videoFacts(v: VideoInfo | null) {
   if (!v) return null;
   const parts = [v.container];
-  if (v.videoCodec) parts.push(`video ${v.videoCodec}`);
-  if (v.audioCodec) parts.push(`audio ${v.audioCodec}`);
+  if (v.videoCodec) parts.push(t("video {codec}", { codec: v.videoCodec }));
+  if (v.audioCodec) parts.push(t("audio {codec}", { codec: v.audioCodec }));
   if (v.width && v.height) parts.push(`${v.width} × ${v.height}`);
   if (v.durationMs) parts.push(formatDuration(v.durationMs));
   return parts.join(" · ");
 }
 
 const VIDEO_MESSAGES: Record<VideoFailure, [string, string | null]> = {
-  codec: ["Video format detected, but this codec is not supported for secure preview.", null],
-  noVideo: ["This video could not be safely previewed.", "The file has no video track."],
-  damaged: ["This video could not be safely previewed.", "The file appears to be damaged or incomplete."],
+  codec: [msg("Video format detected, but this codec is not supported for secure preview."), null],
+  noVideo: [msg("This video could not be safely previewed."), msg("The file has no video track.")],
+  damaged: [msg("This video could not be safely previewed."), msg("The file appears to be damaged or incomplete.")],
   blocked: [
-    "This video could not be safely previewed.",
-    "It stopped the system video engine before, so Mori won't load it again.",
+    msg("This video could not be safely previewed."),
+    msg("It stopped the system video engine before, so Mori won't load it again."),
   ],
-  timeout: ["This video could not be safely previewed.", "Loading took too long and was stopped."],
-  stalled: ["This video could not be safely previewed.", "Playback stopped making progress and was stopped."],
+  timeout: [msg("This video could not be safely previewed."), msg("Loading took too long and was stopped.")],
+  stalled: [msg("This video could not be safely previewed."), msg("Playback stopped making progress and was stopped.")],
 };
 
 function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info: Inspection; reason: VideoFailure; onOpen?: () => void }) {
@@ -632,8 +633,8 @@ function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info:
     <div className="unsupported">
       <Icon name="video" size={72} />
       <div className="name">{entry.name}</div>
-      <div className="note strong">{title}</div>
-      {note && <div className="note">{note}</div>}
+      <div className="note strong">{t(title)}</div>
+      {note && <div className="note">{t(note)}</div>}
       {info.mismatch && <MismatchNote entry={entry} info={info} />}
       <div className="details">
         {facts && (
@@ -642,15 +643,15 @@ function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info:
             <br />
           </>
         )}
-        {formatSize(entry.size)} · Modified {formatDate(entry.modified)}
+        {formatSize(entry.size)} · {t("Modified {date}", { date: formatDate(entry.modified) })}
       </div>
       <div className="actions">
         <button className="btn" onClick={() => api.revealFile(entry.id)}>
-          <Icon name="reveal" size={14} /> {isMac ? "Show in Finder" : "Show in folder"}
+          <Icon name="reveal" size={14} /> {isMac ? t("Show in Finder") : t("Show in folder")}
         </button>
         {info.canOpen && onOpen && (
           <button className="btn primary" onClick={onOpen}>
-            <Icon name="external" size={14} /> Open in system
+            <Icon name="external" size={14} /> {t("Open in system")}
           </button>
         )}
       </div>
@@ -661,13 +662,12 @@ function VideoUnavailable({ entry, info, reason, onOpen }: { entry: Entry; info:
 function MismatchNote({ entry, info }: { entry: Entry; info: Inspection }) {
   return (
     <div className="mismatch">
-      ⚠︎ Named “.{entry.ext}” but{" "}
+      ⚠︎{" "}
       {info.detected === "executable"
-        ? "the content is an executable program"
+        ? t("Named “.{ext}” but the content is an executable program.", { ext: entry.ext })
         : info.detected === "unknown"
-          ? `the content isn't a valid ${entry.ext.toUpperCase()} file`
-          : `the content is ${info.detected.toUpperCase()}`}
-      .
+          ? t("Named “.{ext}” but the content isn't a valid {type} file.", { ext: entry.ext, type: entry.ext.toUpperCase() })
+          : t("Named “.{ext}” but the content is {type}.", { ext: entry.ext, type: info.detected.toUpperCase() })}
     </div>
   );
 }
@@ -682,7 +682,7 @@ function Unavailable({ entry, info, title, onOpen }: { entry: Entry; info: Inspe
       <FactsPanel entry={entry} />
       {info.canOpen && onOpen && (
         <button className="btn primary" onClick={onOpen}>
-          <Icon name="external" size={14} /> Open in system
+          <Icon name="external" size={14} /> {t("Open in system")}
         </button>
       )}
     </div>

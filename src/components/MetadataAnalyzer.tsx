@@ -4,7 +4,6 @@ import {
   api,
   CATEGORY_LABEL,
   formatSize,
-  plural,
   setPreviewOpen,
   type Entry,
   type LocationInfo,
@@ -20,6 +19,8 @@ import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
 import { Thumb } from "./Thumb";
+import { fmtNum, t, tn, tx } from "../i18n";
+import { review } from "../review";
 
 /** The offline world map is only loaded when Places is opened. */
 const PlacesMap = lazy(() => import("./PlacesMap").then((m) => ({ default: m.PlacesMap })));
@@ -85,8 +86,8 @@ export function MetadataAnalyzer({
           load(null).then((v) => setPhase(v ? "results" : "setup"));
         } else {
           setPhase("setup");
-          if (e.payload.status === "cancelled") onToast("Scan cancelled");
-          else setError(e.payload.message ?? "The scan failed.");
+          if (e.payload.status === "cancelled") onToast(t("Scan cancelled"));
+          else setError(e.payload.message ?? t("The scan failed."));
         }
       }),
     ];
@@ -139,6 +140,8 @@ export function MetadataAnalyzer({
     setConfirm(false);
     setSelected(new Set());
     setOutcome(r);
+    if (r.some((o) => o.error)) review.problem();
+    else if (r.length) review.success("sanitize");
   };
 
   if (!active) return null;
@@ -151,21 +154,21 @@ export function MetadataAnalyzer({
       </header>
       <div className="page-head">
         <div className="crumbs">
-          <span className="crumb">Analyze</span>
+          <span className="crumb">{t("Analyze")}</span>
         </div>
         <div className="title-row">
           <h1 className="page-title">
-            {mode === "map" ? "Places" : "Sensitive Metadata"}
-            {phase === "results" && scopeNote && <span className="scope-note">in {scopeNote}</span>}
+            {mode === "map" ? t("Places") : t("Sensitive Metadata")}
+            {phase === "results" && scopeNote && <span className="scope-note">{t("in {name}", { name: scopeNote })}</span>}
           </h1>
           {phase === "results" && (
             <>
               <div className="segmented small" role="tablist">
                 <button className={mode === "list" ? "on" : ""} onClick={() => onSwitch("list")}>
-                  Files
+                  {t("Files")}
                 </button>
                 <button className={mode === "map" ? "on" : ""} onClick={() => onSwitch("map")}>
-                  Map
+                  {t("Map")}
                 </button>
               </div>
               <button
@@ -177,12 +180,12 @@ export function MetadataAnalyzer({
                   setPlaces(null);
                   setPhase("setup");
                 }}
-                title="Forget these results (they are only kept in memory)"
+                title={t("Forget these results (they are only kept in memory)")}
               >
-                Clear Scan
+                {t("Clear Scan")}
               </button>
               <button className="btn" onClick={() => setPhase("setup")}>
-                New Scan
+                {t("New Scan")}
               </button>
             </>
           )}
@@ -193,11 +196,12 @@ export function MetadataAnalyzer({
         {phase === "setup" && (
           <div className="setup">
             <p className="lead">
-              Finds photos, videos and audio whose embedded metadata reveals where they were made, who made them, which device or software was used,
-              personal comments, or unique IDs. Positions are shown on an offline map. Nothing is changed.
+              {t(
+                "Finds photos, videos and audio whose embedded metadata reveals where they were made, who made them, which device or software was used, personal comments, or unique IDs. Positions are shown on an offline map. Nothing is changed.",
+              )}
             </p>
             <section>
-              <h3>Where to look</h3>
+              <h3>{t("Where to look")}</h3>
               <LocationList
                 locations={locations}
                 chosen={chosen}
@@ -212,23 +216,24 @@ export function MetadataAnalyzer({
               <label className="toggle">
                 <input type="checkbox" checked={recursive} onChange={(e) => setRecursive(e.target.checked)} />
                 <span className="switch" aria-hidden />
-                Include subfolders
+                {t("Include subfolders")}
               </label>
             </section>
             {error && <p className="field-error">{error}</p>}
             <div className="setup-actions">
               {view && (
                 <button className="btn" onClick={() => setPhase("results")}>
-                  Back to Results
+                  {t("Back to Results")}
                 </button>
               )}
               <button className="btn primary large" disabled={!locations.some((l) => chosen.has(l.key))} onClick={start}>
-                Scan Metadata
+                {t("Scan Metadata")}
               </button>
             </div>
             <p className="fineprint">
-              Metadata is read by Mori's sandboxed worker (EXIF, XMP, IPTC, QuickTime/MP4, ID3, FLAC). Images are not decoded, nothing is uploaded,
-              and results stay in memory until you clear them or quit. Private folders inside the chosen locations are skipped.
+              {t(
+                "Metadata is read by Mori's sandboxed worker (EXIF, XMP, IPTC, QuickTime/MP4, ID3, FLAC). Images are not decoded, nothing is uploaded, and results stay in memory until you clear them or quit. Private folders inside the chosen locations are skipped.",
+              )}
             </p>
           </div>
         )}
@@ -236,31 +241,31 @@ export function MetadataAnalyzer({
         {phase === "running" && (
           <div className="analyzer-center">
             <div className="progress-card">
-              <h2>{progress?.paused ? "Paused" : progress?.stage === "reading" ? "Reading metadata" : "Finding media"}…</h2>
+              <h2>{progress?.paused ? t("Paused…") : progress?.stage === "reading" ? t("Reading metadata…") : t("Finding media…")}</h2>
               <ProgressBar value={progress && progress.total ? progress.done / progress.total : 0} indeterminate={!progress || progress.stage === "collecting"} />
               <dl className="facts">
                 <div>
-                  <dt>Files</dt>
+                  <dt>{t("Files")}</dt>
                   <dd>
                     {progress
                       ? progress.stage === "collecting"
-                        ? progress.total.toLocaleString()
-                        : `${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}`
+                        ? fmtNum(progress.total)
+                        : t("{done} of {total}", { done: progress.done, total: progress.total })
                       : "—"}
                   </dd>
                 </div>
                 <div>
-                  <dt>With sensitive fields</dt>
-                  <dd>{progress ? progress.found.toLocaleString() : "—"}</dd>
+                  <dt>{t("With sensitive fields")}</dt>
+                  <dd>{progress ? fmtNum(progress.found) : "—"}</dd>
                 </div>
                 <div>
-                  <dt>Unreadable</dt>
-                  <dd>{progress ? progress.failed.toLocaleString() : "—"}</dd>
+                  <dt>{t("Unreadable")}</dt>
+                  <dd>{progress ? fmtNum(progress.failed) : "—"}</dd>
                 </div>
               </dl>
               <div className="dialog-actions">
                 <button className="btn" onClick={() => api.metaPause(!progress?.paused)} disabled={cancelling || !progress}>
-                  {progress?.paused ? "Resume" : "Pause"}
+                  {progress?.paused ? t("Resume") : t("Pause")}
                 </button>
                 <button
                   className="btn"
@@ -270,7 +275,7 @@ export function MetadataAnalyzer({
                     api.metaCancel();
                   }}
                 >
-                  {cancelling ? "Cancelling…" : "Cancel"}
+                  {cancelling ? t("Cancelling…") : t("Cancel")}
                 </button>
               </div>
             </div>
@@ -280,36 +285,37 @@ export function MetadataAnalyzer({
         {phase === "results" && view && mode === "list" && (
           <>
             <div className="dup-summary">
-              <strong>{plural(view.stats.withSensitive, "file")} with sensitive metadata</strong>
-              <span>{plural(view.stats.places, "place")}</span>
+              <strong>{tn(view.stats.withSensitive, "{n} file with sensitive metadata", "{n} files with sensitive metadata")}</strong>
+              <span>{tn(view.stats.places, "{n} place", "{n} places")}</span>
               <span className="muted">
-                {plural(view.stats.scanned, "media file")} read
-                {view.stats.failed + view.stats.unreadable > 0 && ` · ${plural(view.stats.failed + view.stats.unreadable, "file")} unreadable`}
+                {tn(view.stats.scanned, "{n} media file read", "{n} media files read")}
+                {view.stats.failed + view.stats.unreadable > 0 &&
+                  " · " + tn(view.stats.failed + view.stats.unreadable, "{n} file unreadable", "{n} files unreadable")}
               </span>
             </div>
             <div className="chips meta-filters">
               <button className={`chip ${category === null ? "on" : ""}`} onClick={() => filter(null)}>
-                All
+                {t("All")}
               </button>
               {CATEGORIES.filter((c) => view.counts[c]).map((c) => (
                 <button key={c} className={`chip ${category === c ? "on" : ""}`} onClick={() => filter(c)}>
-                  {CATEGORY_LABEL[c]} <span className="count">{view.counts[c]!.toLocaleString()}</span>
+                  {CATEGORY_LABEL[c]} <span className="count">{fmtNum(view.counts[c]!)}</span>
                 </button>
               ))}
             </div>
             {hits.length === 0 ? (
               <div className="empty">
                 <Icon name="check" size={34} stroke={1.3} />
-                <p>No location, people, device, software, comment or ID fields were found.</p>
+                <p>{t("No location, people, device, software, comment or ID fields were found.")}</p>
               </div>
             ) : (
               <div className="meta-list">
                 {hits.map((h, i) => (
                   <div key={h.id} className={`meta-row ${selected.has(h.id) ? "on" : ""}`}>
-                    <label className="meta-check" title={h.sanitizable ? "Select for a sanitized copy" : "Sanitized copies: JPEG, PNG and WebP only"}>
+                    <label className="meta-check" title={h.sanitizable ? t("Select for a sanitized copy") : t("Sanitized copies: JPEG, PNG and WebP only")}>
                       <input type="checkbox" disabled={!h.sanitizable} checked={selected.has(h.id)} onChange={() => toggle(h.id)} />
                     </label>
-                    <button className="meta-thumb" onClick={() => setPreview({ items: hits.map(hitEntry), index: i })} title="Preview">
+                    <button className="meta-thumb" onClick={() => setPreview({ items: hits.map(hitEntry), index: i })} title={t("Preview")}>
                       <Thumb entry={hitEntry(h)} fit="cover" iconSize={18} />
                     </button>
                     <div className="meta-main">
@@ -333,14 +339,14 @@ export function MetadataAnalyzer({
                       ))}
                     </div>
                     <span className="muted small meta-size">{formatSize(h.size)}</span>
-                    <button className="icon-btn" onClick={() => onInfo(h.id)} title="Get Info (all metadata)">
+                    <button className="icon-btn" onClick={() => onInfo(h.id)} title={t("Get Info (all metadata)")}>
                       <Icon name="info" size={14} />
                     </button>
                   </div>
                 ))}
                 {hits.length < view.total && (
                   <button className="btn more" onClick={more}>
-                    Show more ({(view.total - hits.length).toLocaleString()} left)
+                    {t("Show more ({count} left)", { count: view.total - hits.length })}
                   </button>
                 )}
               </div>
@@ -349,19 +355,17 @@ export function MetadataAnalyzer({
               <div className="selection-bar">
                 <span>
                   {selected.size ? (
-                    <>
-                      <strong>{plural(selected.size, "image")}</strong> selected
-                    </>
+                    tx("{images} selected", { images: <strong>{tn(selected.size, "{n} image", "{n} images")}</strong> })
                   ) : (
-                    <span className="muted">Select JPEG, PNG or WebP images to make metadata-free copies.</span>
+                    <span className="muted">{t("Select JPEG, PNG or WebP images to make metadata-free copies.")}</span>
                   )}
                 </span>
                 <div className="spacer" />
                 <button className="btn" onClick={() => setSelected(selected.size ? new Set() : new Set(sanitizable.map((h) => h.id)))}>
-                  {selected.size ? "Clear Selection" : "Select All Shown"}
+                  {selected.size ? t("Clear Selection") : t("Select All Shown")}
                 </button>
                 <button className="btn primary" disabled={!selected.size} onClick={() => setConfirm(true)}>
-                  Create Sanitized Copies…
+                  {t("Create Sanitized Copies…")}
                 </button>
               </div>
             )}
@@ -382,12 +386,12 @@ export function MetadataAnalyzer({
           ) : (
             <div className="empty">
               <Icon name="check" size={34} stroke={1.3} />
-              <p>None of the scanned files contains a position.</p>
+              <p>{t("None of the scanned files contains a position.")}</p>
             </div>
           ))}
 
         {phase === "setup" && mode === "map" && !view && (
-          <p className="fineprint center">Places come from a metadata scan: choose where to look, then Scan Metadata.</p>
+          <p className="fineprint center">{t("Places come from a metadata scan: choose where to look, then Scan Metadata.")}</p>
         )}
       </div>
 
@@ -396,18 +400,20 @@ export function MetadataAnalyzer({
           <div className="dialog-icon">
             <Icon name="copy" size={20} />
           </div>
-          <h2>Create {plural(selected.size, "sanitized copy", "sanitized copies")}?</h2>
+          <h2>{tn(selected.size, "Create {n} sanitized copy?", "Create {n} sanitized copies?")}</h2>
           <p>
-            For each image Mori writes a <strong>new file</strong> (“name-sanitized.jpg”) in the same folder, with the same pixels and no metadata
-            (only the orientation is kept). Each copy is verified before it is written. <strong>The originals are not changed.</strong>
+            {tx(
+              "For each image Mori writes a {newFile} (“name-sanitized.jpg”) in the same folder, with the same pixels and no metadata (only the orientation is kept). Each copy is verified before it is written. {unchanged}",
+              { newFile: <strong>{t("new file")}</strong>, unchanged: <strong>{t("The originals are not changed.")}</strong> },
+            )}
           </p>
-          <p className="dialog-note">Copies can't be written into protected folders or while Read-only Mode is on.</p>
+          <p className="dialog-note">{t("Copies can't be written into protected folders or while Read-only Mode is on.")}</p>
           <div className="dialog-actions">
             <button className="btn" onClick={() => setConfirm(false)} disabled={busy}>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn primary" onClick={runSanitize} disabled={busy} autoFocus>
-              {busy ? "Creating…" : "Create Copies"}
+              {busy ? t("Creating…") : t("Create Copies")}
             </button>
           </div>
         </ModalFrame>
@@ -416,7 +422,7 @@ export function MetadataAnalyzer({
       {outcome && (
         <ModalFrame onCancel={() => setOutcome(null)}>
           <h2>
-            {plural(outcome.filter((o) => o.newName).length, "sanitized copy", "sanitized copies")} created
+            {tn(outcome.filter((o) => o.newName).length, "{n} sanitized copy created", "{n} sanitized copies created")}
           </h2>
           {outcome.some((o) => o.error) && (
             <ul className="outcome-list">
@@ -425,15 +431,15 @@ export function MetadataAnalyzer({
                 .slice(0, 20)
                 .map((o) => (
                   <li key={o.id}>
-                    <strong>{o.name}</strong>: {o.error}
+                    {tx("{name}: {error}", { name: <strong>{o.name}</strong>, error: o.error! })}
                   </li>
                 ))}
             </ul>
           )}
-          <p className="dialog-note">The originals were not changed. Run the scan again to check the copies.</p>
+          <p className="dialog-note">{t("The originals were not changed. Run the scan again to check the copies.")}</p>
           <div className="dialog-actions">
             <button className="btn primary" onClick={() => setOutcome(null)} autoFocus>
-              Done
+              {t("Done")}
             </button>
           </div>
         </ModalFrame>
@@ -446,8 +452,8 @@ export function MetadataAnalyzer({
           onIndex={(i) => setPreview((p) => p && { ...p, index: i })}
           onClose={() => setPreview(null)}
           onCopyPath={async (e) => {
-            const t = await api.copyPath(e.id).catch(() => null);
-            if (t) navigator.clipboard.writeText(t).then(() => onToast("Path copied"));
+            const path = await api.copyPath(e.id).catch(() => null);
+            if (path) navigator.clipboard.writeText(path).then(() => onToast(t("Path copied")));
           }}
           onError={(m) => onToast(m)}
         />

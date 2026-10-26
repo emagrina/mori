@@ -74,18 +74,18 @@ fn opaque_id(s: &str) -> bool {
 
 /// Reject anything that isn't exactly the minimal record described above.
 pub fn validate(s: &Session) -> Result<(), String> {
-    let bad = "Invalid cleanup session.";
+    let bad = || tr!("Invalid cleanup session.");
     if !(s.folder.is_empty() || opaque_id(&s.folder)) {
-        return Err(bad.into());
+        return Err(bad());
     }
     if !KINDS.contains(&s.options.kind.as_str()) || !ORDERS.contains(&s.options.order.as_str()) {
-        return Err(bad.into());
+        return Err(bad());
     }
     if s.kept.len() + s.marked.len() > MAX_DECISIONS || !s.kept.iter().chain(&s.marked).all(|i| opaque_id(i)) {
-        return Err(bad.into());
+        return Err(bad());
     }
     if s.cursor > MAX_DECISIONS * 4 {
-        return Err(bad.into());
+        return Err(bad());
     }
     Ok(())
 }
@@ -105,7 +105,7 @@ impl Store {
     }
 
     fn save(&self, d: &Data) -> Result<(), String> {
-        let fail = |_| "Could not save the cleanup session.".to_string();
+        let fail = |_| tr!("Could not save the cleanup session.");
         if d.sessions.is_empty() {
             let _ = fs::remove_file(&self.file);
             return Ok(());
@@ -114,7 +114,8 @@ impl Store {
             fs::create_dir_all(dir).map_err(fail)?;
         }
         let tmp = self.file.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_vec(d).map_err(|_| "Could not save the cleanup session.")?).map_err(fail)?;
+        fs::write(&tmp, serde_json::to_vec(d).map_err(|_| tr!("Could not save the cleanup session."))?)
+            .map_err(fail)?;
         fs::rename(tmp, &self.file).map_err(fail)
     }
 
