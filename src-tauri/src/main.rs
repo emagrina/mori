@@ -29,6 +29,7 @@ mod policy;
 mod privacy;
 mod probe;
 mod protocol;
+mod review;
 mod risk;
 mod sanitize;
 mod secure;
@@ -378,6 +379,9 @@ struct Settings {
     /// Interface language; None follows the system.
     #[serde(default)]
     language: Option<String>,
+    /// When to ask for a store rating (only used by store builds).
+    #[serde(default)]
+    review: Option<review::State>,
 }
 
 const VIEWS: &[&str] = &["gallery", "grid", "list"];
@@ -698,6 +702,41 @@ fn set_language(state: State<'_, AppState>, active: String, save: bool, pref: Op
         write_settings(&state, |s| s.language = pref)?;
     }
     Ok(())
+}
+
+/// Whether this build is in a store, and so can ask for a rating.
+#[tauri::command]
+fn review_info() -> review::Info {
+    review::info()
+}
+
+#[tauri::command]
+fn review_state(state: State<'_, AppState>) -> review::State {
+    read_settings(&state).review.unwrap_or_default()
+}
+
+/// Temporary sessions keep nothing, not even these counters.
+#[tauri::command]
+fn save_review_state(state: State<'_, AppState>, review: review::State) -> Result<(), String> {
+    if review::store().is_none() || state.temp.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    write_settings(&state, |s| s.review = Some(review))
+}
+
+/// The system's own review prompt; false when there is none to ask for.
+#[tauri::command]
+fn request_review(app: AppHandle) -> bool {
+    let asked = review::request_native(&app);
+    debug_log!("mori: store review prompt requested (system asked: {asked})");
+    asked
+}
+
+/// Opens the store's "write a review" page (the URL is built here, never by the UI).
+#[tauri::command]
+fn open_store_review() -> Result<(), String> {
+    let store = review::store().ok_or_else(|| tr!("Mori isn't installed from a store."))?;
+    system_open(Path::new(&review::review_url(store)), false)
 }
 
 /// The folder picker runs on the Rust side, so the UI never supplies a path.
@@ -4841,6 +4880,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             saved_language,
             set_language,
+            review_info,
+            review_state,
+            save_review_state,
+            request_review,
+            open_store_review,
             plan_transfer,
             transfer_items,
             transfer_cancel,

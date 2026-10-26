@@ -634,5 +634,6 @@
   "Year": "年",
   "Your tags, favorites and screenshot corrections, by volume and path.": "タグ、お気に入り、スクリーンショットの修正（ボリュームとパス別）。",
   "ZIP archive": "ZIPアーカイブ",
-  "Zstandard compressed data": "Zstandard圧縮データ"
+  "Zstandard compressed data": "Zstandard圧縮データ",
+  "Mori isn't installed from a store.": "Moriはストアからインストールされていません。"
 }

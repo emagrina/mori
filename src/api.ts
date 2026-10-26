@@ -1,8 +1,19 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { SavedSession } from "./cleanup";
 import { frameFraction } from "./filmstrip";
 import { currentLocale, msg, t } from "./i18n";
+
+let onFailure: () => void = () => {};
+/** Called whenever a backend call fails (a cancelled picker isn't a failure). */
+export const onCallFailure = (f: () => void) => (onFailure = f);
+
+function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  return tauriInvoke<T>(cmd, args).catch((e) => {
+    if (String(e) !== "cancelled") onFailure();
+    throw e;
+  });
+}
 
 export type Kind = "folder" | "photo" | "video" | "gif" | "document" | "audio" | "other" | "link";
 export type KindFilter = "all" | Exclude<Kind, "folder" | "link"> | "screenshot" | "recording";
@@ -708,9 +719,35 @@ export interface SimView {
   groups: SimGroup[];
 }
 
+/** Whether this build is in a store (see src-tauri/src/review.rs). */
+export interface ReviewInfo {
+  store: "mac" | "microsoft" | null;
+  nativePrompt: boolean;
+  version: string;
+}
+
+/** Rating-prompt counters, kept in settings.json (see src/review.ts). */
+export interface ReviewState {
+  sessions: number;
+  usageMs: number;
+  successes: number;
+  successesSinceAsk: number;
+  firstSeenAt: number | null;
+  lastAskedAt: number | null;
+  askCount: number;
+  ratedVersion: string | null;
+  lastProblemAt: number | null;
+  lastLaunch: number | null;
+}
+
 export const api = {
   init: () => invoke<InitInfo>("init"),
   updateSettings: (s: Settings) => invoke<void>("update_settings", { ...s }),
+  reviewInfo: () => invoke<ReviewInfo>("review_info"),
+  reviewState: () => invoke<ReviewState>("review_state"),
+  saveReviewState: (review: ReviewState) => invoke<void>("save_review_state", { review }),
+  requestReview: () => invoke<boolean>("request_review"),
+  openStoreReview: () => invoke<void>("open_store_review"),
   /** The saved interface language (null: follow the system). */
   savedLanguage: () => invoke<string | null>("saved_language"),
   /** Sets the language of Mori's own messages; `save` also remembers the choice (null: system). */
@@ -1062,7 +1099,7 @@ export function startSimilarCaptureService(): () => void {
               "mori-codec": r.codec,
             });
           }
-          await invoke("similar_frames", r ? r.planes : new Uint8Array(0), { headers }).catch(() => {});
+          await tauriInvoke("similar_frames", r ? r.planes : new Uint8Array(0), { headers }).catch(() => {});
           return true;
         },
         done: () => {},
@@ -1191,7 +1228,7 @@ async function captureVideoThumb(e: Entry, signal: AbortSignal): Promise<boolean
     end();
   }
   if (!png || signal.aborted) return false;
-  return invoke<boolean>("store_frame", png, { headers: { "mori-id": e.id } }).catch(() => false);
+  return tauriInvoke<boolean>("store_frame", png, { headers: { "mori-id": e.id } }).catch(() => false);
 }
 
 /**
@@ -1209,7 +1246,7 @@ export async function captureFrames(id: string, count: number, explicit: boolean
     await grabSequence(mediaUrl(id, explicit), count, signal, async (k, png) => {
       const headers: Record<string, string> = { "mori-id": id, "mori-frame": String(k) };
       if (explicit) headers["mori-explicit"] = "1";
-      if (await invoke<boolean>("store_frame", png, { headers }).catch(() => false)) {
+      if (await tauriInvoke<boolean>("store_frame", png, { headers }).catch(() => false)) {
         stored++;
         onFrame(k);
       }

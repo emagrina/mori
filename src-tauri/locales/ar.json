@@ -704,5 +704,6 @@
   "Year": "السنة",
   "Your tags, favorites and screenshot corrections, by volume and path.": "وسومك ومفضلتك وتصحيحات لقطات الشاشة، حسب وحدة التخزين والمسار.",
   "ZIP archive": "أرشيف ZIP",
-  "Zstandard compressed data": "بيانات مضغوطة بـ Zstandard"
+  "Zstandard compressed data": "بيانات مضغوطة بـ Zstandard",
+  "Mori isn't installed from a store.": "لم يتم تثبيت Mori من متجر."
 }

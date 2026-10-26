@@ -71,6 +71,17 @@ The secrets are given only to the macOS build step. They are never available to 
 
 Mori needs **no entitlements**: it is not App Sandboxed, uses no JIT in its own process, and loads no third-party libraries. The hardened runtime is on. Don't add entitlements to make signing or notarization pass.
 
+## Store builds and the rating prompt
+
+Mori asks for a store rating only in a build listed in a store. Set the listing id when building it:
+
+```bash
+MORI_MAC_APP_STORE_ID=1234567890 npm run app:build   # Mac App Store (the app's Apple ID)
+MORI_MS_STORE_ID=9NBLGGH4R32N npm run app:build      # Microsoft Store (product id)
+```
+
+With an id, **Rate Mori…** appears in the More menu (it opens the store's write-a-review page), and on the Mac App Store the system's own review prompt (StoreKit) is requested right after a completed task. When and how often is set in one place, `RULES` in `src/review.ts`. The GitHub builds have no id, so none of this is active and nothing is counted.
+
 ## Local release build
 
 ```bash

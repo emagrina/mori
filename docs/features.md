@@ -330,6 +330,10 @@ Text that Mori recorded earlier stays in the language it was written in: integri
 
 Translations live in `src/locales/<code>.json` (interface) and `src-tauri/locales/<code>.json` (messages from Rust), keyed by the English text. `npm run i18n:check` lists missing strings and placeholder mistakes.
 
+### Store rating
+
+Builds published in a store (Mac App Store, Microsoft Store) add **Rate Mori…** to the More menu, which opens the store's review page. On the Mac App Store, Mori may also request the system's own review prompt: only right after a task finished without problems (Quick Cleanup, duplicate or similar-media cleanup, removing empty folders, moving or copying files, sanitized copies), never in the first session or a temporary one, never over a dialog or menu, never within minutes of an error, after either 3 completed tasks or about 10 minutes of use, and then not again for 30 days and 5 more tasks (not at all in a version you chose **Rate Mori…** in). The system decides whether the prompt actually appears. The builds on GitHub aren't in a store and never ask.
+
 ### Not implemented yet
 
 These have been discussed for Mori but **are not in the code yet**:

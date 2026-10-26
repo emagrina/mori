@@ -23,6 +23,7 @@ import {
 } from "../api";
 import { FinalReview, LocationList, ProgressBar, Reasons, Summary, ToolSwitch } from "./Analyzer";
 import { currentLocale, fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
@@ -240,7 +241,10 @@ export function SimilarAnalyzer({
     setCancelling(false);
     setPhase("cleaning");
     try {
-      setOutcome(await api.similarCleanup(plan.items));
+      const o = await api.similarCleanup(plan.items);
+      setOutcome(o);
+      if (o.failures.length) review.problem();
+      else if (o.trashedFiles && !o.cancelled) review.success("similar");
     } catch (e) {
       setOutcome({ trashedFiles: 0, trashedBytes: 0, keptFiles: 0, groupsCleaned: 0, groupsSkipped: 0, failures: [{ path: "", reason: String(e) }], cancelled: false });
     }

@@ -20,6 +20,7 @@ import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
 import { Thumb } from "./Thumb";
 import { fmtNum, t, tn, tx } from "../i18n";
+import { review } from "../review";
 
 /** The offline world map is only loaded when Places is opened. */
 const PlacesMap = lazy(() => import("./PlacesMap").then((m) => ({ default: m.PlacesMap })));
@@ -139,6 +140,8 @@ export function MetadataAnalyzer({
     setConfirm(false);
     setSelected(new Set());
     setOutcome(r);
+    if (r.some((o) => o.error)) review.problem();
+    else if (r.length) review.success("sanitize");
   };
 
   if (!active) return null;

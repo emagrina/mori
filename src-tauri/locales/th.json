@@ -634,5 +634,6 @@
   "Year": "ปี",
   "Your tags, favorites and screenshot corrections, by volume and path.": "แท็ก รายการโปรด และการแก้ไขภาพหน้าจอของคุณ ตามวอลุ่มและพาธ",
   "ZIP archive": "คลังข้อมูล ZIP",
-  "Zstandard compressed data": "ข้อมูลที่บีบอัดแบบ Zstandard"
+  "Zstandard compressed data": "ข้อมูลที่บีบอัดแบบ Zstandard",
+  "Mori isn't installed from a store.": "Mori ไม่ได้ติดตั้งจากร้านค้า"
 }

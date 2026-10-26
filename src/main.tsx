@@ -1,9 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
-import { api, startLivenessPing } from "./api";
+import { api, onCallFailure, startLivenessPing } from "./api";
 import { installDragGuards } from "./dnd";
 import { currentLocale, initI18n, systemLocale } from "./i18n";
+import { review } from "./review";
 import "./styles.css";
 
 // Mori is a viewer, not a web page: suppress the webview's default context menu
@@ -26,6 +27,8 @@ if (import.meta.env.DEV) {
 }
 
 startLivenessPing();
+// A failed backend call is a moment not to ask for a store rating.
+onCallFailure(() => review.problem());
 
 // The interface language is settled before the first render: the saved choice,
 // else the system's. Rust is told too, for the messages it writes.

@@ -4,6 +4,7 @@ import { ProgressBar } from "./Analyzer";
 import { Icon } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 
 type Tab = "overview" | "largest" | "empty";
 
@@ -361,6 +362,8 @@ function EmptyFolders({ version, onToast }: { version: number; onToast: (msg: st
         : tn(r.trashed.length, "Moved {n} folder to Trash", "Moved {n} folders to Trash"),
       5000,
     );
+    if (r.failed.length) review.problem();
+    else if (r.trashed.length) review.success("empty-folders");
     load();
   };
   return (

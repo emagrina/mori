@@ -648,5 +648,6 @@
   "Year": "Yıl",
   "Your tags, favorites and screenshot corrections, by volume and path.": "Etiketleriniz, favorileriniz ve ekran görüntüsü düzeltmeleriniz, birime ve yola göre.",
   "ZIP archive": "ZIP arşivi",
-  "Zstandard compressed data": "Zstandard sıkıştırılmış veri"
+  "Zstandard compressed data": "Zstandard sıkıştırılmış veri",
+  "Mori isn't installed from a store.": "Mori bir mağazadan yüklenmedi."
 }

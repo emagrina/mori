@@ -676,5 +676,6 @@
   "Year": "Год",
   "Your tags, favorites and screenshot corrections, by volume and path.": "Ваши теги, Избранное и исправления снимков экрана, по тому и пути.",
   "ZIP archive": "Архив ZIP",
-  "Zstandard compressed data": "Сжатые данные Zstandard"
+  "Zstandard compressed data": "Сжатые данные Zstandard",
+  "Mori isn't installed from a store.": "Mori установлен не из магазина."
 }

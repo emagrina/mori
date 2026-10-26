@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, CATEGORY_LABEL, formatDate, formatSize, type FileMeta, type FileReport, type MetaField, type RiskLevel } from "../api";
 import { fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 import { Icon } from "./Icon";
 
 const LEVEL: Record<RiskLevel, string> = { high: msg("High attention"), attention: msg("Attention"), info: msg("Info") };
@@ -232,7 +233,11 @@ function MetadataSection({ id, onNotice }: { id: string; onNotice?: (msg: string
     if (o?.newName) {
       setResult({ ok: true, text: t("Created “{name}” next to the original. The original was not changed.", { name: o.newName }) });
       onNotice?.(t("Sanitized copy created: “{name}”", { name: o.newName }));
-    } else setResult({ ok: false, text: t("No copy was made: {error}.", { error: o?.error ?? t("unknown error") }) });
+      review.success("sanitize");
+    } else {
+      setResult({ ok: false, text: t("No copy was made: {error}.", { error: o?.error ?? t("unknown error") }) });
+      review.problem();
+    }
   };
 
   if (failed) {

@@ -21,6 +21,7 @@ import {
   type PlanItem,
 } from "../api";
 import { fmtNum, msg, t, tn, tx } from "../i18n";
+import { review } from "../review";
 import { Icon, type IconName } from "./Icon";
 import { ModalFrame } from "./Modal";
 import { Preview } from "./Preview";
@@ -242,7 +243,10 @@ export function Analyzer({
     setCancelling(false);
     setPhase("cleaning");
     try {
-      setOutcome(await api.analysisCleanup(plan.items));
+      const o = await api.analysisCleanup(plan.items);
+      setOutcome(o);
+      if (o.failures.length) review.problem();
+      else if (o.trashedFiles && !o.cancelled) review.success("duplicates");
     } catch (e) {
       // Rejected before anything was touched (e.g. a group without a copy to keep).
       setOutcome({ trashedFiles: 0, trashedBytes: 0, keptFiles: 0, groupsCleaned: 0, groupsSkipped: 0, failures: [{ path: "", reason: String(e) }], cancelled: false });

@@ -46,6 +46,7 @@ import { Preview } from "./components/Preview";
 import { SimilarAnalyzer } from "./components/SimilarAnalyzer";
 import { LanguageDialog } from "./components/Language";
 import { currentLocale, fmtNum, msg, t, tn, tx } from "./i18n";
+import { initReview, review } from "./review";
 
 interface Location {
   scope: Scope;
@@ -177,10 +178,17 @@ export default function App() {
   // The Similar Media analyzer asks the webview for sampled video frames.
   useEffect(() => startSimilarCaptureService(), []);
 
+  // Store builds only: when to ask for a rating (see review.ts).
+  const temporaryRef = useRef(false);
+  temporaryRef.current = !!status?.temporary;
+  const [canRate, setCanRate] = useState(false);
+
   useEffect(() => {
     api.init().then((i) => {
       setInfo(i);
       setStatus(i.status);
+      temporaryRef.current = i.status.temporary;
+      initReview(i.launchId, () => temporaryRef.current).then((r) => setCanRate(r.canRate));
       if (i.view) setView(i.view);
       if (i.sort) setSort(i.sort);
       if (i.desc !== null) setDesc(i.desc);
@@ -473,10 +481,16 @@ export default function App() {
     if (r.cancelled) parts.push(t("stopped"));
     if (r.done.length) parts.push(t("{key} to undo", { key: isMac ? "⌘Z" : "Ctrl+Z" }));
     flash(parts.join(" · "), r.failed.length || r.originalsKept.length ? 7000 : 3500);
+    if (r.failed.length || r.originalsKept.length) review.problem();
+    else if (r.done.length && !r.cancelled) review.success("transfer");
   };
+
+  const rateMori = () => review.rate().catch((e) => flash(String(e), 4000));
 
   const cleanupTrashed = (r: TrashResult) => {
     setAnalysisVersion((v) => v + 1);
+    if (r.failed.length) review.problem();
+    else if (r.trashed.length) review.success("quick-cleanup");
     if (r.trashed.length) {
       const gone = new Set(r.trashed);
       removeFromView((e) => gone.has(e.id));
@@ -900,6 +914,7 @@ export default function App() {
     { id: "m-privacy", title: t("Privacy & Local Data…"), section: sMori, icon: "lock", words: "clear data reset storage", run: () => setDialog({ kind: "privacy" }) },
     { id: "m-diag", title: t("Diagnostics…"), section: sMori, icon: "info", words: "self-test capabilities offline security", run: () => setDialog({ kind: "diagnostics" }) },
     { id: "m-language", title: t("Language…"), section: sMori, icon: "globe", words: "language idioma langue sprache translate locale", run: () => setDialog({ kind: "language" }) },
+    ...(canRate ? [{ id: "m-rate", title: t("Rate Mori…"), section: sMori, icon: "star" as IconName, words: "rate review stars store valorar", run: () => rateMori() }] : []),
     ...(focused && focused.kind !== "folder" && focused.kind !== "link" ? [{ id: "s-sum", title: t("Calculate Checksum of “{name}”", { name: focused.name }), section: sSelection, icon: "check" as IconName, words: "sha-256 hash integrity", run: () => setDialog({ kind: "checksum", entry: focused }) }] : []),
     { id: "m-tags", title: t("Manage Tags…"), section: sMori, icon: "tag", run: () => setDialog({ kind: "manageTags" }) },
     { id: "m-session", title: t("Clear Session Data…"), section: sMori, icon: "close", run: () => setDialog({ kind: "clearSession" }) },
@@ -1640,6 +1655,17 @@ export default function App() {
           >
             <Icon name="globe" size={14} /> {t("Language…")}
           </button>
+          {canRate && (
+            <button
+              onClick={() => {
+                setPop(null);
+                rateMori();
+              }}
+              title={t("Write a review on the store page")}
+            >
+              <Icon name="star" size={14} /> {t("Rate Mori…")}
+            </button>
+          )}
           <button
             onClick={() => {
               setPop(null);

@@ -634,5 +634,6 @@
   "Year": "연도",
   "Your tags, favorites and screenshot corrections, by volume and path.": "태그, 즐겨찾기 및 스크린샷 수정 사항(볼륨 및 경로별).",
   "ZIP archive": "ZIP 아카이브",
-  "Zstandard compressed data": "Zstandard 압축 데이터"
+  "Zstandard compressed data": "Zstandard 압축 데이터",
+  "Mori isn't installed from a store.": "Mori가 스토어에서 설치되지 않았습니다."
 }
