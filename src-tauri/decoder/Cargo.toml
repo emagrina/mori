@@ -1,0 +1,25 @@
+[package]
+name = "mori-decoder"
+version = "1.1.0"
+edition = "2021"
+[features]
+default = ["mac-app-store", "decoder-service"]
+mac-app-store = []
+decoder-service = []
+xpc-testing = []
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+kamadak-exif = "0.6"
+libc = "0.2"
+flate2 = "1"
+crc32fast = "1"
+[build-dependencies]
+cc = "1"
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"

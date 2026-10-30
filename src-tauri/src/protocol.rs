@@ -68,6 +68,18 @@ pub fn internal_error() -> Response<Vec<u8>> {
     status(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+fn transient(error: WorkerError) -> bool {
+    matches!(error, WorkerError::Busy | WorkerError::Timeout | WorkerError::Failed)
+}
+fn retry_later() -> Response<Vec<u8>> {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(header::RETRY_AFTER, "1")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Vec::new())
+        .unwrap()
+}
+
 fn status(code: StatusCode) -> Response<Vec<u8>> {
     Response::builder().status(code).body(Vec::new()).unwrap()
 }
@@ -88,7 +100,7 @@ fn open(state: &AppState, id: &str) -> Option<(File, std::fs::Metadata, std::pat
     if loc.is_dir || loc.is_link {
         return None;
     }
-    let (file, meta, canon) = secure::open_inside(&loc.root, &loc.rel).ok()?;
+    let (file, meta, canon) = state.file_access.open_inside(&loc.root, &loc.rel).ok()?;
     Some((file, meta, canon, loc.ext))
 }
 
@@ -150,11 +162,10 @@ fn thumbnail(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
         // Videos get a thumbnail from a webview-captured frame (see `store_frame`).
         return status(StatusCode::NOT_FOUND);
     }
-    let Ok(input) = secure::read_limited(file, &meta, worker::MAX_INPUT) else {
-        miss(&stem);
-        return status(StatusCode::PAYLOAD_TOO_LARGE);
-    };
-    match worker::run(Op::Thumb, THUMB_SIZE, input, THUMB_TIMEOUT) {
+    let result = worker::run_lazy(Op::Thumb, THUMB_SIZE, THUMB_TIMEOUT, || {
+        secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| WorkerError::Limits)
+    });
+    match result {
         Ok(out) => {
             decoded(state);
             if mem {
@@ -164,6 +175,7 @@ fn thumbnail(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
             }
             ok(out.bytes, out.format.mime(), true)
         }
+        Err(e) if transient(e) => retry_later(),
         Err(_) => {
             miss(&stem);
             status(StatusCode::UNPROCESSABLE_ENTITY)
@@ -184,9 +196,9 @@ fn preview(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
     if !sniff_file(&mut file, &ext).is_image() {
         return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let result = secure::read_limited(file, &meta, worker::MAX_INPUT)
-        .map_err(|_| WorkerError::Failed)
-        .and_then(|input| worker::run(Op::Preview, PREVIEW_SIZE, input, PREVIEW_TIMEOUT));
+    let result = worker::run_lazy(Op::Preview, PREVIEW_SIZE, PREVIEW_TIMEOUT, || {
+        secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| WorkerError::Limits)
+    });
     let mut cache = state.previews.lock().unwrap_or_else(PoisonError::into_inner);
     match result {
         Ok(out) => {
@@ -194,6 +206,7 @@ fn preview(state: &AppState, id: &str, explicit: bool) -> Response<Vec<u8>> {
             cache.put(id, key.clone(), out);
             cache.get(&key).unwrap()
         }
+        Err(e) if transient(e) => retry_later(),
         Err(e) => {
             cache.fail(key.clone());
             status(if e == WorkerError::Unsupported {
@@ -397,12 +410,12 @@ fn pdf_page(state: &AppState, rest: &str, explicit: bool) -> Response<Vec<u8>> {
     if sniff_file(&mut file, &ext) != Detected::Pdf {
         return status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let result =
-        secure::read_limited(file, &meta, worker::MAX_INPUT).map_err(|_| WorkerError::Failed).and_then(|pdf| {
-            let mut input = page.to_le_bytes().to_vec();
-            input.extend(pdf);
-            worker::run(Op::PdfPage, size, input, PREVIEW_TIMEOUT)
-        });
+    let result = worker::run_lazy(Op::PdfPage, size, PREVIEW_TIMEOUT, || {
+        let pdf = secure::read_limited(file, &meta, worker::MAX_INPUT - 4).map_err(|_| WorkerError::Limits)?;
+        let mut input = page.to_le_bytes().to_vec();
+        input.extend(pdf);
+        Ok(input)
+    });
     let mut cache = state.previews.lock().unwrap_or_else(PoisonError::into_inner);
     match result {
         Ok(out) => {
@@ -410,6 +423,7 @@ fn pdf_page(state: &AppState, rest: &str, explicit: bool) -> Response<Vec<u8>> {
             cache.put(&format!("{id}#p{page}"), key.clone(), out);
             cache.get(&key).unwrap()
         }
+        Err(e) if transient(e) => retry_later(),
         Err(_) => {
             cache.fail(key);
             status(StatusCode::UNPROCESSABLE_ENTITY)
@@ -469,6 +483,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn temporary_decoder_failures_are_retryable_not_misses() {
+        for e in [WorkerError::Busy, WorkerError::Timeout, WorkerError::Failed] {
+            assert!(transient(e));
+        }
+        for e in [WorkerError::Limits, WorkerError::Decode, WorkerError::Unsupported] {
+            assert!(!transient(e));
+        }
+        let r = retry_later();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(r.headers()[header::RETRY_AFTER], "1");
+    }
+    #[test]
     fn ranges_and_decoding() {
         assert_eq!(parse_range("bytes=0-"), Some((0, None)));
         assert_eq!(parse_range("bytes=100-199"), Some((100, Some(199))));
@@ -492,5 +519,90 @@ mod audio_tests {
         assert_eq!(super::audio_mime(b"MZ\x90\0", 1000), None);
         assert_eq!(super::audio_mime(b"OggS\0\x02", 1000), None, "Ogg isn't played by the system engine here");
         assert_eq!(super::audio_mime(b"", 0), None);
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "mac-app-store"))]
+mod sandbox_preview_regression {
+    use super::*;
+    #[test]
+    #[ignore = "requires signed sandbox host, embedded decoder and Resources/grid-* fixtures"]
+    fn concurrent_png_gif_thumbnails_all_succeed() {
+        let exe = std::env::current_exe().unwrap();
+        let root = std::fs::canonicalize(exe.parent().unwrap().parent().unwrap().join("Resources")).unwrap();
+        let state =
+            crate::protocol_test_state(crate::file_access::sandbox_data_directory().unwrap().join("thumb-test"));
+        state.temp.store(true, std::sync::atomic::Ordering::SeqCst);
+        *state.root.write().unwrap() = Some(crate::RootInfo { canon: root.clone(), name: "synthetic".into() });
+        let entries: Vec<_> = (0..15)
+            .map(|i| {
+                let name = format!("grid-{i}.{}", if i % 2 == 0 { "png" } else { "gif" });
+                crate::index::make_entry(
+                    name.clone(),
+                    name.clone(),
+                    false,
+                    &std::fs::metadata(root.join(name)).unwrap(),
+                )
+            })
+            .collect();
+        let ids: Vec<_> = entries.iter().map(|e| crate::index::id_str(e.id)).collect();
+        *state.index.write().unwrap() =
+            std::sync::Arc::new(crate::index::Index::new(root.to_string_lossy().into(), 0, entries, vec![]));
+        state.file_access.grant_test_root(&root);
+        let barrier = std::sync::Barrier::new(ids.len());
+        std::thread::scope(|scope| {
+            for id in &ids {
+                let state = &state;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let response = thumbnail(state, id, true);
+                    assert_eq!(response.status(), StatusCode::OK, "thumbnail {id}");
+                    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+                    assert!(response.body().starts_with(b"\x89PNG\r\n\x1a\n"));
+                });
+            }
+        });
+        assert_eq!(state.decoded.load(std::sync::atomic::Ordering::SeqCst), 15);
+        for id in &ids {
+            assert_eq!(thumbnail(&state, id, true).status(), StatusCode::OK);
+        }
+        assert_eq!(
+            state.decoded.load(std::sync::atomic::Ordering::SeqCst),
+            15,
+            "second pass uses successful cache entries"
+        );
+    }
+    #[test]
+    #[ignore = "requires signed sandbox host with production embedded decoder and Resources/tiny.png"]
+    fn granted_secure_preview_reaches_production_decoder() {
+        let exe = std::env::current_exe().unwrap();
+        let root = std::fs::canonicalize(exe.parent().unwrap().parent().unwrap().join("Resources")).unwrap();
+        let state =
+            crate::protocol_test_state(crate::file_access::sandbox_data_directory().unwrap().join("preview-test"));
+        *state.root.write().unwrap() = Some(crate::RootInfo { canon: root.clone(), name: "synthetic".into() });
+        let entry = crate::index::make_entry(
+            "tiny.png".into(),
+            "tiny.png".into(),
+            false,
+            &std::fs::metadata(root.join("tiny.png")).unwrap(),
+        );
+        let id = format!("{:016x}", entry.id);
+        *state.index.write().unwrap() =
+            std::sync::Arc::new(crate::index::Index::new(root.to_string_lossy().into(), 0, vec![entry], vec![]));
+        assert_eq!(preview(&state, &id, true).status(), StatusCode::NOT_FOUND, "ungranted file");
+        state.file_access.grant_test_root(&root);
+        state.safe_mode.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(preview(&state, &id, false).status(), StatusCode::FORBIDDEN, "automatic preview in safe mode");
+        let response = preview(&state, &id, true);
+        assert_eq!(response.status(), StatusCode::OK, "explicit secure preview");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        assert!(response.body().starts_with(b"\x89PNG\r\n\x1a\n"));
+        state.file_access.close_root();
+        assert_eq!(
+            preview(&state, &id, true).status(),
+            StatusCode::NOT_FOUND,
+            "revocation applies even to cached preview"
+        );
     }
 }

@@ -4,8 +4,14 @@ version = "1.1.0"
 description = "Mori — a tiny offline file & media browser for external drives"
 edition = "2021"
 
+[features]
+# App Sandbox path grants; custom Seatbelt decoder profiles are excluded.
+# Uses the separately sandboxed XPC decoder; release requires its verified bundle.
+mac-app-store = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -26,7 +32,7 @@ sha2 = "0.10"
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Same version Tauri/wry already use; only for terminating a hung WebKit content process.
+# Same version Tauri/wry use; native security-scoped NSURL grants on macOS.
 objc2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]

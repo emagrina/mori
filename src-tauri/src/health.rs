@@ -114,7 +114,9 @@ fn check(state: &AppState, root: &std::path::Path, job: &Job) -> Option<(Categor
                 Err(WorkerError::Decode) => Some((Category::Broken, tr!("The image data is damaged"))),
                 Err(WorkerError::Limits) => Some((Category::Failed, tr!("Exceeds Mori's safe decoding limits"))),
                 Err(WorkerError::Timeout) => Some((Category::Failed, tr!("Decoding took too long and was stopped"))),
-                Err(WorkerError::Failed) => Some((Category::Failed, tr!("The sandboxed decoder failed"))),
+                Err(WorkerError::Failed | WorkerError::Busy) => {
+                    Some((Category::Failed, tr!("The sandboxed decoder failed")))
+                }
             }
         }
         Kind::Video => {

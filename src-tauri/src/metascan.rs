@@ -590,6 +590,11 @@ fn sanitize_one(app: &AppHandle, state: &AppState, id: &str) -> Result<String, S
         .filter(|o| o.format == OutFormat::Bytes && sanitize::supported(&o.bytes))
         .ok_or_else(|| tr!("the image couldn't be processed safely"))?
         .bytes;
+    // Independent host verifier: do not trust a persistent producer to attest its own output.
+    // Only original compressed image segments/chunks and a minimal unchanged orientation may remain.
+    if !worker::output_validation::verify_sanitized(&original, &out) {
+        return Err(tr!("the copy couldn't be verified"));
+    }
     // Verify before writing anything: the copy decodes to the same dimensions…
     let dims = |b: Vec<u8>| worker::run(Op::Thumb, 64, b, Duration::from_secs(25)).ok().map(|o| (o.width, o.height));
     let (a, b) = (dims(original), dims(out.clone()));

@@ -23,7 +23,7 @@ pub struct Dirs {
 
 impl Dirs {
     pub fn new(data: PathBuf, cache: PathBuf) -> Dirs {
-        let webkit = if cfg!(target_os = "macos") {
+        let webkit = if cfg!(target_os = "macos") && !crate::file_access::required() {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/WebKit").join(IDENTIFIER))
         } else {
             None
@@ -153,7 +153,7 @@ pub fn paths(d: &Dirs, c: Category) -> Vec<PathBuf> {
         Category::Analysis => {
             vec![data("similar-dismissed.bin"), data("blocked-media.json"), data("cleanup-sessions.json")]
         }
-        Category::History => vec![data("drives.json"), data("last-panic.txt")],
+        Category::History => vec![data("drives.json"), data("last-panic.txt"), data(crate::file_access::BOOKMARK_FILE)],
         Category::Organization => {
             vec![data("tags.json"), data("favorites.json"), data("capture-not.json"), data("capture-yes.json")]
         }

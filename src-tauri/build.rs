@@ -110,6 +110,52 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    // A signed universal decoder has passed the real App Sandbox/XPC smoke tests.
+    // Retain a fail-closed release gate: missing, stale or over-entitled services
+    // cannot be packaged. There is no environment-variable bypass.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MAC_APP_STORE");
+    println!("cargo:rerun-if-env-changed=PROFILE");
+    if std::env::var_os("CARGO_FEATURE_MAC_APP_STORE").is_some() {
+        for path in [
+            "xpc",
+            "decoder/Cargo.toml",
+            "decoder/Cargo.lock",
+            "decoder/build.rs",
+            "decoder/src",
+            "src/worker.rs",
+            "src/heif.rs",
+            "src/pdf.rs",
+            "src/metadata.rs",
+            "src/sanitize.rs",
+            "src/probe.rs",
+            "src/i18n.rs",
+            "locales",
+            "target/store-decoder",
+        ] {
+            println!("cargo:rerun-if-changed={path}");
+        }
+        if std::env::var("PROFILE").as_deref() != Ok("debug") {
+            let status = std::process::Command::new("python3")
+                .args(["xpc/verify-decoder.py", "--prepared"])
+                .status()
+                .expect("MORI_STORE_DECODER_NOT_PREPARED: Python 3 is required to verify the decoder");
+            assert!(status.success(), "MORI_STORE_DECODER_NOT_PREPARED: run src-tauri/xpc/prepare-decoder.sh before building Store release; never package without the verified XPC service");
+        }
+    }
+    println!("cargo:rustc-check-cfg=cfg(feature, values(\"decoder-service\"))");
+    if std::env::var_os("CARGO_FEATURE_MAC_APP_STORE").is_some()
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+    {
+        cc::Build::new()
+            .file("xpc/bridge.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .flag("-mmacosx-version-min=12.0")
+            .compile("mori_xpc");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Security");
+        println!("cargo:rerun-if-changed=xpc/bridge.m");
+    }
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )

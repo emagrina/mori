@@ -9,6 +9,7 @@ mod cleanup;
 mod diagnostics;
 mod drives;
 mod dupes;
+mod file_access;
 mod fileops;
 mod filetype;
 mod health;
@@ -72,6 +73,8 @@ pub struct AppState {
     /// Stale temporary files removed at startup.
     stale_cleaned: u64,
     data_dir: PathBuf,
+    file_access: file_access::Access,
+    session: file_access::Session,
     pub thumb_dir: PathBuf,
     /// In-memory thumbnails for analyzer files outside the browsed folder.
     pub volatile_thumbs: thumbs::Volatile,
@@ -316,6 +319,7 @@ impl AppState {
         if let Some(s) = self.meta_scan.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
             v.extend(s.roots().cloned());
         }
+        v.retain(|r| self.file_access.permits(r));
         v
     }
 
@@ -326,6 +330,7 @@ impl AppState {
             // Links are never followed: opening one would read its target.
             return Err(tr!("Not a file"));
         }
+        let _access = self.file_access.lease(&loc.root)?;
         let (f, m, canon) = secure::open_inside(&loc.root, &loc.rel).map_err(|_| tr!("File unavailable"))?;
         Ok((f, m, canon, loc.ext))
     }
@@ -413,6 +418,9 @@ fn write_settings(state: &AppState, f: impl FnOnce(&mut Settings)) -> Result<(),
 
 /// If Mori is running from an external drive, return that drive's root.
 fn detect_portable_root() -> Option<PathBuf> {
+    if file_access::required() {
+        return None;
+    }
     if cfg!(debug_assertions) {
         if let Some(p) = std::env::var_os("MORI_ROOT").map(PathBuf::from).filter(|p| p.is_dir()) {
             return Some(p);
@@ -521,7 +529,10 @@ fn publish_index(app: &AppHandle, mut idx: Index) {
 
 fn start_scan(app: &AppHandle) {
     let state = app.state::<AppState>();
+    let generation = state.session.current();
+    let ephemeral = state.temp.load(Ordering::SeqCst);
     let Some(root) = state.root_canon() else { return };
+    let Ok(access) = state.file_access.lease(&root) else { return };
     let gen = state.scan_gen.fetch_add(1, Ordering::SeqCst) + 1;
     state.scanning.store(true, Ordering::SeqCst);
     state.scan_count.store(0, Ordering::SeqCst);
@@ -529,7 +540,8 @@ fn start_scan(app: &AppHandle) {
 
     let app = app.clone();
     std::thread::spawn(move || {
-        let _ = catch_unwind(AssertUnwindSafe(|| scan_thread(&app, root, gen)));
+        let _access = access;
+        let _ = catch_unwind(AssertUnwindSafe(|| scan_thread(&app, root, gen, generation, ephemeral)));
         let state = app.state::<AppState>();
         // Whatever happened, never leave the UI showing "Scanning…" forever.
         if state.scan_gen.load(Ordering::SeqCst) == gen && state.scanning.swap(false, Ordering::SeqCst) {
@@ -538,7 +550,7 @@ fn start_scan(app: &AppHandle) {
     });
 }
 
-fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
+fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64, generation: u64, ephemeral: bool) {
     {
         let app = app.clone();
         let state = app.state::<AppState>();
@@ -547,6 +559,10 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         let progressive = state.index().files.is_empty();
         let mut last_emit = std::time::Instant::now();
         let mut progress = |count: usize, snapshot: index::Snapshot<'_>| {
+            let Some(_publication) = state.session.enter(generation) else { return };
+            if cancelled() {
+                return;
+            }
             state.scan_count.store(count, Ordering::SeqCst);
             if let Some((files, dirs)) = snapshot {
                 // Follow moved private folders before anything is shown.
@@ -563,10 +579,11 @@ fn scan_thread(app: &AppHandle, root: PathBuf, gen: u64) {
         };
         let every = progressive.then(|| Duration::from_millis(1500));
         let Some(idx) = index::scan(&root, &cancelled, &mut progress, every) else { return };
+        let Some(_publication) = state.session.enter(generation) else { return };
         if cancelled() {
             return;
         }
-        if !state.temp.load(Ordering::SeqCst) {
+        if !ephemeral {
             if index::save(&state.index_file(&root), &idx).is_err() {
                 debug_log!("mori: could not save index");
             }
@@ -587,6 +604,8 @@ fn open_root(app: &AppHandle, root: &Path) -> Result<(), String> {
         return Err(tr!("That isn't a folder"));
     }
     let state = app.state::<AppState>();
+    state.file_access.require(&canon)?;
+    state.file_access.set_root(&canon)?;
     let name =
         canon.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| secure::plain_path(&canon));
     *state.root.write().unwrap_or_else(PoisonError::into_inner) = Some(RootInfo { canon: canon.clone(), name });
@@ -632,7 +651,11 @@ fn init(app: AppHandle, state: State<'_, AppState>) -> InitInfo {
     debug_log!("mori: UI init");
     let settings = read_settings(&state);
     if state.root.read().unwrap_or_else(PoisonError::into_inner).is_none() {
-        let saved = settings.root.as_ref().map(PathBuf::from).filter(|p| p.is_dir());
+        let saved = if file_access::required() {
+            state.file_access.restore_root().ok().flatten()
+        } else {
+            settings.root.as_ref().map(PathBuf::from).filter(|p| p.is_dir())
+        };
         let detected = detect_portable_root();
         // Prefer the drive Mori lives on, unless the user picked a folder inside it.
         let chosen = match (detected, saved) {
@@ -742,19 +765,34 @@ fn open_store_review() -> Result<(), String> {
 /// The folder picker runs on the Rust side, so the UI never supplies a path.
 #[tauri::command]
 async fn choose_root(app: AppHandle) -> Result<Status, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title(tr!("Choose a drive or folder for Mori")).blocking_pick_folder();
+    let picked = file_access::pick_folder(&app, tr!("Choose a drive or folder for Mori")).await;
     forget_open_panel_location();
-    let Some(picked) = picked else {
-        return Err("cancelled".into());
-    };
-    let path = picked.into_path().map_err(|_| tr!("That folder can't be opened"))?;
-    app.state::<AppState>().temp.store(false, Ordering::SeqCst);
+    let path = picked?;
+    let state = app.state::<AppState>();
+    prepare_normal_root(&app, &state, &path)?;
     open_root(&app, &path)?;
     let state = app.state::<AppState>();
     let canon = state.root_canon().unwrap();
+    state.file_access.remember_root(&canon)?;
     write_settings(&state, |s| s.root = Some(canon.to_string_lossy().into_owned()))?;
     Ok(status(&state))
+}
+
+/// Leave a temporary/private session before a normal folder is published.
+fn prepare_normal_root(app: &AppHandle, state: &AppState, path: &Path) -> Result<(), String> {
+    if state.temp.load(Ordering::SeqCst) {
+        // Promote the new picker grant before clearing: retain B, revoke A and
+        // every analysis/destination grant belonging to the temporary session.
+        state.file_access.set_root(path)?;
+        clear_session(state);
+        state.private_inspection.store(false, Ordering::SeqCst);
+        state.session_read_only.store(false, Ordering::SeqCst);
+        state.session_safe.store(false, Ordering::SeqCst);
+        *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+        publish_index(app, Index::default());
+    }
+    state.temp.store(false, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1213,10 +1251,9 @@ struct DestInfo {
 /// the browsed folder. Remembered for this session only, as an opaque key.
 #[tauri::command]
 async fn transfer_choose_folder(app: AppHandle) -> Result<DestInfo, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title(tr!("Choose a destination folder")).blocking_pick_folder();
+    let picked = file_access::pick_folder(&app, tr!("Choose a destination folder")).await;
     forget_open_panel_location();
-    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| tr!("That folder can't be opened"))?;
+    let path = picked?;
     let canon = fs::canonicalize(path).ok().filter(|c| c.is_dir()).ok_or_else(|| tr!("That folder can't be opened"))?;
     let state = app.state::<AppState>();
     let key = {
@@ -1250,6 +1287,7 @@ fn transfer_dest(state: &AppState, dest: &str) -> Result<(PathBuf, String), Stri
         (p.ok_or_else(|| tr!("Unknown destination."))?, false)
     };
     let canon = fs::canonicalize(&path).map_err(|_| gone())?;
+    state.file_access.require(&canon)?;
     if !fs::symlink_metadata(&canon).is_ok_and(|m| m.is_dir()) {
         return Err(gone());
     }
@@ -1474,6 +1512,9 @@ async fn transfer_items(
         let state = app.state::<AppState>();
         state.transfer_cancel.store(false, Ordering::SeqCst);
         let (plan, paths, dest_dir) = transfer_plan(&state, &op, &ids, &dest)?;
+        let _destination_access = state.file_access.lease(&dest_dir)?;
+        let _source_access: Vec<_> =
+            paths.iter().flatten().map(|p| state.file_access.lease(p)).collect::<Result<_, _>>()?;
         let moving = op == "move";
         let policy = state.policy();
         let cancel = || state.transfer_cancel.load(Ordering::SeqCst);
@@ -1854,6 +1895,7 @@ fn clear_categories(app: &AppHandle, state: &AppState, cats: &[localdata::Catego
         state.cleanup.clear();
     }
     if cats.contains(&C::History) {
+        clear_session(state);
         state.drives.clear();
         state.history.clear();
         state.custom_locations.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -1910,6 +1952,7 @@ async fn reset_mori(app: AppHandle) -> Result<u64, String> {
         state.session_safe.store(false, Ordering::SeqCst);
         state.read_only.store(false, Ordering::SeqCst);
         *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+        state.file_access.close_root();
         publish_index(&app, Index::default());
         let freed = clear_categories(
             &app,
@@ -2212,9 +2255,11 @@ fn integrity_verify(app: AppHandle, state: State<'_, AppState>, snapshot: String
     let snap = state.integrity.load(&snapshot).ok_or_else(|| tr!("That snapshot no longer exists."))?;
     let root =
         integrity::locate(&snap).ok_or_else(|| tr!("The snapshot's drive or folder isn't available right now."))?;
+    let access = state.file_access.lease(&root)?;
     let single = snap.kind == "file";
     let private = if single { HashSet::new() } else { state.privacy.boundaries(&root) };
     integrity_job(app, "verify", move |_state, job, bytes, emit| {
+        let _access = access;
         emit("listing", 0, 0);
         let (list, _) = integrity::collect(&root, &private, job.cancel_flag()).map_err(|_| "cancelled".to_string())?;
         let (now, bad) = hash_with_progress(&root, single, &list, job, bytes, emit)?;
@@ -2612,12 +2657,12 @@ fn tag_delete(app: AppHandle, state: State<'_, AppState>, id: u32) -> Result<(),
 /// in memory and is gone when another folder is opened or Mori quits.
 #[tauri::command]
 async fn open_temporary(app: AppHandle) -> Result<Status, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title(tr!("Temporary Session")).blocking_pick_folder();
+    let picked = file_access::pick_folder(&app, tr!("Temporary Session")).await;
     // The system folder picker remembers the last folder in Mori's preferences.
     forget_open_panel_location();
-    let path = picked.ok_or("cancelled")?.into_path().map_err(|_| tr!("That folder can't be opened"))?;
+    let path = picked?;
     let state = app.state::<AppState>();
+    state.file_access.set_root(&path)?;
     begin_session(&state, false);
     open_root(&app, &path)?;
     Ok(status(&state))
@@ -2636,8 +2681,9 @@ fn begin_session(state: &AppState, private: bool) {
 /// folder chosen in the picker. The drive is not remembered.
 #[tauri::command]
 async fn start_private_inspection(app: AppHandle, key: Option<String>) -> Result<Status, String> {
-    use tauri_plugin_dialog::DialogExt;
     let state = app.state::<AppState>();
+    // A mounted-drive notification is not Powerbox consent.
+    let key = if file_access::required() { None } else { key };
     let path = match key {
         Some(k) => state
             .connected
@@ -2647,11 +2693,12 @@ async fn start_private_inspection(app: AppHandle, key: Option<String>) -> Result
             .map(|(p, _)| p.clone())
             .ok_or_else(|| tr!("That drive is no longer connected."))?,
         None => {
-            let picked = app.dialog().file().set_title(tr!("Private Inspection")).blocking_pick_folder();
+            let picked = file_access::pick_folder(&app, tr!("Private Inspection")).await;
             forget_open_panel_location();
-            picked.ok_or("cancelled")?.into_path().map_err(|_| tr!("That folder can't be opened"))?
+            picked?
         }
     };
+    state.file_access.set_root(&path)?;
     begin_session(&state, true);
     open_root(&app, &path)?;
     Ok(status(&state))
@@ -2690,7 +2737,12 @@ fn end_temporary(app: AppHandle, state: State<'_, AppState>) -> Result<Status, S
     *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
     publish_index(&app, Index::default());
     forget_open_panel_location();
-    let saved = read_settings(&state).root.map(PathBuf::from);
+    state.file_access.close_root();
+    let saved = if file_access::required() {
+        state.file_access.restore_root().ok().flatten()
+    } else {
+        read_settings(&state).root.map(PathBuf::from)
+    };
     match saved {
         Some(p) if open_root(&app, &p).is_ok() => {}
         _ => {
@@ -2736,9 +2788,11 @@ struct Forgotten {
 #[tauri::command]
 fn forget_drive(app: AppHandle, state: State<'_, AppState>) -> Result<Forgotten, String> {
     let root = state.root_canon().ok_or_else(|| tr!("No folder selected"))?;
+    state.file_access.forget_saved()?;
     let forgotten = forget_data(&state, &root);
     clear_session(&state);
     *state.root.write().unwrap_or_else(PoisonError::into_inner) = None;
+    state.file_access.close_root();
     write_settings(&state, |s| s.root = None)?;
     publish_index(&app, Index::default());
     emit_status(&app);
@@ -3299,6 +3353,9 @@ fn debug_org(app: &AppHandle) {
 }
 
 fn clear_session(state: &AppState) {
+    let _revocation = state.session.invalidate();
+    state.scan_gen.fetch_add(1, Ordering::SeqCst);
+    state.scanning.store(false, Ordering::SeqCst);
     state.analysis_cancel.store(true, Ordering::SeqCst);
     state.similar_cancel.store(true, Ordering::SeqCst);
     state.meta_job.cancel();
@@ -3311,6 +3368,7 @@ fn clear_session(state: &AppState) {
     state.transfer_dests.lock().unwrap_or_else(PoisonError::into_inner).clear();
     state.connected.lock().unwrap_or_else(PoisonError::into_inner).clear();
     state.history.clear();
+    state.file_access.clear_session();
     state.checksums.clear();
     state.integrity_job.cancel();
     state.video.clear_session_probes();
@@ -3552,7 +3610,22 @@ fn watch_drives(app: AppHandle) {
 /// Open a newly connected drive in Safe Inspection Mode: metadata only,
 /// no automatic previews until the user allows them.
 #[tauri::command]
-fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) -> Result<Status, String> {
+async fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) -> Result<Status, String> {
+    if file_access::required() {
+        let picked = file_access::pick_folder(&app, tr!("Choose a drive or folder for Mori")).await;
+        forget_open_panel_location();
+        let path = picked?;
+        // Record the actually selected volume before starting the scan. The
+        // drive notification's key is not an authority or a permission grant.
+        let volume = privacy::volume_of(&path);
+        let label = volume.mount.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        state.drives.set(&drives::key_of(&volume), &label, false);
+        prepare_normal_root(&app, &state, &path)?;
+        open_root(&app, &path)?;
+        state.file_access.remember_root(&path)?;
+        write_settings(&state, |s| s.root = Some(path.to_string_lossy().into_owned()))?;
+        return Ok(status(&state));
+    }
     let (path, label) = state
         .connected
         .lock()
@@ -3560,7 +3633,7 @@ fn open_drive_safely(app: AppHandle, state: State<'_, AppState>, key: String) ->
         .get(&key)
         .cloned()
         .ok_or_else(|| tr!("That drive is no longer connected."))?;
-    state.temp.store(false, Ordering::SeqCst);
+    prepare_normal_root(&app, &state, &path)?;
     state.drives.set(&key, &label, false);
     open_root(&app, &path)?;
     write_settings(&state, |s| s.root = Some(path.to_string_lossy().into_owned()))?;
@@ -3781,6 +3854,7 @@ fn location_path(app: &AppHandle, state: &AppState, key: &str) -> Option<(PathBu
         }
     };
     let canon = fs::canonicalize(path).ok().filter(|c| c.is_dir())?;
+    state.file_access.require(&canon).ok()?;
     Some((canon, secure::display_safe(&label)))
 }
 
@@ -3802,11 +3876,9 @@ fn analysis_locations(app: AppHandle, state: State<'_, AppState>) -> Vec<Locatio
 /// authorised analysis location for this session only.
 #[tauri::command]
 async fn analysis_choose_folder(app: AppHandle) -> Result<LocationInfo, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app.dialog().file().set_title(tr!("Choose a folder to analyze")).blocking_pick_folder();
+    let picked = file_access::pick_folder(&app, tr!("Choose a folder to analyze")).await;
     forget_open_panel_location();
-    let picked = picked.ok_or("cancelled")?;
-    let path = picked.into_path().map_err(|_| tr!("That folder can't be opened"))?;
+    let path = picked?;
     let canon = fs::canonicalize(path).map_err(|_| tr!("That folder can't be opened"))?;
     let state = app.state::<AppState>();
     let key = {
@@ -3850,6 +3922,8 @@ fn analysis_start(
     kinds: Vec<String>,
     recursive: bool,
 ) -> Result<(), String> {
+    let generation = state.session.current();
+    let _session = state.session.enter(generation).ok_or_else(|| tr!("The analysis was cleared."))?;
     if state.analysis_running.swap(true, Ordering::SeqCst) {
         return Err(tr!("An analysis is already running."));
     }
@@ -3883,6 +3957,15 @@ fn analysis_start(
             })
         }));
         let state = app2.state::<AppState>();
+        let Some(_publication) = state.session.enter(generation) else {
+            state.analysis_running.store(false, Ordering::SeqCst);
+            return;
+        };
+        if state.analysis_cancel.load(Ordering::SeqCst) {
+            state.analysis_running.store(false, Ordering::SeqCst);
+            let _ = app2.emit("analysis-done", AnalysisEvent { status: "cancelled", message: None });
+            return;
+        }
         let event = match res {
             Ok(Ok(analysis)) => {
                 let ids = analysis
@@ -4007,6 +4090,7 @@ fn analysis_results(app: AppHandle, state: State<'_, AppState>) -> Option<Analys
 /// Forget the analysis (memory only; nothing about it was written to disk).
 #[tauri::command]
 fn analysis_clear(state: State<'_, AppState>) {
+    let _publication = state.session.lock();
     state.analysis_cancel.store(true, Ordering::SeqCst);
     *state.analysis.lock().unwrap_or_else(PoisonError::into_inner) = None;
     state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -4120,6 +4204,8 @@ fn similar_start(
     recursive: bool,
     sensitivity: similar::Sensitivity,
 ) -> Result<(), String> {
+    let generation = state.session.current();
+    let _session = state.session.enter(generation).ok_or_else(|| tr!("The analysis was cleared."))?;
     if !photos && !videos {
         return Err(tr!("Choose photos, videos or both."));
     }
@@ -4131,7 +4217,7 @@ fn similar_start(
         state.similar_running.store(false, Ordering::SeqCst);
         return Err(tr!("Choose at least one available location."));
     }
-    launch_similar(app, &state, roots, photos, videos, recursive, sensitivity);
+    launch_similar(app, &state, roots, photos, videos, recursive, sensitivity, generation);
     Ok(())
 }
 
@@ -4143,7 +4229,9 @@ fn launch_similar(
     videos: bool,
     recursive: bool,
     sensitivity: similar::Sensitivity,
+    generation: u64,
 ) {
+    let ephemeral = state.temp.load(Ordering::SeqCst);
     // A new analysis replaces the previous one.
     *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
     state.volatile_thumbs.clear();
@@ -4162,6 +4250,10 @@ fn launch_similar(
             };
             let roots_seen: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
             let mut registered = |roots: &[dupes::Root], files: &[dupes::FileRec]| {
+                let Some(_publication) = state.session.enter(generation) else { return };
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
                 let canon: Vec<PathBuf> = roots.iter().map(|r| r.canon.clone()).collect();
                 let ids = files.iter().enumerate().map(|(i, f)| (similar_id(&canon[f.root], &f.rel), i)).collect();
                 *roots_seen.lock().unwrap() = canon.clone();
@@ -4195,7 +4287,7 @@ fn launch_similar(
             let dismissed = similar::load_dismissed(&state.dismissed_file());
             let mut env = similar::Env {
                 // A temporary session leaves no fingerprints behind either.
-                cache_dir: (!state.temp.load(Ordering::SeqCst)).then(|| state.similar_dir()),
+                cache_dir: (!ephemeral).then(|| state.similar_dir()),
                 decode: &decode,
                 capture: &mut capture,
                 registered: &mut registered,
@@ -4223,6 +4315,14 @@ fn launch_similar(
                 if !wanted.is_empty() {
                     let times = metascan::capture_times(&wanted);
                     similar::mark_bursts(&mut result, &times);
+                }
+                let Some(_publication) = state.session.enter(generation) else {
+                    state.similar_running.store(false, Ordering::SeqCst);
+                    return;
+                };
+                if cancel.load(Ordering::SeqCst) {
+                    state.similar_running.store(false, Ordering::SeqCst);
+                    return;
                 }
                 if let Some(store) = state.similar.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
                     store.result = Some(result);
@@ -4258,7 +4358,16 @@ fn debug_similar_autorun(app: &AppHandle) {
         let t = std::time::Instant::now();
         let private = state.privacy.boundaries(&canon);
         let root = dupes::Root { canon, label: "Debug".into(), private };
-        launch_similar(app.clone(), &state, vec![root], true, true, true, similar::Sensitivity::Balanced);
+        launch_similar(
+            app.clone(),
+            &state,
+            vec![root],
+            true,
+            true,
+            true,
+            similar::Sensitivity::Balanced,
+            state.session.current(),
+        );
         while state.similar_running.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -4480,6 +4589,7 @@ fn similar_forget_decisions(state: State<'_, AppState>) {
 
 #[tauri::command]
 fn similar_clear(state: State<'_, AppState>) {
+    let _publication = state.session.lock();
     state.similar_cancel.store(true, Ordering::SeqCst);
     *state.similar.lock().unwrap_or_else(PoisonError::into_inner) = None;
     state.previews.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -4603,8 +4713,11 @@ fn watchdog_tick(app: &AppHandle) {
 /// and the hook in `main` reloads); as a backstop, keep reloading until the
 /// fresh page pings back.
 fn restart_web_content(win: &tauri::WebviewWindow) {
-    #[cfg(target_os = "macos")]
-    {
+    // The private WebKit selector must never enter a Store executable. The
+    // public reload fallback below remains; recovery from a completely hung
+    // content process still needs a supported implementation and validation.
+    #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
+    if !file_access::required() {
         let _ = win.with_webview(|wv| unsafe {
             use objc2::runtime::{AnyObject, Sel};
             use objc2::{msg_send, sel};
@@ -4641,7 +4754,7 @@ fn restart_web_content(win: &tauri::WebviewWindow) {
 }
 
 /// Only ever signal a process that really is WebKit's WebContent service.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
 fn is_webkit_content_process(pid: libc::pid_t) -> bool {
     if pid <= 0 || pid == std::process::id() as libc::pid_t {
         return false;
@@ -4672,7 +4785,12 @@ fn install_panic_hook() {
 /// The app data dir without needing an AppHandle (the hook may run anywhere).
 fn dirs_data() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
-    return std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/app.mori.viewer"));
+    {
+        if file_access::required() {
+            return file_access::sandbox_data_directory();
+        }
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/app.mori.viewer"))
+    }
     #[cfg(windows)]
     return std::env::var_os("APPDATA").map(|h| PathBuf::from(h).join("app.mori.viewer"));
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -4759,8 +4877,8 @@ fn main() {
             });
         })
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            let cache_dir = app.path().app_cache_dir()?;
+            file_access::validate_store_process().map_err(std::io::Error::other)?;
+            let (data_dir, cache_dir) = file_access::app_directories(app.handle())?;
             // Remove caches written by older, less isolated versions.
             let _ = fs::remove_dir_all(cache_dir.join("thumbnails"));
             let _ = fs::remove_dir_all(data_dir.join("indexes"));
@@ -4777,6 +4895,8 @@ fn main() {
                 dirs,
                 stale_cleaned,
                 data_dir,
+                file_access: file_access::Access::new(&data_dir_for_video),
+                session: file_access::Session::default(),
                 thumb_dir,
                 volatile_thumbs: thumbs::Volatile::default(),
                 root: RwLock::new(None),
@@ -5017,5 +5137,76 @@ mod tests {
         let exe = Path::new("/Volumes/My Drive/Mori/Mori.app/Contents/MacOS/mori");
         assert_eq!(portable_root_for(exe), Some(PathBuf::from("/Volumes/My Drive")));
         assert_eq!(portable_root_for(Path::new("/Applications/Mori.app/Contents/MacOS/mori")), None);
+    }
+}
+
+#[cfg(test)]
+fn protocol_test_state(data_dir: PathBuf) -> AppState {
+    let data_dir_for_video = data_dir.clone();
+    let thumb_dir = data_dir.join("thumbs");
+    let dirs = localdata::Dirs::new(data_dir.clone(), data_dir.clone());
+    let stale_cleaned = 0;
+    AppState {
+        dirs,
+        stale_cleaned,
+        data_dir,
+        file_access: file_access::Access::new(&data_dir_for_video),
+        session: file_access::Session::default(),
+        thumb_dir,
+        volatile_thumbs: thumbs::Volatile::default(),
+        root: RwLock::new(None),
+        index: RwLock::new(Arc::new(Index::default())),
+        scan_gen: AtomicU64::new(0),
+        scanning: AtomicBool::new(false),
+        scan_count: AtomicUsize::new(0),
+        settings_lock: Mutex::new(()),
+        previews: Mutex::new(PreviewCache::default()),
+        video: video::VideoGuard::new(&data_dir_for_video),
+        analysis: Mutex::new(None),
+        analysis_running: AtomicBool::new(false),
+        analysis_cancel: Arc::new(AtomicBool::new(false)),
+        cleanup_cancel: Arc::new(AtomicBool::new(false)),
+        custom_locations: Mutex::new(Vec::new()),
+        similar: Mutex::new(None),
+        similar_running: AtomicBool::new(false),
+        similar_cancel: Arc::new(AtomicBool::new(false)),
+        similar_capture: Mutex::new(None),
+        similar_token: AtomicU64::new(0),
+        privacy: privacy::Store::load(data_dir_for_video.join("private-folders.json")),
+        protected: privacy::Store::load(data_dir_for_video.join("protected-folders.json")),
+        drives: drives::Store::load(data_dir_for_video.join("drives.json")),
+        safe_mode: AtomicBool::new(false),
+        decoded: AtomicU64::new(0),
+        connected: Mutex::new(HashMap::new()),
+        favorites: privacy::Store::load(data_dir_for_video.join("favorites.json")),
+        tags: tags::Store::load(data_dir_for_video.join("tags.json")),
+        temp: AtomicBool::new(false),
+        private_inspection: AtomicBool::new(false),
+        session_read_only: AtomicBool::new(false),
+        session_safe: AtomicBool::new(false),
+        capture_not: privacy::Store::load(data_dir_for_video.join("capture-not.json")),
+        capture_yes: privacy::Store::load(data_dir_for_video.join("capture-yes.json")),
+        history: history::History::default(),
+        transfer_dests: Mutex::new(Vec::new()),
+        transfer_cancel: AtomicBool::new(false),
+        cleanup: cleanup::Store::load(data_dir_for_video.join("cleanup-sessions.json")),
+        checksums: integrity::Cache::default(),
+        checksum_cancel: AtomicBool::new(false),
+        integrity: integrity::Store::new(data_dir_for_video.join("integrity")),
+        integrity_job: Arc::new(jobs::Control::default()),
+        integrity_running: AtomicBool::new(false),
+        health: Mutex::new(None),
+        health_running: AtomicBool::new(false),
+        health_job: Arc::new(jobs::Control::default()),
+        meta_scan: Mutex::new(None),
+        meta_running: AtomicBool::new(false),
+        meta_job: Arc::new(jobs::Control::default()),
+        read_only: AtomicBool::new(
+            fs::read(data_dir_for_video.join("settings.json"))
+                .ok()
+                .and_then(|d| serde_json::from_slice::<Settings>(&d).ok())
+                .and_then(|s| s.read_only)
+                .unwrap_or(false),
+        ),
     }
 }

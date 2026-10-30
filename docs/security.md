@@ -4,6 +4,14 @@
 
 Mori assumes every file on the drive may be malicious: malformed or oversized images, crafted video containers, hostile PDFs/SVG/HTML, disguised extensions, symlink tricks and spoofed filenames.
 
+## macOS distribution differences
+
+The **Mac App Store** build uses an embedded, signed XPC decoder service with its own App Sandbox. Its private container is writable; it does not have access grants to user folders, security-scoped bookmarks, app groups or inherited host permissions. It has no network entitlement. Requests contain bounded bytes, never paths, and both peers enforce signing requirements. Only one request executes at a time. Image/PDF protocol requests may wait in a bounded FIFO of 16 requests before reading input bytes; the deadline includes waiting. Already-materialized requests do not queue, and busy failures are not cached as permanent misses. Deadlines, input/output and dimension limits remain enforced. Display output is static PNG, with actual encoded dimensions and permitted chunks checked by the host. The service has resource limits and a sampled memory watchdog; the watchdog is not an instantaneous hard cap on native allocations or Apple's separate decoder processes. See [XPC implementation and signed smoke tests](../src-tauri/xpc/README.md).
+
+The Store **host** has `com.apple.security.network.client` because sandboxed WebKit requires it to start, even for local content. The UI CSP excludes external origins. File processing remains local, without uploads or telemetry, but the host is not prohibited by the OS from making outbound connections. Platform-store review features may communicate with Apple. The decoder does not receive this entitlement.
+
+The per-job command, custom sandbox profiles, no-write guarantees and three-worker concurrency described below apply to the **standalone** build. Store HEIC/PDF decoding uses the XPC service's App Sandbox instead of those custom profiles.
+
 **Untrusted bytes are decoded outside the main process.**
 - Image decoding happens in a separate, short-lived worker process, one per job (`Mori --mori-worker <op> <size>`, fixed arguments, no shell). Before reading any input, the worker:
   - drops privileges with the macOS `pure-computation` sandbox: no filesystem, no network, no new processes;
@@ -17,7 +25,7 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 - If decoding still goes wrong, it's contained in layers:
   - The player has a 20 s load timeout and a 25 s stall timeout. Errors, timeouts, or a video with no picture show *This video could not be safely previewed* with the reason.
   - Only one video session exists at a time. Switching or closing pauses the video, detaches its source, releases the decoder and ignores late results.
-  - The UI pings Rust every second. If the pings stop for 10 s while Mori is in front, Rust terminates the wedged WebKit content process and reloads the UI in place.
+  - The UI pings Rust every second. If the pings stop for 10 s while Mori is in front, standalone macOS builds terminate the wedged WebKit content process and reload the UI in place. Store builds use public reload APIs instead of private process-control selectors.
   - If WebKit's content process crashes, Mori reloads it.
   - In both of those cases, the video that was playing (or had just been closed) is added to a permanent blocklist, and Mori tells you which file it was.
 - A failing background thread can't take the app down: release builds unwind instead of aborting, every background thread is isolated with `catch_unwind`, and locks tolerate a failed holder.
@@ -33,7 +41,7 @@ Mori assumes every file on the drive may be malicious: malformed or oversized im
 - File bytes reach the webview only through Mori's `mori://` protocol: worker-made thumbnails and previews, plus verified video ranges. Responses carry `nosniff` and a sandboxing CSP.
 - The folder picker runs on the Rust side, and settings are a fixed, validated set of fields, so the UI can't redirect Mori to another directory.
 
-**Nothing is executed and nothing reaches the network.**
+**File content is not executed; the UI excludes external network origins.**
 - The webview CSP is `default-src 'none'`, plus scripts and styles from the bundle, images and media from `mori:` only, and IPC. Prototypes are frozen, and navigation away from the bundled UI is blocked.
 - There's no `eval`, no `innerHTML`, and no file content inserted as markup. Names, paths, text and metadata are rendered as plain text, so URLs inside files are never clickable. Filenames have control and bidi-override characters replaced, so `photo\u202Egpj.exe` can't pose as a `.jpg`.
 - HTML and SVG are never rendered inside Mori. PDFs are only ever shown as bitmaps rasterised by the sandboxed worker (see *PDFs* below).
@@ -79,9 +87,9 @@ The worker still receives only bytes, never a path. The same resource limits (di
 
 ## PDFs (macOS)
 
-- **Where.** `pdf.rs` runs only inside the worker (`pdfinfo`, `pdfpage` ops). The UI receives JPEG bitmaps of pages and a short `key=value` fact list (page count, encryption, info fields, presence of JavaScript / OpenAction / embedded files / forms).
+- **Where.** `pdf.rs` runs only inside the worker (`pdfinfo`, `pdfpage` ops). The UI receives JPEG bitmaps in standalone builds, or validated static PNG in Store builds, of pages and a short `key=value` fact list (page count, encryption, info fields, presence of JavaScript / OpenAction / embedded files / forms).
 - **Renderer.** CoreGraphics' PDF renderer draws page content only. It has no JavaScript engine and does not perform actions, follow links, open attachments or fetch anything.
-- **Sandbox.** PDF jobs use a dedicated deny-by-default profile. The only additions over pure computation are read access to system fonts and frameworks (needed to draw the standard fonts documents reference without embedding) and metadata reads under system paths. No IPC services, no IOKit, no writes, no network, no processes. `cargo test --test worker` checks both that text renders and that user files, writes, network and process creation are denied.
+- **Sandbox (standalone).** PDF jobs use a dedicated deny-by-default profile. The only additions over pure computation are read access to system fonts and frameworks (needed to draw the standard fonts documents reference without embedding) and metadata reads under system paths. No IPC services, no IOKit, no writes, no network, no processes. `cargo test --test worker` checks both that text renders and that user files, writes, network and process creation are denied.
 - **Limits.** 160 MB input, 5,000 pages, page sizes up to 2,400 px, 25 s per page, absurd page boxes refused. Locked PDFs aren't rendered.
 
 ## Archives

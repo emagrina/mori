@@ -7,13 +7,16 @@ Local Data** in the app shows the same categories with live sizes.
 
 ## Where things go
 
-- **Nothing leaves the computer.**
-  - No account, login, cloud service, telemetry, analytics, crash reporting, update check or remote processing.
+- **File processing stays on the computer. Mori does not upload your files or analysis results.**
+  - No Mori account, cloud service, telemetry, analytics, crash-report upload, update check or remote processing. Platform stores handle installation, updates and optional reviews under their own policies.
   - The web view's Content-Security-Policy refuses every remote origin.
-  - Decoder workers are denied network access by the OS sandbox (verified by the self-test on the loopback interface).
-  - The main process contains no network code. It is not sandboxed from the network, so this is a property of the code rather than an OS-enforced barrier.
+  - On macOS, standalone workers and the Store XPC decoder are denied network access by their OS sandbox. Signed XPC smoke tests exercise the Store boundary.
+  - The Store host has the outgoing-network entitlement required for WebKit startup, including local content. The CSP excludes external origins, but it is not an OS network ban on the host. StoreKit review prompts and opening the store review page may involve communication with Apple.
+  - Standalone macOS workers cannot write files or read user files. The Store XPC decoder has a private writable sandbox container, but no user-folder grants, bookmark or app-group entitlements, or inherited host permissions. It receives bytes, never paths. Its container is a residual storage boundary, not a zero-filesystem-access guarantee.
 - **Nothing is written next to your files**, except what you explicitly ask for: a rename, Trash, a sanitized copy, or a permanent delete.
 - **The web view stores nothing on disk.** It uses a non-persistent data store: no cookies, local storage, IndexedDB, HTTP cache or tracking statistics.
+
+The Mac App Store build stores host data and caches inside its App Sandbox container. The standalone macOS paths below are not the Store container paths. The decoder has a separate private container; the host data inventory and clearing controls do not promise to enumerate or erase all OS-managed decoder-container state.
 
 ## Persistent data (normal sessions)
 

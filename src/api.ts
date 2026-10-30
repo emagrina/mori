@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { SavedSession } from "./cleanup";
 import { frameFraction } from "./filmstrip";
 import { currentLocale, msg, t } from "./i18n";
+import { loadThumbnail, ThumbnailTransient } from "./thumbnailLoad";
 
 let onFailure: () => void = () => {};
 /** Called whenever a backend call fails (a cancelled picker isn't a failure). */
@@ -945,7 +946,7 @@ export const frameUrl = (id: string, k: number, iso = false) => moriUrl("frame",
 const MAX_IN_FLIGHT = 4;
 /** id -> loaded thumbnail URL, or null when none can be made. */
 const cache = new Map<string, string | null>();
-type Job = { id: string; run: () => Promise<string | null>; done: (v: string | null) => void };
+type Job = { id: string; run: () => Promise<string | null>; done: (v: string | null) => void; cancelled: boolean };
 const queue: Job[] = [];
 let inFlight = 0;
 
@@ -956,10 +957,12 @@ function pump() {
     inFlight++;
     job
       .run()
-      .catch(() => null)
+      .catch((error) => error instanceof ThumbnailTransient ? false as const : null)
       .then((url) => {
         inFlight--;
         pump();
+        if (job.cancelled) return;
+        if (url === false) { job.done(null); return; } // transient: never cache a miss
         if (url === undefined) return; // handed over to the video capture queue
         cache.set(job.id, url);
         job.done(url);
@@ -991,12 +994,14 @@ export function requestThumb(e: Entry, onDone: (url: string | null) => void): ()
     return () => {};
   }
   let cancelCapture = () => {};
+  const abort = new AbortController();
   const job: Job = {
+    cancelled: false,
     id: e.id,
     done: onDone,
     run: async () => {
       const url = thumbUrl(e.id);
-      if (await loadImage(url)) return url;
+      if (await loadThumbnail(url, abort.signal)) return url;
       if (e.kind !== "video") return null;
       // Video frames are captured separately (one at a time, never during a
       // preview) so they don't hold up image thumbnails.
@@ -1012,6 +1017,8 @@ export function requestThumb(e: Entry, onDone: (url: string | null) => void): ()
   queue.push(job);
   pump();
   return () => {
+    job.cancelled = true;
+    abort.abort();
     const i = queue.indexOf(job);
     if (i >= 0) queue.splice(i, 1);
     cancelCapture();

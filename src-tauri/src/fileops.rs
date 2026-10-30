@@ -98,25 +98,33 @@ pub fn restore_from_trash(policy: &Policy, trashed: &Path, original: &Path) -> R
 /// any link inside. Returns the bytes freed (link and folder entries count 0).
 pub fn delete_permanently(policy: &Policy, path: &Path) -> Result<u64, String> {
     policy.check(Op::Delete, path)?;
-    let meta = fs::symlink_metadata(path).map_err(|_| tr!("file no longer exists"))?;
-    let ft = meta.file_type();
-    if ft.is_symlink() || ft.is_file() {
-        fs::remove_file(path).map_err(|e| io_reason(&e))?;
-        return Ok(if ft.is_file() { meta.len() } else { 0 });
+    #[cfg(unix)]
+    {
+        let (parent, name) = crate::secure::unix::parent(path).map_err(|e| io_reason(&e))?;
+        remove_at(&parent, name).map_err(|e| io_reason(&e))
     }
-    if !ft.is_dir() {
-        return Err(tr!("not a regular file or folder"));
-    }
-    let mut bytes = 0;
-    for e in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
-        if e.file_type().is_file() {
-            bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+    #[cfg(not(unix))]
+    {
+        let meta = fs::symlink_metadata(path).map_err(|_| tr!("file no longer exists"))?;
+        let ft = meta.file_type();
+        if ft.is_symlink() || ft.is_file() {
+            fs::remove_file(path).map_err(|e| io_reason(&e))?;
+            return Ok(if ft.is_file() { meta.len() } else { 0 });
         }
+        if !ft.is_dir() {
+            return Err(tr!("not a regular file or folder"));
+        }
+        let mut bytes = 0;
+        for e in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
+            if e.file_type().is_file() {
+                bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        // std's remove_dir_all never follows symlinks (it unlinks them) and
+        // guards against symlink races on unix.
+        fs::remove_dir_all(path).map_err(|e| io_reason(&e))?;
+        Ok(bytes)
     }
-    // std's remove_dir_all never follows symlinks (it unlinks them) and
-    // guards against symlink races on unix.
-    fs::remove_dir_all(path).map_err(|e| io_reason(&e))?;
-    Ok(bytes)
 }
 
 fn io_reason(e: &std::io::Error) -> String {
@@ -151,16 +159,10 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
     {
         use std::ffi::CString;
         use std::io::Write;
-        use std::os::fd::FromRawFd;
-        use std::os::unix::ffi::OsStrExt;
-        let cdir = CString::new(dir.as_os_str().as_bytes()).map_err(|_| tr!("invalid folder"))?;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let parent = crate::secure::unix::Dir::open(dir).map_err(|_| tr!("the folder can't be opened"))?;
         let cname = CString::new(name.as_bytes()).map_err(|_| tr!("invalid name"))?;
-        let dfd = unsafe {
-            libc::open(cdir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        };
-        if dfd < 0 {
-            return Err(tr!("the folder can't be opened"));
-        }
+        let dfd = parent.0.as_raw_fd();
         let fd = unsafe {
             libc::openat(
                 dfd,
@@ -170,7 +172,6 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
             )
         };
         let err = std::io::Error::last_os_error();
-        unsafe { libc::close(dfd) };
         if fd < 0 {
             return match err.kind() {
                 std::io::ErrorKind::AlreadyExists => Ok(false),
@@ -182,7 +183,7 @@ pub fn create_new(policy: &Policy, dir: &Path, name: &str, bytes: &[u8]) -> Resu
         if f.write_all(bytes).and_then(|_| f.sync_all()).is_err() {
             drop(f);
             // Our own partial file: remove it rather than leave a broken copy.
-            let _ = fs::remove_file(&target);
+            let _ = parent.unlink(std::ffi::OsStr::new(name), false);
             return Err(tr!("writing the file failed (disk full?)"));
         }
         Ok(true)
@@ -288,33 +289,11 @@ pub fn rename_no_replace(policy: &Policy, from: &Path, to: &Path) -> Result<(), 
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn platform_rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let a = CString::new(from.as_os_str().as_bytes())?;
-    let b = CString::new(to.as_os_str().as_bytes())?;
-    // RENAME_EXCL: fail with EEXIST instead of replacing the destination.
-    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn platform_rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let a = CString::new(from.as_os_str().as_bytes())?;
-    let b = CString::new(to.as_os_str().as_bytes())?;
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+    let (source, name) = crate::secure::unix::parent(from)?;
+    let (dest, new) = crate::secure::unix::parent(to)?;
+    source.rename(name, &dest, new)
 }
 
 #[cfg(windows)]
@@ -458,6 +437,7 @@ fn transfer_reason(e: &std::io::Error) -> String {
 
 /// Copy, then check every regular file arrived with its full size; undo the
 /// partial copy on any failure.
+#[cfg(not(unix))]
 fn copy_checked(src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<u64, String> {
     let mut created = Vec::new();
     let r = copy_tree(src, dest, 0, cancel, &mut created);
@@ -478,6 +458,7 @@ fn copy_checked(src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<u6
     r
 }
 
+#[cfg(not(unix))]
 fn copy_tree(
     src: &Path,
     dest: &Path,
@@ -520,6 +501,7 @@ fn copy_tree(
     Ok(bytes)
 }
 
+#[cfg(not(unix))]
 fn copy_file(src: &Path, dest: &Path, meta: &fs::Metadata, created: &mut Vec<PathBuf>) -> Result<u64, String> {
     let mut open = fs::OpenOptions::new();
     open.read(true);
@@ -548,6 +530,7 @@ fn copy_file(src: &Path, dest: &Path, meta: &fs::Metadata, created: &mut Vec<Pat
 }
 
 /// Recreate a link with the same link text; its target is never touched.
+#[cfg(not(unix))]
 fn copy_link(src: &Path, dest: &Path, meta: &fs::Metadata) -> Result<(), String> {
     let target = fs::read_link(src).map_err(|_| tr!("a link couldn't be read"))?;
     #[cfg(unix)]
@@ -758,7 +741,7 @@ mod tests {
 
     #[test]
     fn rename_never_overwrites() {
-        let d = std::env::temp_dir().join(format!("mori-rename-{}", std::process::id()));
+        let d = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-rename-{}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("a.txt"), b"a").unwrap();
         fs::write(d.join("b.txt"), b"b").unwrap();
@@ -877,5 +860,214 @@ mod tests {
         }
         fs::remove_file(d.join("target.txt")).unwrap();
         fs::remove_dir(&d).unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn copy_checked(src: &Path, dest: &Path, cancel: &dyn Fn() -> bool) -> Result<u64, String> {
+    let (source, name) = crate::secure::unix::parent(src).map_err(|e| transfer_reason(&e))?;
+    let (target, new) = crate::secure::unix::parent(dest).map_err(|e| transfer_reason(&e))?;
+    copy_at(&source, name, &target, new, 0, cancel)
+}
+
+#[cfg(unix)]
+fn copy_at(
+    source: &crate::secure::unix::Dir,
+    name: &std::ffi::OsStr,
+    target: &crate::secure::unix::Dir,
+    new: &std::ffi::OsStr,
+    depth: usize,
+    cancel: &dyn Fn() -> bool,
+) -> Result<u64, String> {
+    use std::os::unix::fs::MetadataExt;
+    if cancel() {
+        return Err("cancelled".into());
+    }
+    if depth > MAX_COPY_DEPTH {
+        return Err(tr!("the folder is nested too deeply to copy"));
+    }
+    let st = source.stat(name).map_err(|e| transfer_reason(&e))?;
+    let kind = st.st_mode & libc::S_IFMT;
+    if kind == libc::S_IFLNK {
+        let text = source.read_link(name).map_err(|e| transfer_reason(&e))?;
+        target.symlink(new, &text).map_err(|e| transfer_reason(&e))?;
+        return Ok(0);
+    }
+    if kind == libc::S_IFDIR {
+        let from = source.child(name).map_err(|e| transfer_reason(&e))?;
+        let meta = from.0.metadata().map_err(|e| transfer_reason(&e))?;
+        if meta.dev() != st.st_dev as u64 || meta.ino() != st.st_ino as u64 {
+            return Err(tr!("item no longer exists"));
+        }
+        let to = target.mkdir(new).map_err(|e| transfer_reason(&e))?;
+        let mut made = Vec::new();
+        let result = (|| {
+            let mut bytes = 0;
+            for child in from.names().map_err(|e| transfer_reason(&e))? {
+                bytes += copy_at(&from, &child, &to, &child, depth + 1, cancel)?;
+                made.push(child);
+            }
+            to.0.set_permissions(meta.permissions()).map_err(|e| transfer_reason(&e))?;
+            Ok(bytes)
+        })();
+        if result.is_err() {
+            for child in made.iter().rev() {
+                let _ = remove_at(&to, child);
+            }
+            let _ = target.unlink(new, true);
+        }
+        return result;
+    }
+    if kind != libc::S_IFREG {
+        return Err(tr!("not a regular file or folder"));
+    }
+    let mut from = source.file(name, libc::O_RDONLY | libc::O_NONBLOCK, 0).map_err(|e| transfer_reason(&e))?;
+    let meta = from.metadata().map_err(|e| transfer_reason(&e))?;
+    if !meta.is_file() || meta.dev() != st.st_dev as u64 || meta.ino() != st.st_ino as u64 {
+        return Err(tr!("item no longer exists"));
+    }
+    let mut to =
+        target.file(new, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600).map_err(|e| transfer_reason(&e))?;
+    let result = (|| {
+        let n = std::io::copy(&mut from, &mut to).map_err(|e| transfer_reason(&e))?;
+        to.sync_all().map_err(|e| transfer_reason(&e))?;
+        if n != meta.len() || to.metadata().map(|m| m.len()).ok() != Some(meta.len()) {
+            return Err(tr!("the copy is incomplete (the file changed or the destination failed)"));
+        }
+        let _ = to.set_permissions(meta.permissions());
+        if let Ok(t) = meta.modified() {
+            let _ = to.set_modified(t);
+        }
+        Ok(n)
+    })();
+    if result.is_err() {
+        let _ = target.unlink(new, false);
+    }
+    result
+}
+
+/// Removal stays relative to pinned parents; links are unlinked, never traversed.
+#[cfg(unix)]
+fn remove_at(parent: &crate::secure::unix::Dir, name: &std::ffi::OsStr) -> std::io::Result<u64> {
+    remove_at_depth(parent, name, 0)
+}
+
+#[cfg(unix)]
+fn remove_at_depth(parent: &crate::secure::unix::Dir, name: &std::ffi::OsStr, depth: usize) -> std::io::Result<u64> {
+    if depth > MAX_COPY_DEPTH {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+    let st = parent.stat(name)?;
+    let kind = st.st_mode & libc::S_IFMT;
+    if kind == libc::S_IFDIR {
+        use std::os::unix::fs::MetadataExt;
+        let dir = parent.child(name)?;
+        let meta = dir.0.metadata()?;
+        if meta.dev() != st.st_dev as u64 || meta.ino() != st.st_ino as u64 {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        let mut bytes = 0;
+        for child in dir.names()? {
+            bytes += remove_at_depth(&dir, &child, depth + 1)?;
+        }
+        parent.unlink(name, true)?;
+        Ok(bytes)
+    } else if kind == libc::S_IFREG || kind == libc::S_IFLNK {
+        parent.unlink(name, false)?;
+        Ok(if kind == libc::S_IFREG { st.st_size.max(0) as u64 } else { 0 })
+    } else {
+        Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod boundary_regressions {
+    use super::*;
+    use std::ffi::OsStr;
+    fn lab(name: &str) -> PathBuf {
+        let base = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("mori-boundary-{name}-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+    #[test]
+    fn copy_pins_both_parents_before_an_ancestor_swap() {
+        let base = lab("copy");
+        for name in ["source", "dest", "outside"] {
+            fs::create_dir(base.join(name)).unwrap();
+        }
+        fs::write(base.join("source/a"), b"selected").unwrap();
+        fs::write(base.join("outside/a"), b"private!").unwrap();
+        let first = std::cell::Cell::new(true);
+        let cancel = || {
+            if first.replace(false) {
+                fs::rename(base.join("source"), base.join("old-source")).unwrap();
+                fs::rename(base.join("dest"), base.join("old-dest")).unwrap();
+                std::os::unix::fs::symlink(base.join("outside"), base.join("source")).unwrap();
+                std::os::unix::fs::symlink(base.join("outside"), base.join("dest")).unwrap();
+            }
+            false
+        };
+        assert_eq!(copy_checked(&base.join("source/a"), &base.join("dest/copy"), &cancel).unwrap(), 8);
+        assert_eq!(fs::read(base.join("old-dest/copy")).unwrap(), b"selected");
+        assert!(!base.join("outside/copy").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn cancelled_copy_cleanup_does_not_follow_a_replaced_destination() {
+        let base = lab("rollback");
+        fs::create_dir(base.join("source")).unwrap();
+        fs::create_dir(base.join("outside")).unwrap();
+        fs::write(base.join("source/a"), b"copy").unwrap();
+        fs::write(base.join("source/b"), b"copy").unwrap();
+        fs::write(base.join("outside/keep"), b"private").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let cancel = || {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n == 1 {
+                fs::rename(base.join("copy"), base.join("original-copy")).unwrap();
+                std::os::unix::fs::symlink(base.join("outside"), base.join("copy")).unwrap();
+            }
+            n == 2
+        };
+        assert!(copy_checked(&base.join("source"), &base.join("copy"), &cancel).is_err());
+        assert_eq!(fs::read(base.join("outside/keep")).unwrap(), b"private");
+        assert!(!base.join("outside/a").exists());
+        assert!(!base.join("original-copy/a").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn mutations_reject_symlinked_ancestors() {
+        let base = lab("mutation");
+        fs::create_dir_all(base.join("outside/child")).unwrap();
+        fs::write(base.join("outside/child/a"), b"keep").unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), base.join("alias")).unwrap();
+        let store = crate::privacy::Store::load(base.join("protected.json"));
+        let policy = Policy { read_only: false, protected: &store };
+        assert!(create_new(&policy, &base.join("alias/child"), "new", b"bad").is_err());
+        assert!(rename_no_replace(&policy, &base.join("alias/child/a"), &base.join("renamed")).is_err());
+        assert!(delete_permanently(&policy, &base.join("alias/child/a")).is_err());
+        assert_eq!(fs::read(base.join("outside/child/a")).unwrap(), b"keep");
+        assert!(!base.join("outside/child/new").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn pinned_rename_and_unlink_ignore_replacement_parent() {
+        let base = lab("rename");
+        fs::create_dir(base.join("parent")).unwrap();
+        fs::create_dir(base.join("outside")).unwrap();
+        fs::write(base.join("parent/a"), b"selected").unwrap();
+        fs::write(base.join("outside/a"), b"keep").unwrap();
+        let parent = crate::secure::unix::Dir::open(&base.join("parent")).unwrap();
+        fs::rename(base.join("parent"), base.join("original")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), base.join("parent")).unwrap();
+        parent.rename(OsStr::new("a"), &parent, OsStr::new("b")).unwrap();
+        parent.unlink(OsStr::new("b"), false).unwrap();
+        assert_eq!(fs::read(base.join("outside/a")).unwrap(), b"keep");
+        assert!(!base.join("outside/b").exists());
+        fs::remove_dir_all(base).unwrap();
     }
 }

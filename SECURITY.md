@@ -13,13 +13,14 @@ absolute security guarantee.
 **Mori treats every file it inspects as untrusted input.** It aims to reduce the impact of hostile content: malformed or oversized images, crafted video containers, hostile PDFs, archives with path traversal or bombs, disguised extensions, deceptive names, and symlink tricks.
 
 The isolation is meant to protect:
-- **the rest of your files:** decoder workers can't read or write files, and Mori never follows links out of a folder;
+- **the rest of your files:** macOS decoder processes receive no user-folder access grants. Standalone workers cannot write files; the Store decoder can access its own private container. Mori confines file access to authorized folders;
 - **Mori itself:** a crashing or hung decoder fails one preview, not the app;
 - **your privacy:** everything runs locally, nothing is uploaded, and Mori keeps as little persistent state as it can.
 
 How:
 - **Type detection** by content, never by extension.
-- **Decoding in a separate worker process.** On macOS each worker is locked down by the OS sandbox (no file access, no writes, no network, no new processes) and receives bytes, never paths.
+- **Decoding in a separate worker process.** Standalone macOS workers use restrictive profiles: no user-file access, writes, network or new processes, with limited system-resource reads for HEIC/PDF. The Mac App Store build uses an embedded App Sandbox XPC service with its own writable container, no network entitlement, and no user-folder, bookmark or app-group entitlements or inherited host grants. Both receive bytes, never paths.
+- **Host network permission.** The Store host needs `com.apple.security.network.client` for WebKit startup. The UI CSP excludes external origins, and Mori processes files locally without uploads or telemetry. This is not a host-level OS network ban; platform-store review features may communicate with Apple. The decoder retains its separate network restriction.
 - **Validated output.** Results are re-encoded and validated before the UI sees them.
 - **Resource limits** on dimensions, pixels, memory, input size and time.
 - **Archives are listed, not extracted**, with traversal, bomb and nesting checks.

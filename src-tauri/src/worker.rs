@@ -1,7 +1,7 @@
 //! Sandboxed media worker.
 //!
 //! Untrusted image data is never decoded inside the main Mori process. For
-//! each job Mori starts a fresh copy of its own executable in worker mode:
+//! standalone job Mori starts a fresh copy of its own executable in worker mode:
 //!
 //!   mori --mori-worker <op> <max-edge>
 //!
@@ -13,17 +13,27 @@
 //! compromised worker cannot reach other files. If it crashes, hangs or blows
 //! a limit, Mori kills it and just shows "preview unavailable".
 //!
-//! Wire format (stdout), deliberately trivial — no general deserialisation:
+//! Store builds use the independently sandboxed embedded XPC decoder instead.
+//! It has its own App Sandbox container and receives bytes, never paths or grants.
+//! The legacy worker entry is disabled in Store builds; there is no fallback.
+//! See xpc/README.md for the Store resource limits and residual capabilities.
+//!
+//! Wire format (stdout or XPC data), deliberately trivial — no general deserialisation:
 //!   b"MORI" | u32 LE source width | u32 LE source height | u8 format | 3 × 0
 //!   followed by the encoded image bytes.
 
 use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
+#[cfg(not(feature = "mac-app-store"))]
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
 use image::{AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
 use std::io::{Cursor, Read, Write};
 use std::sync::PoisonError;
+
+#[cfg(not(feature = "decoder-service"))]
+#[path = "output_validation.rs"]
+pub(crate) mod output_validation;
 
 pub const WORKER_FLAG: &str = "--mori-worker";
 
@@ -201,32 +211,7 @@ pub fn worker_main(args: &[String]) -> ! {
     if std::io::stdin().take(MAX_INPUT + 1).read_to_end(&mut input).is_err() || input.len() as u64 > MAX_INPUT {
         std::process::exit(EXIT_LIMITS);
     }
-    let result = match op {
-        Op::Frame => process(&input, max, &[ImageFormat::Png], false, true),
-        Op::Thumb => process(
-            &input,
-            max,
-            &[ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP, ImageFormat::Gif],
-            false,
-            false,
-        ),
-        Op::Preview => process(
-            &input,
-            max,
-            &[ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP, ImageFormat::Gif],
-            true,
-            false,
-        ),
-        Op::Probe => probe_video(&input),
-        Op::Fingerprint => fingerprint(&input),
-        Op::PdfInfo => pdf_info(&input),
-        Op::PdfPage => pdf_page(&input, max),
-        Op::Meta => meta(&input),
-        Op::MetaBatch => meta_batch(&input),
-        Op::Sanitize => crate::sanitize::sanitize(&input)
-            .map(|bytes| Output { width: 0, height: 0, format: OutFormat::Bytes, bytes })
-            .map_err(|e| if e == "unsupported" { EXIT_UNSUPPORTED } else { EXIT_DECODE }),
-    };
+    let result = decode(op, max, &input);
     match result {
         Ok(out) => {
             let mut stdout = std::io::stdout().lock();
@@ -240,6 +225,55 @@ pub fn worker_main(args: &[String]) -> ! {
         }
         Err(code) => std::process::exit(code),
     }
+}
+
+// Shared decoding core. Only the standalone worker or the XPC service calls this.
+fn decode(op: Op, max: u32, input: &[u8]) -> Result<Output, i32> {
+    if input.len() as u64 > MAX_INPUT || !(32..=4096).contains(&max) {
+        return Err(EXIT_LIMITS);
+    }
+    match op {
+        Op::Frame => process(input, max, &[ImageFormat::Png], false, true),
+        Op::Thumb => process(
+            input,
+            max,
+            &[ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP, ImageFormat::Gif],
+            false,
+            false,
+        ),
+        Op::Preview => process(
+            input,
+            max,
+            &[ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP, ImageFormat::Gif],
+            !cfg!(feature = "mac-app-store"),
+            false,
+        ),
+        Op::Probe => probe_video(input),
+        Op::Fingerprint => fingerprint(input),
+        Op::PdfInfo => pdf_info(input),
+        Op::PdfPage => pdf_page(input, max),
+        Op::Meta => meta(input),
+        Op::MetaBatch => meta_batch(input),
+        Op::Sanitize => crate::sanitize::sanitize(input)
+            .map(|bytes| Output { width: 0, height: 0, format: OutFormat::Bytes, bytes })
+            .map_err(|e| if e == "unsupported" { EXIT_UNSUPPORTED } else { EXIT_DECODE }),
+    }
+}
+
+#[cfg(feature = "decoder-service")]
+pub fn decode_wire(name: &str, max: u32, input: &[u8]) -> Result<Vec<u8>, i32> {
+    let op = Op::parse(name).ok_or(EXIT_USAGE)?;
+    let out = decode(op, max, input)?;
+    if out.bytes.len() > MAX_OUTPUT {
+        return Err(EXIT_LIMITS);
+    }
+    let mut wire = Vec::with_capacity(16 + out.bytes.len());
+    wire.extend_from_slice(b"MORI");
+    wire.extend_from_slice(&out.width.to_le_bytes());
+    wire.extend_from_slice(&out.height.to_le_bytes());
+    wire.extend_from_slice(&[out.format as u8, 0, 0, 0]);
+    wire.extend_from_slice(&out.bytes);
+    Ok(wire)
 }
 
 /// Input: 4-byte tag (`MP4\0` + moov payload, or `WEBM` + file head).
@@ -441,19 +475,32 @@ fn fingerprint(input: &[u8]) -> Result<Output, i32> {
 }
 
 fn encode_still(img: DynamicImage, src_w: u32, src_h: u32) -> Result<Output, i32> {
-    let mut bytes = Vec::new();
-    let format = if img.color().has_alpha() {
+    #[cfg(feature = "mac-app-store")]
+    {
+        // Store previews are a narrow static format; no animated GIF/APNG or profiles.
         let rgba = img.to_rgba8();
-        PngEncoder::new(&mut bytes)
+        let mut bytes = Vec::new();
+        PngEncoder::new(Capped(&mut bytes))
             .write_image(&rgba, rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
-            .map_err(|_| EXIT_DECODE)?;
-        OutFormat::Png
-    } else {
-        let rgb = img.to_rgb8();
-        JpegEncoder::new_with_quality(&mut bytes, 86).encode_image(&rgb).map_err(|_| EXIT_DECODE)?;
-        OutFormat::Jpeg
-    };
-    Ok(Output { width: src_w, height: src_h, format, bytes })
+            .map_err(|_| EXIT_LIMITS)?;
+        return Ok(Output { width: src_w, height: src_h, format: OutFormat::Png, bytes });
+    }
+    #[cfg(not(feature = "mac-app-store"))]
+    {
+        let mut bytes = Vec::new();
+        let format = if img.color().has_alpha() {
+            let rgba = img.to_rgba8();
+            PngEncoder::new(&mut bytes)
+                .write_image(&rgba, rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+                .map_err(|_| EXIT_DECODE)?;
+            OutFormat::Png
+        } else {
+            let rgb = img.to_rgb8();
+            JpegEncoder::new_with_quality(&mut bytes, 86).encode_image(&rgb).map_err(|_| EXIT_DECODE)?;
+            OutFormat::Jpeg
+        };
+        Ok(Output { width: src_w, height: src_h, format, bytes })
+    }
 }
 
 /// Decode and re-encode an animated GIF frame by frame (bounded memory).
@@ -534,7 +581,7 @@ fn restrict_resources() {
 /// denied: reading anything but system files and Mori's own app bundle,
 /// writing anything, the network, new processes, every IPC service except
 /// Apple's video decoder, and every IOKit client except IOSurface.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
 const HEIF_PROFILE: &str = r#"(version 1)
 (allow default)
 (deny file-read*)
@@ -559,7 +606,7 @@ const HEIF_PROFILE: &str = r#"(version 1)
 /// that documents reference without embedding from the system font files.
 /// Reading system fonts and frameworks is all that is added; no IPC service,
 /// no IOKit, no writes, no network, no processes.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
 const PDF_PROFILE: &str = r#"(version 1)
 (deny default)
 (allow file-read* (subpath "/System/Library/Fonts") (subpath "/System/Library/Frameworks") (subpath "/System/Library/PrivateFrameworks") (subpath "/Library/Fonts") (subpath "/usr/share") (subpath "/private/var/db/dyld"))
@@ -573,8 +620,11 @@ enum Profile {
     Pdf,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
 fn enter_sandbox(profile: Profile) -> bool {
+    if crate::file_access::required() {
+        return false;
+    }
     use std::ffi::{c_char, c_int, CString};
     extern "C" {
         fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
@@ -618,6 +668,13 @@ fn enter_sandbox(profile: Profile) -> bool {
     }
 }
 
+// The legacy worker entry must remain disabled in Store builds. Only the signed,
+// independently sandboxed embedded XPC service may decode; no stdin fallback.
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+fn enter_sandbox(_profile: Profile) -> bool {
+    false
+}
+
 #[cfg(not(target_os = "macos"))]
 fn enter_sandbox(_profile: Profile) -> bool {
     // Linux: rlimits + no_new_privs (see restrict_resources); Windows: Job object
@@ -645,6 +702,8 @@ fn selftest() -> ! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerError {
+    /// Admission is full or its bounded wait expired; retry without caching a miss.
+    Busy,
     /// Not a format the worker will decode.
     Unsupported,
     /// The data is damaged: the decoder rejected it.
@@ -681,9 +740,30 @@ impl Drop for Slot {
     }
 }
 
+/// Admit Store work before allocating/reading the input. The deadline includes waiting and loading.
+#[cfg(not(feature = "decoder-service"))]
+pub fn run_lazy(
+    op: Op,
+    max: u32,
+    timeout: std::time::Duration,
+    load: impl FnOnce() -> Result<Vec<u8>, WorkerError>,
+) -> Result<Output, WorkerError> {
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    return store_xpc::run_lazy(op, max, timeout, load);
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    run(op, max, load()?, timeout)
+}
+
 /// Run one job in a fresh sandboxed worker process.
+#[cfg(not(feature = "decoder-service"))]
 pub fn run(op: Op, max: u32, input: Vec<u8>, timeout: std::time::Duration) -> Result<Output, WorkerError> {
     use std::process::{Command, Stdio};
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    return store_xpc::run(op, max, input, timeout);
+    #[allow(unreachable_code)]
+    if crate::file_access::required() {
+        return Err(WorkerError::Failed);
+    }
     let _slot = Slot::acquire();
     let exe = std::env::current_exe().map_err(|_| WorkerError::Failed)?;
     let mut cmd = Command::new(exe);
@@ -749,7 +829,7 @@ pub fn run(op: Op, max: u32, input: Vec<u8>, timeout: std::time::Duration) -> Re
 }
 
 fn parse_output(mut out: Vec<u8>) -> Result<Output, WorkerError> {
-    if out.len() < 16 || &out[0..4] != b"MORI" || out.len() > MAX_OUTPUT + 16 {
+    if out.len() < 16 || &out[0..4] != b"MORI" || out.len() > MAX_OUTPUT + 16 || out[13..16] != [0, 0, 0] {
         return Err(WorkerError::Failed);
     }
     let width = u32::from_le_bytes(out[4..8].try_into().unwrap());
@@ -839,3 +919,7 @@ mod win_job {
         }
     }
 }
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store", not(feature = "decoder-service")))]
+#[path = "store_xpc.rs"]
+mod store_xpc;

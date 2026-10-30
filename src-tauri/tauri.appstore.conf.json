@@ -1,0 +1,24 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "targets": [
+      "app"
+    ],
+    "macOS": {
+      "bundleVersion": "2",
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "Apple Distribution: Ernest Magri\u00f1\u00e1 (AYA5S225VU)",
+      "entitlements": "Entitlements.store.plist",
+      "infoPlist": "Info.store.plist",
+      "hardenedRuntime": true,
+      "files": {
+        "XPCServices/app.mori.viewer.decoder.xpc": "target/store-decoder/app.mori.viewer.decoder.xpc",
+        "Resources/Assets.car": "target/store-icon/Assets.car",
+        "Resources/MoriAdaptive.icns": "target/store-icon/MoriAdaptive.icns"
+      }
+    }
+  },
+  "build": {
+    "beforeBundleCommand": "sh scripts/prepare-macos-icon.sh"
+  }
+}

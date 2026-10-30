@@ -151,30 +151,29 @@ pub fn probe_file(mut file: File, len: u64, detected: Detected) -> VideoInfo {
         Detected::Webm => "WebM",
         _ => return VideoInfo::bare(VideoStatus::Damaged, "unknown"),
     };
-    let mut input = Vec::new();
-    match detected {
-        Detected::Webm => {
-            input.extend_from_slice(b"WEBM");
-            if file.seek(SeekFrom::Start(0)).is_err() || file.by_ref().take(WEBM_HEAD).read_to_end(&mut input).is_err()
-            {
-                return VideoInfo::bare(VideoStatus::Damaged, container);
+    // Wait for bounded decoder admission before reading/allocating the moov payload.
+    // A simultaneous image job must not make an otherwise playable video look damaged.
+    let out = match worker::run_lazy(Op::Probe, 256, PROBE_TIMEOUT, || {
+        let mut input = Vec::new();
+        match detected {
+            Detected::Webm => {
+                input.extend_from_slice(b"WEBM");
+                file.seek(SeekFrom::Start(0)).map_err(|_| worker::WorkerError::Decode)?;
+                file.by_ref().take(WEBM_HEAD).read_to_end(&mut input).map_err(|_| worker::WorkerError::Decode)?;
+            }
+            _ => {
+                let (at, size) = find_moov(&mut file, len).ok_or(worker::WorkerError::Decode)?;
+                if size > MAX_MOOV {
+                    return Err(worker::WorkerError::Limits);
+                }
+                input.extend_from_slice(b"MP4\0");
+                input.reserve(size as usize);
+                file.seek(SeekFrom::Start(at)).map_err(|_| worker::WorkerError::Decode)?;
+                file.by_ref().take(size).read_to_end(&mut input).map_err(|_| worker::WorkerError::Decode)?;
             }
         }
-        _ => {
-            let Some((at, size)) = find_moov(&mut file, len) else {
-                return VideoInfo::bare(VideoStatus::Damaged, container);
-            };
-            if size > MAX_MOOV {
-                return VideoInfo::bare(VideoStatus::Damaged, container);
-            }
-            input.extend_from_slice(b"MP4\0");
-            input.reserve(size as usize);
-            if file.seek(SeekFrom::Start(at)).is_err() || file.by_ref().take(size).read_to_end(&mut input).is_err() {
-                return VideoInfo::bare(VideoStatus::Damaged, container);
-            }
-        }
-    }
-    let out = match worker::run(Op::Probe, 256, input, PROBE_TIMEOUT) {
+        Ok(input)
+    }) {
         Ok(out) if out.format == OutFormat::Probe => out,
         _ => return VideoInfo::bare(VideoStatus::Damaged, container),
     };
@@ -263,7 +262,12 @@ impl VideoGuard {
             return hit.clone();
         }
         let info = probe();
-        self.probes.lock().unwrap_or_else(PoisonError::into_inner).insert(key.to_owned(), info.clone());
+        // Damaged also represents a failed/expired worker request, not just corrupt bytes.
+        // Never pin transient transport failures in the session cache. The safety gate
+        // still denies this attempt, and the next request performs a fresh validation.
+        if info.status != VideoStatus::Damaged {
+            self.probes.lock().unwrap_or_else(PoisonError::into_inner).insert(key.to_owned(), info.clone());
+        }
         info
     }
 
@@ -371,6 +375,19 @@ mod tests {
             assert!(!codec_allowed(Detected::Mp4, "hev1"));
             assert!(!codec_allowed(Detected::Mp4, "av01"));
         }
+    }
+
+    #[test]
+    fn transient_probe_failure_is_retried_but_success_is_cached() {
+        let dir = std::env::temp_dir().join(format!("mori-video-retry-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let guard = VideoGuard::new(&dir);
+        assert_eq!(guard.info("fixture", || VideoInfo::bare(VideoStatus::Damaged, "MP4")).status, VideoStatus::Damaged);
+        assert_eq!(guard.info("fixture", || VideoInfo::bare(VideoStatus::Playable, "MP4")).status, VideoStatus::Playable);
+        assert_eq!(guard.info("fixture", || panic!("successful result should be cached")).status, VideoStatus::Playable);
+        guard.block("fixture");
+        assert_eq!(guard.info("fixture", || panic!("blocked media must not be retried")).status, VideoStatus::Blocked);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

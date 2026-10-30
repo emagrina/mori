@@ -15,7 +15,7 @@
 
 Mori is a small desktop app for looking through folders and drives, including ones you don't trust. It browses them like a Finder-style gallery, and it previews photos, videos, PDFs and archives without handing the originals to other apps. It also finds duplicates, reads and scans metadata, checks file integrity, and shows what takes up space.
 
-It has no account, no cloud, no telemetry and no network functionality.
+File browsing and processing work offline, without an account, cloud service or telemetry. Store reviews are handled by the platform store.
 
 ![Mori](docs/images/redesign/a_folder_grid.jpg)
 
@@ -24,10 +24,10 @@ It has no account, no cloud, no telemetry and no network functionality.
 - **Privacy.** Your files and what Mori learns about them stay on your computer. No account, login, cloud service, telemetry, analytics or remote processing. **Privacy & Local Data** lists everything Mori stores, with sizes, and clears it selectively or resets Mori entirely.
 - **Security.** Mori treats every file as untrusted input:
   - the content decides what a file is, never the extension;
-  - decoding happens in a separate worker process that the OS sandbox denies file and network access, and only re-encoded copies reach the interface;
+  - image decoding happens in a separate process with no network access on macOS. Standalone workers cannot access user files or write files; the Store XPC decoder has a private writable container but no access grants to user folders. Only validated, re-encoded image previews reach the interface;
   - archives are listed, never extracted;
   - links are never followed.
-- **Offline.** Browsing, search, previews, analyses, metadata, checksums and integrity checks all work without an internet connection. The interface's Content-Security-Policy refuses every remote origin, and the decoder workers are denied network access by the OS sandbox. The main process has no network code, but it isn't sandboxed from the network: this is a property of the code, not an OS-enforced barrier.
+- **Offline.** Browsing, search, previews, analyses, metadata, checksums and integrity checks all work without an internet connection. The interface's Content-Security-Policy refuses every remote origin, and the decoder workers are denied network access by the OS sandbox. The Store host has the outgoing-network entitlement required to start WebKit, so its offline processing is not an OS-enforced network prohibition. This permission is not granted to the decoder.
 - **Ephemeral inspection.** **Temporary Session** and **Private Inspection** keep everything they produce in memory, refuse to save records, and clear it all when the session ends. An automated test checks that a session leaves nothing in Mori's own data.
 
 **Diagnostics** shows which of these protections are verified on your installation right now. It runs a self-test on synthetic files and shows no hard-coded check marks.

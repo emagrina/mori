@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 /// Bump to invalidate every cached thumbnail.
-const CACHE_VERSION: &str = "v2";
+// v3 discards misses poisoned by the former Store fail-fast admission.
+const CACHE_VERSION: &str = "v3";
 
 /// 64-bit FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
 pub fn fnv(data: &[u8]) -> u64 {

@@ -5,7 +5,9 @@
 //! symlinks, and file types are decided from magic bytes, not extensions.
 
 use serde::Serialize;
-use std::fs::{self, File, Metadata, OpenOptions};
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -21,6 +23,14 @@ pub enum OpenError {
 /// Open `rel` (a path taken from the index) strictly inside `root`.
 /// `root` must already be canonical.
 pub fn open_inside(root: &Path, rel: &str) -> Result<(File, Metadata, PathBuf), OpenError> {
+    open_inside_checked(root, rel, || {})
+}
+
+fn open_inside_checked(
+    root: &Path,
+    rel: &str,
+    before_open: impl FnOnce(),
+) -> Result<(File, Metadata, PathBuf), OpenError> {
     let rel_path = Path::new(rel);
     if rel.is_empty() || rel_path.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(OpenError::Invalid);
@@ -30,15 +40,19 @@ pub fn open_inside(root: &Path, rel: &str) -> Result<(File, Metadata, PathBuf), 
     if !canon.starts_with(root) {
         return Err(OpenError::Outside);
     }
+    before_open();
+    #[cfg(not(unix))]
     let mut opts = OpenOptions::new();
+    #[cfg(not(unix))]
     opts.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Never follow a symlink swapped in after canonicalisation, and never
-        // block on FIFOs / device nodes.
-        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
+    let file = {
+        let parent = unix::Dir::open(canon.parent().ok_or(OpenError::Invalid)?).map_err(|_| OpenError::Outside)?;
+        parent
+            .file(canon.file_name().ok_or(OpenError::Invalid)?, libc::O_RDONLY | libc::O_NONBLOCK, 0)
+            .map_err(|_| OpenError::NotFound)?
+    };
+    #[cfg(not(unix))]
     let file = opts.open(&canon).map_err(|_| OpenError::NotFound)?;
     let meta = file.metadata().map_err(|_| OpenError::NotFound)?;
     if !meta.is_file() {
@@ -299,5 +313,230 @@ mod tests {
         assert_eq!(open_inside(&root, "escape/secret.txt").unwrap_err(), OpenError::Outside);
         assert_eq!(open_inside(&root, "sub").unwrap_err(), OpenError::NotRegular);
         fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+/// Descriptor-relative Unix traversal. Every ancestor is opened without following
+/// links; subsequent operations keep the directory alive even if its name moves.
+#[cfg(unix)]
+pub(crate) mod unix {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::{OsStrExt, OsStringExt},
+    };
+    use std::{
+        ffi::{CStr, CString, OsStr, OsString},
+        fs::File,
+        io,
+        path::{Component, Path},
+    };
+
+    pub struct Dir(pub File);
+    fn c(name: &OsStr) -> io::Result<CString> {
+        if name.as_bytes().contains(&b'/') || name == "." || name == ".." || name.is_empty() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        CString::new(name.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    }
+    fn result(rc: libc::c_int) -> io::Result<()> {
+        if rc == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    fn owned(fd: libc::c_int) -> io::Result<File> {
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+    // Traverse ancestors without asking to enumerate directories outside a picker
+    // grant. Each child still uses O_NOFOLLOW; actual reads retain sandbox checks.
+    #[cfg(target_os = "macos")]
+    const DIRECTORY_ACCESS: libc::c_int = libc::O_SEARCH;
+    #[cfg(not(target_os = "macos"))]
+    const DIRECTORY_ACCESS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
+
+    impl Dir {
+        pub fn open(path: &Path) -> io::Result<Self> {
+            if !path.is_absolute() {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            let mut dir = Self(owned(unsafe { libc::open(c"/".as_ptr(), DIRECTORY_ACCESS | libc::O_CLOEXEC) })?);
+            for part in path.components() {
+                match part {
+                    Component::RootDir => {}
+                    Component::Normal(name) => dir = dir.child(name)?,
+                    _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+                }
+            }
+            Ok(dir)
+        }
+        pub fn child(&self, name: &OsStr) -> io::Result<Self> {
+            Ok(Self(self.file(name, DIRECTORY_ACCESS, 0)?))
+        }
+        pub fn file(&self, name: &OsStr, flags: i32, mode: u32) -> io::Result<File> {
+            owned(unsafe {
+                libc::openat(
+                    self.0.as_raw_fd(),
+                    c(name)?.as_ptr(),
+                    flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    mode as libc::c_uint,
+                )
+            })
+        }
+        pub fn stat(&self, name: &OsStr) -> io::Result<libc::stat> {
+            let mut st = std::mem::MaybeUninit::uninit();
+            result(unsafe {
+                libc::fstatat(self.0.as_raw_fd(), c(name)?.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+            })?;
+            Ok(unsafe { st.assume_init() })
+        }
+        pub fn mkdir(&self, name: &OsStr) -> io::Result<Self> {
+            result(unsafe { libc::mkdirat(self.0.as_raw_fd(), c(name)?.as_ptr(), 0o700) })?;
+            self.child(name)
+        }
+        pub fn unlink(&self, name: &OsStr, directory: bool) -> io::Result<()> {
+            result(unsafe {
+                libc::unlinkat(self.0.as_raw_fd(), c(name)?.as_ptr(), if directory { libc::AT_REMOVEDIR } else { 0 })
+            })
+        }
+        pub fn names(&self) -> io::Result<Vec<OsString>> {
+            // Open a separate description: dup would share the enumeration offset.
+            let fd = unsafe {
+                libc::openat(self.0.as_raw_fd(), c".".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            };
+            let file = owned(fd)?;
+            use std::os::fd::IntoRawFd;
+            let raw = file.into_raw_fd();
+            let stream = unsafe { libc::fdopendir(raw) };
+            if stream.is_null() {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::close(raw);
+                }
+                return Err(error);
+            }
+            struct Stream(*mut libc::DIR);
+            impl Drop for Stream {
+                fn drop(&mut self) {
+                    unsafe {
+                        libc::closedir(self.0);
+                    }
+                }
+            }
+            let stream = Stream(stream);
+            let mut names = Vec::new();
+            loop {
+                // readdir reports EOF and errors with the same return value.
+                #[cfg(target_os = "macos")]
+                unsafe {
+                    *libc::__error() = 0;
+                }
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    *libc::__errno_location() = 0;
+                }
+                let ent = unsafe { libc::readdir(stream.0) };
+                if ent.is_null() {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error().unwrap_or(0) != 0 {
+                        return Err(error);
+                    }
+                    break;
+                }
+                let bytes = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+                if bytes != b"." && bytes != b".." {
+                    names.push(OsString::from_vec(bytes.to_vec()));
+                }
+            }
+            names.sort();
+            Ok(names)
+        }
+        pub fn read_link(&self, name: &OsStr) -> io::Result<OsString> {
+            let mut bytes = vec![0; 65536];
+            let n = unsafe {
+                libc::readlinkat(self.0.as_raw_fd(), c(name)?.as_ptr(), bytes.as_mut_ptr().cast(), bytes.len())
+            };
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if n as usize == bytes.len() {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            bytes.truncate(n as usize);
+            Ok(OsString::from_vec(bytes))
+        }
+        pub fn symlink(&self, name: &OsStr, target: &OsStr) -> io::Result<()> {
+            let target = CString::new(target.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+            result(unsafe { libc::symlinkat(target.as_ptr(), self.0.as_raw_fd(), c(name)?.as_ptr()) })
+        }
+        pub fn rename(&self, name: &OsStr, dest: &Self, new: &OsStr) -> io::Result<()> {
+            #[cfg(target_os = "macos")]
+            let rc = unsafe {
+                libc::renameatx_np(
+                    self.0.as_raw_fd(),
+                    c(name)?.as_ptr(),
+                    dest.0.as_raw_fd(),
+                    c(new)?.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            };
+            #[cfg(target_os = "linux")]
+            let rc = unsafe {
+                libc::renameat2(
+                    self.0.as_raw_fd(),
+                    c(name)?.as_ptr(),
+                    dest.0.as_raw_fd(),
+                    c(new)?.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            result(rc)
+        }
+    }
+    pub fn parent(path: &Path) -> io::Result<(Dir, &OsStr)> {
+        let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+        Ok((Dir::open(path.parent().ok_or_else(invalid)?)?, path.file_name().ok_or_else(invalid)?))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod boundary_regressions {
+    use super::*;
+    // Run this test from a signed sandboxed bundle placed below /Users. Its
+    // Resources are readable, but /Users itself must not be enumerated.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires signed sandbox bundle and synthetic Resources fixture"]
+    fn sandbox_bundle_preview_read() {
+        assert!(fs::read_dir("/Users").is_err());
+        let exe = std::env::current_exe().unwrap();
+        let root = fs::canonicalize(exe.parent().unwrap().parent().unwrap().join("Resources")).unwrap();
+        let (mut file, _, _) = open_inside(&root, "tiny.png").expect("authorized preview file");
+        assert!(sniff(&read_head(&mut file, SNIFF_LEN), "png").is_image());
+        assert!(open_inside(&root, "../Info.plist").is_err());
+    }
+
+    #[test]
+    fn rejects_ancestor_swap_after_canonicalization() {
+        let base =
+            fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("mori-read-swap-{}", std::process::id()));
+        fs::create_dir_all(base.join("root/album")).unwrap();
+        fs::create_dir_all(base.join("outside")).unwrap();
+        fs::write(base.join("root/album/photo.txt"), b"selected").unwrap();
+        fs::write(base.join("outside/photo.txt"), b"secret").unwrap();
+        let result = open_inside_checked(&base.join("root"), "album/photo.txt", || {
+            fs::rename(base.join("root/album"), base.join("original")).unwrap();
+            std::os::unix::fs::symlink(base.join("outside"), base.join("root/album")).unwrap();
+        });
+        assert!(result.is_err(), "must not open the replacement ancestor");
+        assert_eq!(fs::read(base.join("outside/photo.txt")).unwrap(), b"secret");
+        fs::remove_dir_all(base).unwrap();
     }
 }
